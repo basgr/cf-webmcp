@@ -4,6 +4,7 @@ export interface HealthOptions {
   configHash: string;
   schemaVersion: number;
   deployedAt: string;
+  preflight?: { ran_at: string | null; collisions: string[]; warnings: string[]; config_hash?: string };
 }
 
 /**
@@ -40,7 +41,7 @@ export function healthResponse(request: Request, config: Config, opts: HealthOpt
     schema_version: opts.schemaVersion,
     config_hash: opts.configHash,
     deployed_at: opts.deployedAt,
-    preflight: { ran_at: null, collisions: [], warnings: [] },
+    preflight: opts.preflight ?? { ran_at: null, collisions: [], warnings: [] },
     executors: config.tools.map((t) => ({ name: t.name, ok_24h: null, err_24h: null, p95_ms_24h: null })),
   };
   return new Response(JSON.stringify(body, null, 2), {

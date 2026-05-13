@@ -168,12 +168,30 @@ export async function runPreflight(configPath: string, force: boolean): Promise<
   console.log(`preflight  ${new URL(config.origin.base_url).host}  (token: ${deployToken ? "present" : "absent"})`);
 
   let hardCollisions = 0;
+  const collisions: string[] = [];
+  const warnings: string[] = [];
   for (const check of checks) {
     const outcome = await probe(check, deployToken);
     // eslint-disable-next-line no-console
     console.log(formatRow(check, outcome));
-    if (outcome.kind === "collision") hardCollisions++;
+    if (outcome.kind === "collision") {
+      hardCollisions++;
+      collisions.push(`${check.label}: ${outcome.reason}`);
+    } else if (outcome.kind === "merge" && !outcome.hasMarker) {
+      warnings.push(`${check.label}: merge marker absent at origin, will append on first deploy`);
+    } else if (outcome.kind === "error") {
+      warnings.push(`${check.label}: ${outcome.reason}`);
+    }
   }
+
+  // Persist the result so build-config.ts can embed it into the generated
+  // config module. The Worker surfaces this on /_webmcp/health.preflight.
+  await writePreflightResult({
+    ran_at: new Date().toISOString(),
+    collisions,
+    warnings,
+    config_hash: await computeCurrentConfigHash(absPath),
+  });
 
   // eslint-disable-next-line no-console
   console.log("");
@@ -190,6 +208,33 @@ export async function runPreflight(configPath: string, force: boolean): Promise<
   // eslint-disable-next-line no-console
   console.log(`preflight  ${hardCollisions} hard collision(s), exit non-zero. Override with --force.`);
   return 1;
+}
+
+async function writePreflightResult(result: {
+  ran_at: string;
+  collisions: string[];
+  warnings: string[];
+  config_hash: string;
+}): Promise<void> {
+  const outDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "generated");
+  await fs.mkdir(outDir, { recursive: true });
+  await fs.writeFile(path.join(outDir, "preflight.json"), JSON.stringify(result, null, 2) + "\n");
+}
+
+/**
+ * Compute the same hash that build-config.ts will use, so the embedded
+ * preflight result can be cross-checked against the active config at
+ * build time and flagged as stale on mismatch.
+ */
+async function computeCurrentConfigHash(tomlPath: string): Promise<string> {
+  const raw = await fs.readFile(tomlPath, "utf8");
+  const parsedToml = TOML.parse(raw) as Record<string, unknown>;
+  delete parsedToml["inherits"];
+  const parsed = ConfigSchema.safeParse(parsedToml);
+  if (!parsed.success) return "unknown";
+  const canonical = JSON.stringify(parsed.data);
+  const { createHash } = await import("node:crypto");
+  return createHash("sha256").update(canonical).digest("hex").slice(0, 8);
 }
 
 async function main(): Promise<void> {

@@ -6,7 +6,7 @@
  * to origin.
  */
 
-import { config, CONFIG_HASH, BOOTSTRAP_ASSET, WIDGET_ASSET } from "./generated/config";
+import { config, CONFIG_HASH, BOOTSTRAP_ASSET, WIDGET_ASSET, BUILD_AT, PREFLIGHT } from "./generated/config";
 import { BOOTSTRAP_JS as bootstrapJs, LANDING_HTML as landingHtml, MANIFEST_JSON as manifestJson } from "./generated/assets";
 
 import { matchRoute } from "./router";
@@ -28,7 +28,11 @@ export interface Env {
   CF_WEBMCP_HEALTH_TOKEN?: string;
 }
 
-const DEPLOYED_AT = new Date().toISOString();
+// Build-time timestamp from the generated config. We cannot call
+// `new Date().toISOString()` at module-init because Cloudflare Workers
+// freeze Date.now() to 0 during cold-start (returns 1970-01-01). The
+// generated module embeds the real build timestamp instead.
+const DEPLOYED_AT = BUILD_AT;
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -59,6 +63,7 @@ export default {
           configHash: CONFIG_HASH,
           schemaVersion: config.schema_version,
           deployedAt: DEPLOYED_AT,
+          preflight: PREFLIGHT,
         });
       case "llms_txt":
         return llmsTxtResponse(request, config, (u) => proxyToOrigin(u, env));
