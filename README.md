@@ -1,5 +1,7 @@
 # cf-webmcp
 
+[![CI](https://github.com/basgr/cf-webmcp/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/basgr/cf-webmcp/actions/workflows/ci.yml) [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 A Cloudflare Worker that sits in front of a website and equips it with [WebMCP](https://github.com/webmachinelearning/webmcp). One TOML file in, every WebMCP-aware browser sees the site's tools out.
 
 > Not affiliated with Cloudflare. The `cf-` prefix only reflects that the project runs exclusively on Cloudflare primitives - this is not an official Cloudflare product.
