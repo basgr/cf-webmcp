@@ -19,6 +19,7 @@ import { widgetResponse } from "./routes/widget";
 import { llmsTxtResponse } from "./routes/llms-txt";
 import { robotsTxtResponse } from "./routes/robots-txt";
 import { agentsMdResponse, agentsMdRedirect } from "./routes/agents-md";
+import { apiCatalogResponse } from "./routes/api-catalog";
 import { formsForPath, injectIntoHtml, shouldInject } from "./injection/html-rewriter";
 
 export interface Env {
@@ -67,6 +68,8 @@ export default {
         return agentsMdResponse(request, config, (u) => proxyToOrigin(u, env));
       case "agents_md_redirect":
         return agentsMdRedirect(config);
+      case "api_catalog":
+        return apiCatalogResponse(request, config, (u) => proxyToOrigin(u, env));
       case "proxy":
         return proxyAndMaybeInject(request, env);
     }

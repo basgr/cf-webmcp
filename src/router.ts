@@ -18,6 +18,7 @@ export interface RouteMatch {
     | "robots_txt"
     | "agents_md"
     | "agents_md_redirect"
+    | "api_catalog"
     | "proxy";
   /** Only set for exec routes. */
   toolName?: string;
@@ -81,6 +82,15 @@ export function matchRoute(config: Config, url: URL, bootstrapAsset: string, wid
     if (config.agents_md.aliases.includes(pathname)) {
       return { kind: "agents_md_redirect" };
     }
+  }
+
+  // RFC 9727 API Catalog
+  if (
+    config.features.api_catalog &&
+    config.api_catalog.mode !== "passthrough" &&
+    pathname === config.api_catalog.path
+  ) {
+    return { kind: "api_catalog" };
   }
 
   return { kind: "proxy" };

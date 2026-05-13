@@ -1,0 +1,13 @@
+{
+  "linkset": [
+    {
+      "anchor": "https://example.com/api/v1",
+      "service-desc": [
+        {
+          "href": "https://example.com/api/v1/openapi.json",
+          "type": "application/openapi+json"
+        }
+      ]
+    }
+  ]
+}

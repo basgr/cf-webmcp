@@ -155,6 +155,7 @@ interface Manifest {
     landing: string;
     bootstrap: string;
     health: string;
+    api_catalog?: string;
   };
   generated_at: string;
   config_hash: string;
@@ -187,6 +188,9 @@ function buildManifest(config: Config, configHash: string, bootstrapName: string
       landing: `${base}${config.webmcp_landing.path}`,
       bootstrap: `${base}${ns}/${bootstrapName}`,
       health: `${base}${ns}/health`,
+      ...(config.features.api_catalog && config.api_catalog.mode !== "passthrough"
+        ? { api_catalog: `${base}${config.api_catalog.path}` }
+        : {}),
     },
     generated_at: new Date().toISOString(),
     config_hash: configHash,

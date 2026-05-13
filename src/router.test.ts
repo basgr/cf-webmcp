@@ -13,13 +13,13 @@ const baseConfig: Config = {
     link_header: true,
     link_tag: true,
     llms_txt: true,
-    robots_txt: true, agents_md: true,
+    robots_txt: true, agents_md: true, api_catalog: true,
     fallback_widget: true,
   },
   manifest: { path: "/.well-known/webmcp.json" },
   webmcp_landing: { path: "/mcp" },
   llms_txt: { path: "/llms.txt", mode: "merge" },
-  robots_txt: { path: "/robots.txt", mode: "merge" }, agents_md: { path: "/.well-known/agents.md", mode: "merge", aliases: ["/AGENTS.md", "/agents.md"] },
+  robots_txt: { path: "/robots.txt", mode: "merge" }, agents_md: { path: "/.well-known/agents.md", mode: "merge", aliases: ["/AGENTS.md", "/agents.md"] }, api_catalog: { path: "/.well-known/api-catalog", mode: "merge" },
   paths: { namespace: "/_webmcp" },
   injection: { exclude_paths: [] },
   cache: {
@@ -31,7 +31,7 @@ const baseConfig: Config = {
     llms_txt_max_age: 300,
     llms_txt_s_maxage: 3600, llms_txt_swr: 86400, llms_txt_sie: 86400,
     robots_txt_max_age: 300,
-    robots_txt_s_maxage: 3600, robots_txt_swr: 86400, robots_txt_sie: 86400, agents_md_max_age: 300, agents_md_s_maxage: 21600, agents_md_swr: 86400, agents_md_sie: 86400, agents_md_redirect_max_age: 86400, agents_md_redirect_s_maxage: 604800,
+    robots_txt_s_maxage: 3600, robots_txt_swr: 86400, robots_txt_sie: 86400, agents_md_max_age: 300, agents_md_s_maxage: 21600, agents_md_swr: 86400, agents_md_sie: 86400, agents_md_redirect_max_age: 86400, agents_md_redirect_s_maxage: 604800, api_catalog_max_age: 300, api_catalog_s_maxage: 21600, api_catalog_swr: 86400, api_catalog_sie: 86400,
     bootstrap_max_age: 31536000,
     widget_max_age: 31536000,
     executor_defaults: { max_age: 0, s_maxage: 300, swr: 1800, sie: 86400 },
@@ -124,6 +124,17 @@ describe("matchRoute", () => {
     const off = { ...baseConfig, features: { ...baseConfig.features, agents_md: false } };
     expect(matchRoute(off, url("/.well-known/agents.md"), BOOTSTRAP, WIDGET).kind).toBe("proxy");
     expect(matchRoute(off, url("/AGENTS.md"), BOOTSTRAP, WIDGET).kind).toBe("proxy");
+  });
+
+  it("routes the api-catalog path when feature on", () => {
+    expect(matchRoute(baseConfig, url("/.well-known/api-catalog"), BOOTSTRAP, WIDGET).kind).toBe("api_catalog");
+  });
+
+  it("does not route api-catalog when feature off or mode passthrough", () => {
+    const off = { ...baseConfig, features: { ...baseConfig.features, api_catalog: false } };
+    expect(matchRoute(off, url("/.well-known/api-catalog"), BOOTSTRAP, WIDGET).kind).toBe("proxy");
+    const passthrough = { ...baseConfig, api_catalog: { ...baseConfig.api_catalog, mode: "passthrough" as const } };
+    expect(matchRoute(passthrough, url("/.well-known/api-catalog"), BOOTSTRAP, WIDGET).kind).toBe("proxy");
   });
 
   it("falls through to proxy for unrelated paths", () => {

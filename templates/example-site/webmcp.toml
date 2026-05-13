@@ -1,0 +1,137 @@
+# :schema https://raw.githubusercontent.com/basgr/cf-webmcp/main/schemas/webmcp.schema.json
+#
+# Example-site config used by `npm run dev` for local testing.
+# Origin is a tiny Node static server at http://localhost:8081 (see scripts/dev-origin.ts).
+# Worker runs on http://localhost:8787 via `wrangler dev`.
+
+schema_version = 1
+
+[site]
+domain      = "localhost:8787"
+name        = "Example Site"
+description = "Static fixture used by cf-webmcp local dev."
+locale      = "en"
+public_url  = "http://localhost:8787"
+
+[origin]
+base_url        = "http://localhost:8081"
+allowed_origins = ["http://localhost:8081"]
+forward_cookies = false
+
+[features]
+inject_html      = true
+webmcp_landing   = true
+manifest         = true
+link_header      = true
+link_tag         = true
+llms_txt         = true
+robots_txt       = true
+agents_md        = true
+api_catalog      = true
+fallback_widget  = false   # local dev does not have R2 widget ready
+
+[manifest]
+path = "/.well-known/webmcp.json"
+
+[webmcp_landing]
+path = "/mcp"
+
+[llms_txt]
+path = "/llms.txt"
+mode = "merge"
+
+[robots_txt]
+path = "/robots.txt"
+mode = "merge"
+
+[agents_md]
+path    = "/.well-known/agents.md"
+mode    = "merge"
+aliases = ["/AGENTS.md", "/agents.md"]
+
+[api_catalog]
+path = "/.well-known/api-catalog"
+mode = "merge"   # uses templates/example-site/origin/.well-known/api-catalog as a test fixture
+
+[paths]
+namespace = "/_webmcp"
+
+[injection]
+exclude_paths = []
+
+[cache]
+manifest_max_age     = 60
+manifest_s_maxage    = 60
+manifest_swr         = 60
+landing_max_age      = 60
+landing_s_maxage     = 60
+llms_txt_max_age     = 60
+llms_txt_s_maxage    = 60
+robots_txt_max_age   = 60
+robots_txt_s_maxage  = 60
+bootstrap_max_age    = 60
+widget_max_age       = 60
+
+[cache.executor_defaults]
+max_age  = 0
+s_maxage = 10
+swr      = 60
+sie      = 60
+
+[cors]
+allowed_origins = []
+
+[health]
+public = true
+token  = ""
+
+[dev]
+origin = "http://localhost:8081"
+
+[[tools]]
+name        = "search_pages"
+description = "Search the example site by keyword. Returns matching URLs."
+
+  [tools.input_schema]
+  type     = "object"
+  required = ["query"]
+
+    [tools.input_schema.properties.query]
+    type        = "string"
+    description = "Search keyword."
+
+  [tools.executor]
+  type        = "sitemap_filter"
+  sitemap_url = "http://localhost:8081/sitemap.xml"
+  max_results = 20
+
+[[tools]]
+name        = "list_posts"
+description = "List recent blog posts from the fixture feed."
+
+  [tools.input_schema]
+  type = "object"
+
+  [tools.executor]
+  type      = "rss_feed"
+  feed_url  = "http://localhost:8081/feed.xml"
+  max_items = 10
+
+[[tools]]
+name        = "get_page"
+description = "Fetch the readable content of a page by its path."
+
+  [tools.input_schema]
+  type     = "object"
+  required = ["path"]
+
+    [tools.input_schema.properties.path]
+    type    = "string"
+    pattern = "^/[^?#]*$"
+
+  [tools.executor]
+  type         = "dom_extract"
+  url_template = "http://localhost:8081{{path}}"
+  selector     = "main, article"
+  strip        = ["nav", "footer", "aside", "script", "style"]
+  max_chars    = 4000

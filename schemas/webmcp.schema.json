@@ -93,6 +93,14 @@
               "type": "boolean",
               "default": true
             },
+            "agents_md": {
+              "type": "boolean",
+              "default": true
+            },
+            "api_catalog": {
+              "type": "boolean",
+              "default": true
+            },
             "fallback_widget": {
               "type": "boolean",
               "default": true
@@ -118,7 +126,10 @@
           "properties": {
             "path": {
               "$ref": "#/definitions/WebMCPConfig/properties/manifest/properties/path",
-              "default": "/mcp/"
+              "default": "/mcp"
+            },
+            "template": {
+              "type": "string"
             }
           },
           "additionalProperties": false,
@@ -157,6 +168,58 @@
               "enum": [
                 "merge",
                 "passthrough"
+              ],
+              "default": "merge"
+            }
+          },
+          "additionalProperties": false,
+          "default": {}
+        },
+        "agents_md": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "$ref": "#/definitions/WebMCPConfig/properties/manifest/properties/path",
+              "default": "/.well-known/agents.md"
+            },
+            "mode": {
+              "type": "string",
+              "enum": [
+                "merge",
+                "replace",
+                "passthrough",
+                "synthesize"
+              ],
+              "default": "merge"
+            },
+            "aliases": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/WebMCPConfig/properties/manifest/properties/path"
+              },
+              "default": [
+                "/AGENTS.md",
+                "/agents.md"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "default": {}
+        },
+        "api_catalog": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "$ref": "#/definitions/WebMCPConfig/properties/manifest/properties/path",
+              "default": "/.well-known/api-catalog"
+            },
+            "mode": {
+              "type": "string",
+              "enum": [
+                "merge",
+                "replace",
+                "passthrough",
+                "synthesize"
               ],
               "default": "merge"
             }
@@ -207,12 +270,27 @@
               "minimum": 0,
               "default": 604800
             },
+            "manifest_sie": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 86400
+            },
             "landing_max_age": {
               "type": "integer",
               "minimum": 0,
               "default": 300
             },
             "landing_s_maxage": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 86400
+            },
+            "landing_swr": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 86400
+            },
+            "landing_sie": {
               "type": "integer",
               "minimum": 0,
               "default": 86400
@@ -225,7 +303,17 @@
             "llms_txt_s_maxage": {
               "type": "integer",
               "minimum": 0,
-              "default": 3600
+              "default": 21600
+            },
+            "llms_txt_swr": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 86400
+            },
+            "llms_txt_sie": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 86400
             },
             "robots_txt_max_age": {
               "type": "integer",
@@ -235,7 +323,67 @@
             "robots_txt_s_maxage": {
               "type": "integer",
               "minimum": 0,
-              "default": 3600
+              "default": 21600
+            },
+            "robots_txt_swr": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 86400
+            },
+            "robots_txt_sie": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 86400
+            },
+            "agents_md_max_age": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 300
+            },
+            "agents_md_s_maxage": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 21600
+            },
+            "agents_md_swr": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 86400
+            },
+            "agents_md_sie": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 86400
+            },
+            "agents_md_redirect_max_age": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 86400
+            },
+            "agents_md_redirect_s_maxage": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 604800
+            },
+            "api_catalog_max_age": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 300
+            },
+            "api_catalog_s_maxage": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 21600
+            },
+            "api_catalog_swr": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 86400
+            },
+            "api_catalog_sie": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 86400
             },
             "bootstrap_max_age": {
               "type": "integer",
@@ -649,6 +797,68 @@
             "additionalProperties": false
           },
           "minItems": 1
+        },
+        "forms": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64,
+                "pattern": "^[a-z][a-z0-9_]*$"
+              },
+              "description": {
+                "type": "string",
+                "minLength": 1
+              },
+              "selector": {
+                "type": "string",
+                "minLength": 1
+              },
+              "paths": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "default": []
+              },
+              "autosubmit": {
+                "type": "boolean",
+                "default": false
+              },
+              "params": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "selector": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "description": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "required": [
+                    "selector",
+                    "description"
+                  ],
+                  "additionalProperties": false
+                },
+                "default": []
+              }
+            },
+            "required": [
+              "name",
+              "description",
+              "selector"
+            ],
+            "additionalProperties": false
+          },
+          "default": []
         }
       },
       "required": [

@@ -60,7 +60,12 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     const ext = path.extname(servedPath).toLowerCase();
-    const ct = TYPES[ext] ?? "application/octet-stream";
+    // Special case for RFC 9727 well-known catalog: the convention is an
+    // extensionless filename, content-type application/linkset+json.
+    const wellKnownCatalog = servedPath.replace(/\\/g, "/").endsWith("/.well-known/api-catalog");
+    const ct = wellKnownCatalog
+      ? "application/linkset+json"
+      : (TYPES[ext] ?? "application/octet-stream");
     res.writeHead(200, { "content-type": ct, "cache-control": "no-store" });
     res.end(body);
   } catch (e) {

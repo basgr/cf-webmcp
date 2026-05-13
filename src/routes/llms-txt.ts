@@ -72,6 +72,7 @@ function buildBlock(config: Config): string {
   const landing = `${base}${config.webmcp_landing.path}`;
   const manifest = `${base}${config.manifest.path}`;
   const agentsMd = `${base}${config.agents_md.path}`;
+  const apiCatalog = `${base}${config.api_catalog.path}`;
   const lines: string[] = [
     `## WebMCP`,
     ``,
@@ -82,6 +83,9 @@ function buildBlock(config: Config): string {
   ];
   if (config.features.agents_md && config.agents_md.mode !== "passthrough") {
     lines.push(`- Agent instructions: [${agentsMd}](${agentsMd})`);
+  }
+  if (config.features.api_catalog && config.api_catalog.mode !== "passthrough") {
+    lines.push(`- API catalog (RFC 9727): [${apiCatalog}](${apiCatalog})`);
   }
   lines.push(``, `### Tools`, ``);
   for (const t of config.tools) {

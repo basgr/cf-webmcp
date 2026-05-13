@@ -15,3 +15,7 @@ internal/
 # wrangler.*.toml files in the repo are templates / dev scaffolding only.
 wrangler.toml
 webmcp.toml
+
+# Exception: the example-site config is a checked-in fixture used by
+# `npm run dev` against the bundled static origin. Not a publisher deploy.
+!templates/example-site/webmcp.toml

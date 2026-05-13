@@ -10,7 +10,7 @@ A Cloudflare Worker that sits in front of a website and equips it with [WebMCP](
 
 For each request:
 
-- If the request matches a Worker-owned path (manifest, `/mcp` landing, `/_webmcp/exec/*`, `/_webmcp/health`, `/llms.txt`, `/robots.txt`, `/.well-known/agents.md` and its 301 aliases), the Worker handles it directly.
+- If the request matches a Worker-owned path (manifest, `/mcp` landing, `/_webmcp/exec/*`, `/_webmcp/health`, `/llms.txt`, `/robots.txt`, `/.well-known/agents.md` and its 301 aliases, `/.well-known/api-catalog`), the Worker handles it directly.
 - Otherwise the Worker proxies to origin. On the way back, two modifications happen:
   - **HTTP `Link: <...>; rel="webmcp"` header is added to every proxied response**, regardless of body type (HTML, PDF, image, JSON, etc.). Agents that only do a `HEAD` request can find the manifest without parsing the body.
   - **On HTML responses only** (status 200, `text/html`, UTF-8, path not in `[injection].exclude_paths`), HTMLRewriter additionally injects one `<link rel="webmcp">` into `<head>` and one `<script src="/_webmcp/bootstrap.<hash>.js" defer>` before `</body>`. If a `[[forms]]` block matches the current path, the W3C declarative form attributes (`toolname`, `tooldescription`, `toolparamdescription`, `toolautosubmit`) are also stamped onto matching forms. Non-HTML responses (PDFs, images, JSON, CSS, JS, etc.) pass through with their body unchanged.
@@ -27,6 +27,7 @@ cf-webmcp publishes the same tool catalogue through multiple complementary surfa
 - `/llms.txt` augmented with a WebMCP block (idempotent merge with origin's file)
 - `/robots.txt` augmented with `Disallow: /_webmcp/` (idempotent merge)
 - `/.well-known/agents.md` for acting agents, with `/AGENTS.md` and `/agents.md` 301-redirecting to it
+- `/.well-known/api-catalog` ([RFC 9727](https://www.rfc-editor.org/rfc/rfc9727.html)) Linkset entry pointing at the WebMCP manifest
 - `/mcp` landing page that branches at runtime between native, pair, and disabled states
 
 Plus five executor types (`sitemap_filter`, `rss_feed`, `dom_extract`, `http_json`, `http_get`) for the imperative tool path, and a `[[forms]]` block for the declarative form path.

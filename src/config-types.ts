@@ -152,6 +152,7 @@ const Features = z.object({
   llms_txt: z.boolean().default(true),
   robots_txt: z.boolean().default(true),
   agents_md: z.boolean().default(true),
+  api_catalog: z.boolean().default(true),
   fallback_widget: z.boolean().default(true),
 });
 
@@ -190,6 +191,18 @@ const AgentsMdBlock = z.object({
   aliases: z.array(PathString).default(["/AGENTS.md", "/agents.md"]),
 });
 
+/**
+ * RFC 9727 API Catalog. Publishes a Linkset (RFC 9264) entry pointing at the
+ * WebMCP manifest at the well-known catalog path. The catalog format itself
+ * defines no API schema; cf-webmcp emits exactly one entry (rel="webmcp")
+ * pointing at config.manifest.path. Publishers wanting to advertise other
+ * APIs in the same catalog use merge mode and put them in their origin file.
+ */
+const ApiCatalogBlock = z.object({
+  path: PathString.default("/.well-known/api-catalog"),
+  mode: z.enum(["merge", "replace", "passthrough", "synthesize"]).default("merge"),
+});
+
 const PathsBlock = z.object({
   namespace: PathString.default("/_webmcp"),
 });
@@ -222,6 +235,10 @@ const CacheBlock = z.object({
   /** 301 redirect from aliases to canonical agents.md path. Stable, so cache aggressively. */
   agents_md_redirect_max_age: z.number().int().nonnegative().default(86_400),
   agents_md_redirect_s_maxage: z.number().int().nonnegative().default(604_800),
+  api_catalog_max_age: z.number().int().nonnegative().default(300),
+  api_catalog_s_maxage: z.number().int().nonnegative().default(21_600),
+  api_catalog_swr: z.number().int().nonnegative().default(86_400),
+  api_catalog_sie: z.number().int().nonnegative().default(86_400),
   bootstrap_max_age: z.number().int().nonnegative().default(31_536_000),
   widget_max_age: z.number().int().nonnegative().default(31_536_000),
   executor_defaults: z
@@ -296,6 +313,7 @@ export const ConfigSchema = z.object({
   llms_txt: LlmsTxtBlock.default({}),
   robots_txt: RobotsTxtBlock.default({}),
   agents_md: AgentsMdBlock.default({}),
+  api_catalog: ApiCatalogBlock.default({}),
   paths: PathsBlock.default({}),
   injection: InjectionBlock.default({}),
   cache: CacheBlock.default({}),
