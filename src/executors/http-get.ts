@@ -96,5 +96,5 @@ export async function readWithLimit(
     merged.set(c, offset);
     offset += c.byteLength;
   }
-  return { ok: true, text: new TextDecoder("utf-8", { fatal: false }).decode(merged) };
+  return { ok: true, text: new TextDecoder("utf-8", { fatal: false, ignoreBOM: false }).decode(merged) };
 }

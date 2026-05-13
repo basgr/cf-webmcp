@@ -49,6 +49,7 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
         executor: { type: "sitemap_filter", sitemap_url: "https://example.com/sitemap.xml", max_results: 20 },
       },
     ],
+    forms: [],
     ...overrides,
   };
 }

@@ -42,6 +42,7 @@ function makeConfig(): Config {
     dev: { origin: "http://localhost:8080" },
     rate_limit: { requests_per_minute_per_ip: 60 },
     tools: [],
+    forms: [],
   };
 }
 

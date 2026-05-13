@@ -48,6 +48,7 @@ const baseConfig: Config = {
       executor: { type: "sitemap_filter", sitemap_url: "https://example.com/sitemap.xml", max_results: 20 },
     },
   ],
+  forms: [],
 };
 
 const BOOTSTRAP = "bootstrap.abc12345.js";
