@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Install - cf-webmcp</title>
+<meta name="description" content="Deploy cf-webmcp on your own Cloudflare account in under five minutes.">
+<link rel="canonical" href="https://example.com/webmcp/install">
+<link rel="icon" type="image/svg+xml" href="favicon.svg">
+<link rel="stylesheet" href="css/styles.css">
+<meta name="theme-color" content="#16a34a">
+<meta property="og:type" content="article">
+<meta property="og:title" content="Install cf-webmcp">
+<meta property="og:description" content="Deploy cf-webmcp on your own Cloudflare account in under five minutes.">
+<meta property="og:url" content="https://example.com/webmcp/install">
+<meta property="og:image" content="https://example.com/webmcp/og.svg">
+<meta name="twitter:card" content="summary_large_image">
+</head>
+<body>
+
+<header class="site">
+  <a class="brand" href="."><svg class="brand-icon" viewBox="0 0 64 64" aria-hidden="true"><rect width="64" height="64" rx="14" fill="#16a34a"/><text x="32" y="46" text-anchor="middle" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="40" font-weight="700" fill="#fff">w</text></svg><span>cf-webmcp</span></a>
+  <nav>
+    <a href=".">Home</a>
+    <a href="about">About</a>
+    <a href="install" aria-current="page">Install</a>
+    <a href="docs">Docs</a>
+    <a href="forms">Forms</a>
+    <a href="https://github.com/basgr/cf-webmcp">GitHub</a>
+  </nav>
+</header>
+
+<main>
+
+  <div class="hero">
+    <div class="eyebrow">Install</div>
+    <h1>Five minutes to deploy.</h1>
+    <p class="lead">Fork the repo, fill in one TOML file, and run <code>wrangler deploy</code>. No SDK install on your site, no plugin in your CMS.</p>
+  </div>
+
+  <h2>1. Clone</h2>
+  <pre><code>git clone https://github.com/basgr/cf-webmcp
+cd cf-webmcp
+npm install</code></pre>
+
+  <h2>2. Pick a template</h2>
+  <p>Three starters ship:</p>
+  <ul>
+    <li><code>templates/default.toml</code> - generic site (sitemap + RSS + dom_extract).</li>
+    <li><code>templates/wordpress.toml</code> - WordPress core REST endpoints.</li>
+    <li><code>templates/woocommerce.toml</code> - WooCommerce Store API on top of WordPress.</li>
+  </ul>
+  <pre><code>cp templates/wordpress.toml webmcp.toml
+cp wrangler.example.toml wrangler.toml</code></pre>
+
+  <h2>3. Edit</h2>
+  <p>Open <code>webmcp.toml</code> and set:</p>
+  <ul>
+    <li><code>[site].domain</code> - your domain.</li>
+    <li><code>[origin].base_url</code> - your origin URL.</li>
+    <li><code>[origin].allowed_origins</code> - list of origins executors may fetch (usually just your origin).</li>
+    <li>Tool URLs in each <code>[[tools]]</code> block.</li>
+  </ul>
+  <p>Open <code>wrangler.toml</code> and set the route for your domain.</p>
+
+  <h2>4. Preflight</h2>
+  <pre><code>npm run preflight -- --config=webmcp.toml</code></pre>
+  <p>Reports OK / merge / COLLISION per path the Worker wants to claim. Exits non-zero on hard collisions unless you pass <code>--force</code>.</p>
+
+  <h2>5. Deploy</h2>
+  <pre><code>npm run deploy</code></pre>
+  <p>This chains <code>npm run build</code> (compiles TOML to TypeScript modules) and <code>wrangler deploy</code>. Hit <code>/_webmcp/health</code> on your domain to confirm the deploy landed.</p>
+
+  <h2>Verify</h2>
+  <p>After deploy, hit these URLs on your domain:</p>
+  <ul>
+    <li><code>/.well-known/webmcp.json</code> - the tool catalogue.</li>
+    <li><code>/mcp</code> - the auto-generated pairing/landing page.</li>
+    <li><code>/llms.txt</code> - your llms.txt with the WebMCP block appended.</li>
+    <li><code>/robots.txt</code> - your robots.txt with <code>Disallow: /_webmcp/</code> appended.</li>
+    <li><code>/.well-known/agents.md</code> - agent instructions in Markdown; <code>/AGENTS.md</code> and <code>/agents.md</code> 301 to here.</li>
+    <li><code>/_webmcp/health</code> - operational health JSON with the diagnostic and config hash.</li>
+  </ul>
+
+  <p class="muted">For local dev, see <a href="docs">the docs</a>.</p>
+
+</main>
+
+<footer class="site">
+  <div class="row">
+    <a href="https://github.com/basgr/cf-webmcp/blob/main/LICENSE">MIT licensed</a>
+    <a href="/.well-known/webmcp.json">Manifest</a>
+    <a href="/llms.txt">llms.txt</a>
+    <a href="/.well-known/agents.md">AGENTS.md</a>
+    <a href="/mcp">/mcp</a>
+  </div>
+  <div class="row">
+    <span>Not affiliated with Cloudflare (but I &#10084; them)</span>
+    <a href="https://basgr.io/bg">Made by Bastian Grimm</a>
+  </div>
+</footer>
+
+</body>
+</html>

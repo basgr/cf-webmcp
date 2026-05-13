@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Docs - cf-webmcp</title>
+<meta name="description" content="Reference documentation for cf-webmcp: configuration, executors, discovery surfaces, deployment, and operations.">
+<link rel="canonical" href="https://example.com/webmcp/docs">
+<link rel="icon" type="image/svg+xml" href="favicon.svg">
+<link rel="stylesheet" href="css/styles.css">
+<meta name="theme-color" content="#16a34a">
+<meta property="og:type" content="article">
+<meta property="og:title" content="cf-webmcp docs">
+<meta property="og:description" content="Reference documentation for cf-webmcp.">
+<meta property="og:url" content="https://example.com/webmcp/docs">
+<meta property="og:image" content="https://example.com/webmcp/og.svg">
+<meta name="twitter:card" content="summary_large_image">
+</head>
+<body>
+
+<header class="site">
+  <a class="brand" href="."><svg class="brand-icon" viewBox="0 0 64 64" aria-hidden="true"><rect width="64" height="64" rx="14" fill="#16a34a"/><text x="32" y="46" text-anchor="middle" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="40" font-weight="700" fill="#fff">w</text></svg><span>cf-webmcp</span></a>
+  <nav>
+    <a href=".">Home</a>
+    <a href="about">About</a>
+    <a href="install">Install</a>
+    <a href="docs" aria-current="page">Docs</a>
+    <a href="forms">Forms</a>
+    <a href="https://github.com/basgr/cf-webmcp">GitHub</a>
+  </nav>
+</header>
+
+<main>
+
+  <div class="hero">
+    <div class="eyebrow">Docs</div>
+    <h1>Documentation.</h1>
+    <p class="lead">Reference material lives in the public repo under <code>docs/</code>. Everything is also available offline in your local clone.</p>
+  </div>
+
+  <h2>Topics</h2>
+  <div class="cards">
+    <div class="card">
+      <h3><a href="https://github.com/basgr/cf-webmcp/blob/main/docs/local-testing.md">Local testing</a></h3>
+      <p>Run the full cf-webmcp stack on your laptop in two terminals: a static origin server plus the Worker via <code>wrangler dev</code>. Hit every surface end to end.</p>
+    </div>
+    <div class="card">
+      <h3><a href="https://github.com/basgr/cf-webmcp/blob/main/docs/deployment.md">Deployment</a></h3>
+      <p>Full proxy vs route-only modes, Bot Management bypass headers, preflight collision detection, the deploy flow from <code>wrangler login</code> to verifying config hash.</p>
+    </div>
+    <div class="card">
+      <h3><a href="https://github.com/basgr/cf-webmcp/blob/main/docs/costs.md">Costs</a></h3>
+      <p>Cloudflare Workers free vs paid tier math for small, medium, and high-traffic sites. R2 storage cost for the fallback widget. What to monitor and what to ignore.</p>
+    </div>
+    <div class="card">
+      <h3><a href="https://github.com/basgr/cf-webmcp/blob/main/docs/privacy.md">Privacy</a></h3>
+      <p>What the Worker logs (almost nothing by default), what travels to origin on executor fetches (no visitor cookies), and the GDPR posture for EU deployments.</p>
+    </div>
+    <div class="card">
+      <h3><a href="https://github.com/basgr/cf-webmcp/blob/main/docs/upgrade.md">Upgrade</a></h3>
+      <p>Schema version handling, tool-name immutability rule, the config hash rotation pattern, and how to update the vendored widget pin without breaking deploys.</p>
+    </div>
+    <div class="card">
+      <h3><a href="https://github.com/basgr/cf-webmcp/blob/main/docs/limitations.md">Limitations</a></h3>
+      <p>SPA route changes, multi-language sitemaps, service worker collisions, non-UTF-8 origins, and other v1 edges with documented workarounds where applicable.</p>
+    </div>
+    <div class="card">
+      <h3><a href="https://github.com/basgr/cf-webmcp/blob/main/docs/customisation.md">Customisation</a></h3>
+      <p>Replace the <code>/mcp</code> landing page with your own HTML template. Lists the seven <code>{{placeholder}}</code> variables, the override flow, and a fully-worked example.</p>
+    </div>
+    <div class="card">
+      <h3><a href="https://github.com/basgr/cf-webmcp/blob/main/docs/browser-support.md">Browser support</a></h3>
+      <p>WebMCP is behind <code>chrome://flags/#enable-webmcp-testing</code> as of mid-2026. Which flags to enable, how to verify the runtime, and the status of Firefox and Safari.</p>
+    </div>
+    <div class="card">
+      <h3><a href="https://github.com/basgr/cf-webmcp/blob/main/docs/form-injection.md">Form injection</a></h3>
+      <p>Stamp declarative WebMCP attributes (<code>toolname</code>, <code>tooldescription</code>, <code>toolparamdescription</code>, <code>toolautosubmit</code>) onto existing forms at the edge from one <code>[[forms]]</code> TOML block.</p>
+    </div>
+    <div class="card">
+      <h3><a href="https://github.com/basgr/cf-webmcp/blob/main/docs/agents-md.md">AGENTS.md</a></h3>
+      <p>Auto-publish <code>/.well-known/agents.md</code> describing your WebMCP surface to acting agents. Configurable canonical path, with 301 aliases for the two common variants.</p>
+    </div>
+  </div>
+
+  <h2>Reference</h2>
+  <ul>
+    <li><a href="https://github.com/basgr/cf-webmcp/blob/main/schemas/webmcp.schema.json">TOML schema (JSON Schema)</a> - drives VSCode autocomplete and validates your config.</li>
+    <li><a href="https://github.com/basgr/cf-webmcp/tree/main/templates">Templates</a> - the three starters with comments.</li>
+    <li><a href="https://github.com/webmachinelearning/webmcp">W3C WebMCP draft</a> - the upstream spec.</li>
+  </ul>
+
+  <h2>This site eats its own dogfood</h2>
+  <p>This site runs through <code>cf-webmcp</code>. Open <a href="/.well-known/webmcp.json">/.well-known/webmcp.json</a> to see the live tool catalogue. Open <a href="/mcp">/mcp</a> to pair a desktop MCP client. View source on any page and look for <code>&lt;link rel="webmcp"&gt;</code> in the <code>&lt;head&gt;</code>.</p>
+  <p>The HTTP <code>Link</code> header is the pre-parse equivalent of the link tag. Every response carries it, so an agent that only does a <code>HEAD</code> request can still find the manifest:</p>
+  <pre><code>curl -I https://example.com/webmcp/
+# ...
+# Link: &lt;https://example.com/webmcp/.well-known/webmcp.json&gt;; rel="webmcp"</code></pre>
+
+</main>
+
+<footer class="site">
+  <div class="row">
+    <a href="https://github.com/basgr/cf-webmcp/blob/main/LICENSE">MIT licensed</a>
+    <a href="/.well-known/webmcp.json">Manifest</a>
+    <a href="/llms.txt">llms.txt</a>
+    <a href="/.well-known/agents.md">AGENTS.md</a>
+    <a href="/mcp">/mcp</a>
+  </div>
+  <div class="row">
+    <span>Not affiliated with Cloudflare (but I &#10084; them)</span>
+    <a href="https://basgr.io/bg">Made by Bastian Grimm</a>
+  </div>
+</footer>
+
+</body>
+</html>

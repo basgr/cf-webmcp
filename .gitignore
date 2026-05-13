@@ -1,0 +1,17 @@
+node_modules/
+dist/
+.wrangler/
+.dev.vars
+src/generated/
+vendor/webmcp/*/webmcp.js
+*.log
+.DS_Store
+coverage/
+internal/
+
+# Publisher's real deploy config (created from wrangler.example.toml).
+# wrangler.toml typically contains the route patterns for the publisher's own
+# domain plus their account-id wiring; never commit it. The four committed
+# wrangler.*.toml files in the repo are templates / dev scaffolding only.
+wrangler.toml
+webmcp.toml

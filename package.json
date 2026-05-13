@@ -1,0 +1,46 @@
+{
+  "name": "cf-webmcp",
+  "version": "0.1.0",
+  "description": "WebMCP at the edge: a Cloudflare Worker that equips any website with WebMCP from a single TOML config.",
+  "license": "MIT",
+  "private": false,
+  "type": "module",
+  "scripts": {
+    "build": "tsx scripts/build-config.ts",
+    "build:schema": "tsx scripts/build-schema.ts",
+    "preflight": "tsx scripts/preflight.ts",
+    "update-widget": "tsx scripts/update-widget.ts",
+    "upload-widget": "tsx scripts/upload-widget.ts",
+    "dev:origin": "tsx scripts/dev-origin.ts",
+    "dev:worker": "cross-env CF_WEBMCP_CONFIG=templates/example-site/webmcp.toml npm run build && wrangler dev --config wrangler.dev.toml",
+    "dev:demo-origin": "cross-env ORIGIN_DIR=demo/site ORIGIN_PORT=8082 tsx scripts/dev-origin.ts",
+    "dev:demo-worker": "cross-env CF_WEBMCP_CONFIG=demo/webmcp.toml npm run build && wrangler dev --config wrangler.demo.toml",
+    "dev": "npm run build && wrangler dev",
+    "deploy": "npm run build && wrangler deploy",
+    "pretest": "cross-env CF_WEBMCP_CONFIG=templates/example-site/webmcp.toml npm run build",
+    "test": "vitest run --config vitest.config.ts && vitest run --config vitest.node.config.ts",
+    "test:workers": "vitest run --config vitest.config.ts",
+    "test:scripts": "vitest run --config vitest.node.config.ts",
+    "test:watch": "vitest",
+    "pretypecheck": "cross-env CF_WEBMCP_CONFIG=templates/example-site/webmcp.toml npm run build",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@iarna/toml": "^2.2.5",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.5.0",
+    "@cloudflare/workers-types": "^4.20240909.0",
+    "@types/node": "^22.0.0",
+    "cross-env": "^7.0.3",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0",
+    "wrangler": "^3.78.0",
+    "zod-to-json-schema": "^3.23.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

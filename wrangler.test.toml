@@ -1,0 +1,12 @@
+# Test-only Wrangler config used by vitest-pool-workers.
+# Does NOT deploy. Mirrors wrangler.example.toml minimally so tests can construct
+# a Worker environment with the same bindings shape.
+
+name = "cf-webmcp-test"
+main = "src/worker.ts"
+compatibility_date = "2024-09-23"
+compatibility_flags = ["nodejs_compat"]
+
+[[r2_buckets]]
+binding     = "CF_WEBMCP_ASSETS"
+bucket_name = "cf-webmcp-test-assets"

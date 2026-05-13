@@ -1,0 +1,9 @@
+# Example Site
+
+A static fixture site used by cf-webmcp local dev.
+
+## Pages
+- [/](http://localhost:8787/)
+- [/about](http://localhost:8787/about)
+- [/pricing](http://localhost:8787/pricing)
+- [/blog/hello-world](http://localhost:8787/blog/hello-world)

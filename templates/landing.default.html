@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="{{lang}}">
+<head>
+<meta charset="utf-8">
+<title>WebMCP - {{site_name}}</title>
+<meta name="robots" content="noindex">
+<style>
+body{font-family:system-ui,-apple-system,sans-serif;max-width:42rem;margin:2rem auto;padding:0 1rem;line-height:1.55;color:#18181b}
+code{background:#ebebed;color:#15803d;padding:0.15em 0.4em;border-radius:4px;font-size:0.88em;font-weight:500;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+pre{background:#ebebed;padding:0.9rem 1rem;border-radius:6px;overflow-x:auto;font-size:0.9em}
+pre code{background:none;color:#18181b;font-weight:normal;padding:0;font-size:1em}
+ul{padding-left:1.25rem}
+ol{padding-left:1.25rem}
+li{margin:0.3rem 0}
+h2{margin-top:2rem}
+h3{margin-top:1.25rem;font-size:1rem}
+.state{display:none}
+.state.active{display:block}
+.muted{color:#6b7280;font-size:0.9em}
+.intro{color:#374151}
+hr{border:none;border-top:1px solid #e5e7eb;margin:2.5rem 0}
+.callout{border-radius:6px;padding:1rem 1.25rem;margin:1.5rem 0;border-left:4px solid #e5e7eb}
+.callout h2{margin:0 0 0.4rem;font-size:1.2rem}
+.callout p{margin:0}
+.callout-success{background:rgba(22,163,74,0.08);border-left-color:#16a34a}
+.callout-success h2::before{content:"\2713";margin-right:0.5rem;color:#16a34a;font-weight:700}
+.callout-warning{background:rgba(220,38,38,0.07);border-left-color:#dc2626}
+.callout-warning h2::before{content:"\26A0";margin-right:0.5rem;color:#dc2626;font-weight:700}
+.callout-info{background:rgba(37,99,235,0.07);border-left-color:#2563eb}
+.callout-info h2::before{content:"\2139";margin-right:0.5rem;color:#2563eb;font-weight:700}
+.callout > h2{margin:0 0 0.4rem;font-size:1.2rem}
+.callout > *:first-child{margin-top:0}
+.callout > *:last-child{margin-bottom:0}
+@media (prefers-color-scheme: dark) {
+  body{background:#0b0b0c;color:#ededed}
+  code{background:#1c1c1f;color:#86efac}
+  pre{background:#1c1c1f}
+  pre code{color:#ededed}
+  .muted{color:#9ca3af}
+  .intro{color:#d4d4d8}
+  hr{border-top-color:#27272a}
+  .callout-success{background:rgba(74,222,128,0.10);border-left-color:#4ade80}
+  .callout-success h2::before{color:#4ade80}
+  .callout-warning{background:rgba(248,113,113,0.10);border-left-color:#f87171}
+  .callout-warning h2::before{color:#f87171}
+  .callout-info{background:rgba(96,165,250,0.10);border-left-color:#60a5fa}
+  .callout-info h2::before{color:#60a5fa}
+}
+</style>
+</head>
+<body>
+<h1>WebMCP for {{site_name}}</h1>
+<p class="intro">{{site_description}}</p>
+<p class="intro">This page is how AI agents connect to {{site_name}}. Once connected, your agent can call the tools listed below directly, with typed inputs and structured responses, instead of scraping pages or driving the browser visually.</p>
+
+<div id="state-native" class="state">
+  <div class="callout callout-success">
+    <h2>Connected</h2>
+    <p>This page detected WebMCP support in your browser (<code>navigator.modelContext</code>). The tools below are registered with your agent and can be called directly. No pairing needed.</p>
+  </div>
+</div>
+
+<div id="state-pair" class="state">
+  <div class="callout callout-info">
+    <h2>Pairing required</h2>
+    <p>Your browser does not expose WebMCP natively. A desktop MCP client (Claude Desktop, Cursor, Claude Code, Windsurf) can still reach this page's tools through a small localhost bridge. The bridge has two halves:</p>
+    <ul>
+      <li>A CLI you run in a terminal that opens a localhost MCP server and tells your client about it.</li>
+      <li>A widget on this page that opens a WebSocket to that local server and forwards tool calls.</li>
+    </ul>
+    <p>The widget itself is not your MCP client - it is the in-browser side of the wire. Three steps to pair:</p>
+    <ol>
+      <li>Install and start the localhost bridge. Run this in a terminal, replacing <code>claude</code> with <code>cursor</code>, <code>cline</code>, or <code>windsurf</code> as needed:
+        <pre>npx -y @jason.today/webmcp@latest --config claude</pre>
+      </li>
+      <li>In your MCP client, ask for a pairing token (or run the bridge's pairing command directly).</li>
+      <li>Paste the token into the widget below. The widget hands the connection to the bridge; from then on, your MCP client can list and call this site's tools. The token is single-use and discarded after pairing.</li>
+    </ol>
+    {{widget_block}}
+  </div>
+</div>
+
+<div id="state-disabled" class="state">
+  <div class="callout callout-warning">
+    <h2>Not connected</h2>
+    <p>Your browser does not expose WebMCP, and the fallback widget for desktop MCP clients is disabled on this site. You cannot pair from here right now.</p>
+    <p>If you are testing this site, you can enable browser-native WebMCP in Chrome or Edge by flipping a flag at <code>chrome://flags/#enable-webmcp-testing</code> and relaunching. If you are the site owner, set <code>fallback_widget = true</code> in <code>webmcp.toml</code> and redeploy to enable the desktop pairing flow.</p>
+  </div>
+</div>
+
+<h2>Tools available</h2>
+<ul>{{tool_list}}</ul>
+
+<hr>
+
+<h2>About WebMCP</h2>
+<p>WebMCP is a way for websites to expose structured tools that AI agents can call. There are two runtimes behind the same name, and they reach different agents.</p>
+<ul>
+  <li><strong>The W3C draft</strong> (<a href="https://github.com/webmachinelearning/webmcp"><code>webmachinelearning/webmcp</code></a>): a browser API at <code>navigator.modelContext</code>. Used by browser-native agents (Chromium 146+ with the flag, Cloudflare Browser Run lab sessions). No pairing needed; tools register automatically when the page loads. <strong>As of mid-2026 this is behind <code>chrome://flags/#enable-webmcp-testing</code></strong> in Chrome and Edge.</li>
+  <li><strong>The jasonjmcghee library</strong> (<a href="https://github.com/jasonjmcghee/WebMCP"><code>jasonjmcghee/WebMCP</code></a>): a localhost websocket bridge for desktop MCP clients (Claude Desktop, Cursor, Claude Code, Windsurf). Requires the one-time pairing flow above.</li>
+</ul>
+<p class="muted">This site uses <a href="https://github.com/basgr/cf-webmcp">cf-webmcp</a> to expose both surfaces from a single config.</p>
+
+<p class="muted">Configuration hash: <code>{{config_hash}}</code></p>
+<details class="muted">
+  <summary>Diagnostic: what this page detected</summary>
+  <ul id="webmcp-diag"><li>checking...</li></ul>
+</details>
+
+<script>
+(function () {
+  var mc = navigator.modelContext;
+  var mct = navigator.modelContextTesting;
+  var probes = {
+    'navigator.modelContext': 'modelContext' in navigator,
+    'typeof navigator.modelContext.registerTool': mc ? typeof mc.registerTool : 'undefined (modelContext absent)',
+    'navigator.modelContextTesting': 'modelContextTesting' in navigator,
+    'typeof navigator.modelContextTesting.listTools': mct ? typeof mct.listTools : 'undefined (modelContextTesting absent)',
+    'typeof navigator.modelContextTesting.executeTool': mct ? typeof mct.executeTool : 'undefined (modelContextTesting absent)',
+    'fallback widget configured': {{widget_enabled_js}}
+  };
+  var hasProducer = probes['navigator.modelContext'] && probes['typeof navigator.modelContext.registerTool'] === 'function';
+  var widgetEnabled = {{widget_enabled_js}};
+  var id = hasProducer ? 'state-native' : (widgetEnabled ? 'state-pair' : 'state-disabled');
+  var el = document.getElementById(id);
+  if (el) el.classList.add('active');
+
+  var ul = document.getElementById('webmcp-diag');
+  if (ul) {
+    ul.innerHTML = '';
+    Object.keys(probes).forEach(function (key) {
+      var li = document.createElement('li');
+      var k = document.createElement('code');
+      k.textContent = key;
+      li.appendChild(k);
+      li.appendChild(document.createTextNode(': ' + probes[key]));
+      ul.appendChild(li);
+    });
+    var conclusion = document.createElement('li');
+    conclusion.textContent = 'Selected state: ' + id;
+    ul.appendChild(conclusion);
+  }
+})();
+</script>
+</body>
+</html>

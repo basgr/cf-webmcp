@@ -1,0 +1,253 @@
+# :schema https://raw.githubusercontent.com/basgr/cf-webmcp/main/schemas/webmcp.schema.json
+#
+# WebMCP Edge Worker - WordPress template
+#
+# Assumptions:
+#   - WP REST API enabled at /wp-json/wp/v2/ (default on modern WordPress)
+#   - All listed endpoints are public-readable (true on default WP)
+#   - Permalinks enabled
+
+schema_version = 1
+
+[site]
+domain      = "example.com"
+name        = "Example WordPress Site"
+description = "WordPress site exposing search, posts, and pages to AI agents."
+locale      = "en"
+
+[origin]
+base_url        = "https://example.com"
+allowed_origins = ["https://example.com"]
+forward_cookies = false
+
+[features]
+inject_html      = true
+webmcp_landing   = true
+manifest         = true
+link_header      = true
+link_tag         = true
+llms_txt         = true
+robots_txt       = true
+agents_md        = true
+fallback_widget  = true
+
+[manifest]
+path = "/.well-known/webmcp.json"
+
+[webmcp_landing]
+path = "/mcp"
+
+[llms_txt]
+path = "/llms.txt"
+mode = "merge"
+
+[robots_txt]
+path = "/robots.txt"
+mode = "merge"
+
+[agents_md]
+path    = "/.well-known/agents.md"
+mode    = "merge"
+aliases = ["/AGENTS.md", "/agents.md"]
+
+[paths]
+namespace = "/_webmcp"
+
+[injection]
+exclude_paths = [
+  "/wp-admin/*",
+  "/wp-login.php",
+  "/wp-json/*",
+  "/xmlrpc.php",
+  "/feed/*",
+  "/comments/feed/*",
+  "/?rest_route=*",
+]
+
+[cache]
+manifest_max_age     = 300
+manifest_s_maxage    = 86400
+manifest_swr         = 604800
+manifest_sie         = 86400
+landing_max_age      = 300
+landing_s_maxage     = 86400
+landing_swr          = 86400
+landing_sie          = 86400
+llms_txt_max_age     = 300
+llms_txt_s_maxage    = 21600
+llms_txt_swr         = 86400
+llms_txt_sie         = 86400
+robots_txt_max_age   = 300
+robots_txt_s_maxage  = 21600
+robots_txt_swr       = 86400
+robots_txt_sie       = 86400
+agents_md_max_age    = 300
+agents_md_s_maxage   = 21600
+agents_md_swr        = 86400
+agents_md_sie        = 86400
+agents_md_redirect_max_age  = 86400
+agents_md_redirect_s_maxage = 604800
+bootstrap_max_age    = 31536000
+widget_max_age       = 31536000
+
+[cache.executor_defaults]
+max_age  = 0
+s_maxage = 300
+swr      = 1800
+sie      = 86400
+
+[cors]
+allowed_origins = []
+
+[health]
+public = true
+token  = ""
+
+[dev]
+origin = "http://localhost:8080"
+
+# ---------- Tools ----------
+
+[[tools]]
+name        = "search_site"
+description = "Full-text search across posts and pages. Returns ranked results with title, URL, and excerpt."
+
+  [tools.input_schema]
+  type     = "object"
+  required = ["query"]
+
+    [tools.input_schema.properties.query]
+    type        = "string"
+    description = "Search keyword or phrase."
+
+    [tools.input_schema.properties.limit]
+    type    = "integer"
+    minimum = 1
+    maximum = 50
+
+  [tools.executor]
+  type         = "http_json"
+  url_template = "https://example.com/wp-json/wp/v2/search?search={{query}}&per_page={{limit|default:10}}&_embed=1"
+  method       = "GET"
+
+  [tools.executor.project]
+  type   = "array"
+  fields = { title = "title", url = "url", subtype = "subtype" }
+
+  [tools.cache]
+  s_maxage = 600
+
+[[tools]]
+name        = "list_posts"
+description = "List recent published posts ordered by date, newest first."
+
+  [tools.input_schema]
+  type = "object"
+
+    [tools.input_schema.properties.limit]
+    type    = "integer"
+    minimum = 1
+    maximum = 100
+
+    [tools.input_schema.properties.category]
+    type        = "string"
+    description = "Optional category slug to filter by."
+
+  [tools.executor]
+  type         = "http_json"
+  url_template = "https://example.com/wp-json/wp/v2/posts?per_page={{limit|default:10}}&categories_slug={{category|optional}}&_fields=id,date,slug,link,title,excerpt"
+
+  [tools.executor.project]
+  type   = "array"
+  fields = { id = "id", url = "link", title = "title.rendered", excerpt = "excerpt.rendered", published = "date" }
+
+  [tools.cache]
+  s_maxage = 900
+
+[[tools]]
+name        = "get_post"
+description = "Fetch the full content of a single post by its slug."
+
+  [tools.input_schema]
+  type     = "object"
+  required = ["slug"]
+
+    [tools.input_schema.properties.slug]
+    type        = "string"
+    description = "Post slug, the last segment of the post URL."
+    pattern     = "^[a-z0-9-]+$"
+
+  [tools.executor]
+  type         = "http_json"
+  url_template = "https://example.com/wp-json/wp/v2/posts?slug={{slug}}&_fields=id,date,slug,link,title,content,excerpt"
+
+  [tools.executor.project]
+  type   = "first"
+  fields = { id = "id", url = "link", title = "title.rendered", content = "content.rendered", excerpt = "excerpt.rendered", published = "date" }
+
+  [tools.cache]
+  s_maxage = 1800
+
+[[tools]]
+name        = "list_pages"
+description = "List static pages on the site."
+
+  [tools.input_schema]
+  type = "object"
+
+    [tools.input_schema.properties.limit]
+    type    = "integer"
+    minimum = 1
+    maximum = 100
+
+  [tools.executor]
+  type         = "http_json"
+  url_template = "https://example.com/wp-json/wp/v2/pages?per_page={{limit|default:20}}&_fields=id,slug,link,title,excerpt"
+
+  [tools.executor.project]
+  type   = "array"
+  fields = { id = "id", url = "link", title = "title.rendered", excerpt = "excerpt.rendered" }
+
+  [tools.cache]
+  s_maxage = 3600
+
+[[tools]]
+name        = "get_page"
+description = "Fetch the full content of a static page by its slug."
+
+  [tools.input_schema]
+  type     = "object"
+  required = ["slug"]
+
+    [tools.input_schema.properties.slug]
+    type    = "string"
+    pattern = "^[a-z0-9-]+$"
+
+  [tools.executor]
+  type         = "http_json"
+  url_template = "https://example.com/wp-json/wp/v2/pages?slug={{slug}}&_fields=id,slug,link,title,content"
+
+  [tools.executor.project]
+  type   = "first"
+  fields = { id = "id", url = "link", title = "title.rendered", content = "content.rendered" }
+
+  [tools.cache]
+  s_maxage = 1800
+
+[[tools]]
+name        = "list_categories"
+description = "List all post categories on the site."
+
+  [tools.input_schema]
+  type = "object"
+
+  [tools.executor]
+  type         = "http_json"
+  url_template = "https://example.com/wp-json/wp/v2/categories?per_page=100&_fields=id,slug,name,description,count"
+
+  [tools.executor.project]
+  type   = "array"
+  fields = { id = "id", slug = "slug", name = "name", description = "description", post_count = "count" }
+
+  [tools.cache]
+  s_maxage = 3600

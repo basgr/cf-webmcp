@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>cf-webmcp - WebMCP at the edge</title>
+<meta name="description" content="A Cloudflare Worker that equips any website with WebMCP from a single TOML config. No SDK install on the publisher side.">
+<link rel="canonical" href="https://example.com/webmcp/">
+<link rel="icon" type="image/svg+xml" href="favicon.svg">
+<link rel="stylesheet" href="css/styles.css">
+<meta name="theme-color" content="#16a34a">
+<meta property="og:type" content="website">
+<meta property="og:title" content="cf-webmcp - WebMCP at the edge">
+<meta property="og:description" content="A Cloudflare Worker that equips any website with WebMCP from a single TOML config.">
+<meta property="og:url" content="https://example.com/webmcp/">
+<meta property="og:image" content="https://example.com/webmcp/og.svg">
+<meta name="twitter:card" content="summary_large_image">
+</head>
+<body>
+
+<header class="site">
+  <a class="brand" href="."><svg class="brand-icon" viewBox="0 0 64 64" aria-hidden="true"><rect width="64" height="64" rx="14" fill="#16a34a"/><text x="32" y="46" text-anchor="middle" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="40" font-weight="700" fill="#fff">w</text></svg><span>cf-webmcp</span></a>
+  <nav>
+    <a href="." aria-current="page">Home</a>
+    <a href="about">About</a>
+    <a href="install">Install</a>
+    <a href="docs">Docs</a>
+    <a href="forms">Forms</a>
+    <a href="https://github.com/basgr/cf-webmcp">GitHub</a>
+  </nav>
+</header>
+
+<main>
+
+  <div class="hero">
+    <div class="eyebrow">cf-webmcp</div>
+    <h1>WebMCP at the edge.</h1>
+    <p class="lead">A Cloudflare Worker that equips any website with <a href="https://github.com/webmachinelearning/webmcp">WebMCP</a> from a single TOML config. Browser-native agents see your site's tools automatically. Desktop MCP clients pair through a dedicated page.</p>
+    <a class="cta" href="install">Get started</a>
+    <a class="cta ghost" href="https://github.com/basgr/cf-webmcp">Source on GitHub</a>
+  </div>
+
+  <h2>How it works</h2>
+  <p>The Worker sits in front of your domain. On every request it does one of two things:</p>
+  <ul>
+    <li>If the request matches a Worker-owned path (manifest, <code>/mcp</code> landing, <code>/_webmcp/exec/*</code>, <code>/_webmcp/health</code>, <code>/llms.txt</code>, <code>/robots.txt</code>, <code>/.well-known/agents.md</code> and its 301 aliases), handle it directly.</li>
+    <li>Otherwise proxy the request to origin. Two modifications happen on the way back to the visitor:
+      <ul>
+        <li><strong>HTTP <code>Link</code> header added on every proxied response</strong> - HTML, PDF, image, JSON, anything. The header points at the manifest, so an agent doing a <code>HEAD</code> request finds it without parsing a body.</li>
+        <li><strong>On HTML responses only</strong> (status 200, <code>text/html</code>, UTF-8, path not excluded), HTMLRewriter also injects one <code>&lt;link rel="webmcp"&gt;</code> into <code>&lt;head&gt;</code> and one <code>&lt;script src="/_webmcp/bootstrap.&lt;hash&gt;.js" defer&gt;</code> before <code>&lt;/body&gt;</code>. Non-HTML responses pass through unchanged in their body.</li>
+        <li>If a <code>[[forms]]</code> block matches the current path, declarative WebMCP attributes are stamped onto matching forms in the HTML response.</li>
+      </ul>
+    </li>
+  </ul>
+
+  <h2>What you get</h2>
+  <div class="cards">
+    <div class="card">
+      <h3>Manifest</h3>
+      <p>Static tool catalogue at <code>/.well-known/webmcp.json</code>.</p>
+    </div>
+    <div class="card">
+      <h3>Auto-registration</h3>
+      <p>Site-wide <code>navigator.modelContext.registerTool</code> for browser-native agents.</p>
+    </div>
+    <div class="card">
+      <h3>Discovery</h3>
+      <p><code>&lt;link rel="webmcp"&gt;</code> on every page, plus HTTP <code>Link</code> header.</p>
+    </div>
+    <div class="card">
+      <h3>Pairing page</h3>
+      <p><code>/mcp</code> lands desktop MCP clients with one-line setup.</p>
+    </div>
+    <div class="card">
+      <h3>llms.txt + robots.txt</h3>
+      <p>Augmented with WebMCP discovery hints, idempotently merged.</p>
+    </div>
+    <div class="card">
+      <h3>AGENTS.md</h3>
+      <p>Auto-published at <code>/.well-known/agents.md</code> with 301 aliases for <code>/AGENTS.md</code> and <code>/agents.md</code>.</p>
+    </div>
+    <div class="card">
+      <h3>Form injection</h3>
+      <p>Stamp <code>toolname</code> / <code>tooldescription</code> / <code>toolparamdescription</code> onto existing forms at the edge from a <code>[[forms]]</code> TOML block. No CMS edit.</p>
+    </div>
+    <div class="card">
+      <h3>Five executors</h3>
+      <p><code>sitemap_filter</code>, <code>rss_feed</code>, <code>dom_extract</code>, <code>http_json</code>, <code>http_get</code>.</p>
+    </div>
+  </div>
+
+  <h2>Two minutes to deploy</h2>
+  <pre><code>git clone https://github.com/basgr/cf-webmcp
+cd cf-webmcp
+cp templates/wordpress.toml webmcp.toml
+cp wrangler.example.toml wrangler.toml
+# edit webmcp.toml + wrangler.toml
+npm install
+npm run build
+wrangler deploy</code></pre>
+  <p class="muted">Three templates ship: <code>default</code>, <code>wordpress</code>, <code>woocommerce</code>.</p>
+
+</main>
+
+<footer class="site">
+  <div class="row">
+    <a href="https://github.com/basgr/cf-webmcp/blob/main/LICENSE">MIT licensed</a>
+    <a href="/.well-known/webmcp.json">Manifest</a>
+    <a href="/llms.txt">llms.txt</a>
+    <a href="/.well-known/agents.md">AGENTS.md</a>
+    <a href="/mcp">/mcp</a>
+  </div>
+  <div class="row">
+    <span>Not affiliated with Cloudflare (but I &#10084; them)</span>
+    <a href="https://basgr.io/bg">Made by Bastian Grimm</a>
+  </div>
+</footer>
+
+</body>
+</html>

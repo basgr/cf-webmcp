@@ -1,0 +1,38 @@
+# Copy this file to wrangler.toml and edit the values for your deployment.
+# Build pipeline runs scripts/build-config.ts before deploy via the `build` field.
+
+name         = "cf-webmcp"
+main         = "src/worker.ts"
+compatibility_date = "2024-09-23"
+
+# Route the entire domain through the Worker (full proxy mode).
+# For route-only mode, replace with specific patterns: see docs/deployment.md.
+#
+# routes = [
+#   { pattern = "example.com/*", zone_name = "example.com" }
+# ]
+
+# Build pipeline. Compiles webmcp.toml → src/generated/*.
+[build]
+command = "npm run build"
+
+# Worker bundle uploads generated/* alongside src/*.
+[[rules]]
+type    = "ESModule"
+globs   = ["**/*.js"]
+fallthrough = false
+
+# R2 bucket for the vendored fallback widget. Optional if fallback_widget = false.
+[[r2_buckets]]
+binding     = "CF_WEBMCP_ASSETS"
+bucket_name = "cf-webmcp-assets"
+
+# Analytics Engine for /_webmcp/health metrics. Optional.
+# [[analytics_engine_datasets]]
+# binding = "WEBMCP_METRICS"
+
+# Cache API binding is implicit on Workers.
+
+# Secrets (set via `wrangler secret put`):
+#   CF_WEBMCP_DEPLOY_TOKEN   used by preflight to bypass Worker routing when verifying origin paths
+#   CF_WEBMCP_HEALTH_TOKEN   used by /_webmcp/health bearer auth if [health].token is set in TOML

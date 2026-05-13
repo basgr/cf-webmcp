@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+<channel>
+  <title>Example Site</title>
+  <link>http://localhost:8787/</link>
+  <description>Fixture feed for cf-webmcp local dev.</description>
+  <item>
+    <title>Hello, World</title>
+    <link>http://localhost:8787/blog/hello-world</link>
+    <pubDate>Sun, 10 May 2026 09:00:00 GMT</pubDate>
+    <description><![CDATA[The first post on the fixture blog.]]></description>
+  </item>
+  <item>
+    <title>About this fixture</title>
+    <link>http://localhost:8787/about</link>
+    <pubDate>Fri, 01 May 2026 09:00:00 GMT</pubDate>
+    <description>Why the fixture exists and how to extend it.</description>
+  </item>
+</channel>
+</rss>

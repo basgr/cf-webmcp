@@ -1,0 +1,227 @@
+# :schema https://raw.githubusercontent.com/basgr/cf-webmcp/main/schemas/webmcp.schema.json
+#
+# WebMCP Edge Worker - WooCommerce template
+#
+# Assumptions:
+#   - WordPress site with WooCommerce installed
+#   - WC Store API enabled at /wp-json/wc/store/v1/ (default on modern WC)
+#   - Product catalogue is public
+#
+# Uses Store API only (unauthenticated reads). NOT /wc/v3/ which would need
+# consumer key/secret.
+#
+# Inherits the WordPress template. Build does a shallow merge keyed on
+# tools[].name. Single-parent inheritance only.
+
+schema_version = 1
+inherits       = "wordpress.toml"
+
+[site]
+domain      = "shop.example.com"
+name        = "Example Shop"
+description = "WooCommerce store exposing product search and details to AI agents."
+locale      = "en"
+
+[origin]
+base_url        = "https://shop.example.com"
+allowed_origins = ["https://shop.example.com"]
+forward_cookies = false
+
+[features]
+inject_html      = true
+webmcp_landing   = true
+manifest         = true
+link_header      = true
+link_tag         = true
+llms_txt         = true
+robots_txt       = true
+agents_md        = true
+fallback_widget  = true
+
+[manifest]
+path = "/.well-known/webmcp.json"
+
+[webmcp_landing]
+path = "/mcp"
+
+[llms_txt]
+path = "/llms.txt"
+mode = "merge"
+
+[robots_txt]
+path = "/robots.txt"
+mode = "merge"
+
+[agents_md]
+path    = "/.well-known/agents.md"
+mode    = "merge"
+aliases = ["/AGENTS.md", "/agents.md"]
+
+[paths]
+namespace = "/_webmcp"
+
+[injection]
+# Exclude checkout, cart, account, and admin from injection.
+exclude_paths = [
+  "/wp-admin/*",
+  "/wp-login.php",
+  "/wp-json/*",
+  "/checkout*",
+  "/cart*",
+  "/my-account*",
+  "/?wc-ajax=*",
+  "/?add-to-cart=*",
+]
+
+[cache]
+manifest_max_age     = 300
+manifest_s_maxage    = 86400
+manifest_swr         = 604800
+manifest_sie         = 86400
+landing_max_age      = 300
+landing_s_maxage     = 86400
+landing_swr          = 86400
+landing_sie          = 86400
+llms_txt_max_age     = 300
+llms_txt_s_maxage    = 21600
+llms_txt_swr         = 86400
+llms_txt_sie         = 86400
+robots_txt_max_age   = 300
+robots_txt_s_maxage  = 21600
+robots_txt_swr       = 86400
+robots_txt_sie       = 86400
+agents_md_max_age    = 300
+agents_md_s_maxage   = 21600
+agents_md_swr        = 86400
+agents_md_sie        = 86400
+agents_md_redirect_max_age  = 86400
+agents_md_redirect_s_maxage = 604800
+bootstrap_max_age    = 31536000
+widget_max_age       = 31536000
+
+[cache.executor_defaults]
+# Product data changes faster than posts. Tighter edge cache by default.
+max_age  = 0
+s_maxage = 120
+swr      = 600
+sie      = 86400
+
+[cors]
+allowed_origins = []
+
+[health]
+public = true
+token  = ""
+
+[dev]
+origin = "http://localhost:8080"
+
+# ---------- Tools ----------
+
+[[tools]]
+name        = "search_products"
+description = "Search products by keyword. Returns matches with name, price, slug, and short description."
+
+  [tools.input_schema]
+  type     = "object"
+  required = ["query"]
+
+    [tools.input_schema.properties.query]
+    type        = "string"
+    description = "Search keyword. Matched against product name and short description."
+
+    [tools.input_schema.properties.limit]
+    type    = "integer"
+    minimum = 1
+    maximum = 50
+
+  [tools.executor]
+  type         = "http_json"
+  url_template = "https://shop.example.com/wp-json/wc/store/v1/products?search={{query}}&per_page={{limit|default:10}}"
+
+  [tools.executor.project]
+  type   = "array"
+  fields = { id = "id", name = "name", slug = "slug", url = "permalink", price = "prices.price", currency = "prices.currency_code", short_description = "short_description", on_sale = "on_sale", stock_status = "stock_status" }
+
+  [tools.cache]
+  s_maxage = 120
+
+[[tools]]
+name        = "get_product"
+description = "Fetch full details for a single product by its slug."
+
+  [tools.input_schema]
+  type     = "object"
+  required = ["slug"]
+
+    [tools.input_schema.properties.slug]
+    type    = "string"
+    pattern = "^[a-z0-9-]+$"
+
+  [tools.executor]
+  type         = "http_json"
+  url_template = "https://shop.example.com/wp-json/wc/store/v1/products?slug={{slug}}"
+
+  [tools.executor.project]
+  type   = "first"
+  fields = { id = "id", name = "name", slug = "slug", url = "permalink", description = "description", short_description = "short_description", price = "prices.price", currency = "prices.currency_code", on_sale = "on_sale", stock_status = "stock_status", categories = "categories", images = "images" }
+
+  [tools.cache]
+  s_maxage = 300
+
+[[tools]]
+name        = "filter_products"
+description = "Filter products by category, price range, and stock status. Returns up to limit matches."
+
+  [tools.input_schema]
+  type = "object"
+
+    [tools.input_schema.properties.category]
+    type        = "string"
+    description = "Category slug."
+
+    [tools.input_schema.properties.min_price]
+    type    = "number"
+    minimum = 0
+
+    [tools.input_schema.properties.max_price]
+    type    = "number"
+    minimum = 0
+
+    [tools.input_schema.properties.in_stock]
+    type        = "boolean"
+    description = "If true, only products currently in stock."
+
+    [tools.input_schema.properties.limit]
+    type    = "integer"
+    minimum = 1
+    maximum = 50
+
+  [tools.executor]
+  type         = "http_json"
+  url_template = "https://shop.example.com/wp-json/wc/store/v1/products?category={{category|optional}}&min_price={{min_price|optional}}&max_price={{max_price|optional}}&stock_status={{in_stock|map:true=instock,false=outofstock}}&per_page={{limit|default:20}}"
+
+  [tools.executor.project]
+  type   = "array"
+  fields = { id = "id", name = "name", slug = "slug", url = "permalink", price = "prices.price", currency = "prices.currency_code", stock_status = "stock_status" }
+
+  [tools.cache]
+  s_maxage = 120
+
+[[tools]]
+name        = "list_product_categories"
+description = "List all product categories with their slugs and counts."
+
+  [tools.input_schema]
+  type = "object"
+
+  [tools.executor]
+  type         = "http_json"
+  url_template = "https://shop.example.com/wp-json/wc/store/v1/products/categories?per_page=100"
+
+  [tools.executor.project]
+  type   = "array"
+  fields = { id = "id", slug = "slug", name = "name", description = "description", product_count = "count", parent = "parent" }
+
+  [tools.cache]
+  s_maxage = 3600

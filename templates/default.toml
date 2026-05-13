@@ -1,0 +1,191 @@
+# :schema https://raw.githubusercontent.com/basgr/cf-webmcp/main/schemas/webmcp.schema.json
+#
+# WebMCP Edge Worker - default template
+#
+# Generic site assumptions:
+#   - has a sitemap at /sitemap.xml
+#   - has an RSS or Atom feed at /feed/ (optional)
+#   - has or wants llms.txt at /llms.txt
+#
+# Adjust [site], [origin], and tool URLs to match the target site,
+# then `wrangler deploy`.
+
+schema_version = 1
+
+# ---------- Identity ----------
+
+[site]
+domain      = "example.com"
+name        = "Example Co."
+description = "What this site is and what it offers."
+locale      = "en"
+
+# ---------- Origin ----------
+
+[origin]
+base_url        = "https://example.com"
+allowed_origins = ["https://example.com"]
+forward_cookies = false   # executors never forward visitor cookies
+
+# ---------- Surfaces ----------
+
+[features]
+inject_html      = true
+webmcp_landing   = true
+manifest         = true
+link_header      = true
+link_tag         = true
+llms_txt         = true
+robots_txt       = true
+agents_md        = true
+fallback_widget  = true   # desktop MCP client reach matters; widget is opt-in but ON by default
+
+# ---------- Paths ----------
+# Trailing slash is significant:
+#   "/mcp/"      → directory, 308 added for "/mcp"
+#   "/mcp.html"  → file, served at exact path
+
+[manifest]
+path = "/.well-known/webmcp.json"
+
+[webmcp_landing]
+path = "/mcp"
+
+[llms_txt]
+path = "/llms.txt"
+mode = "merge"   # merge | replace | passthrough | synthesize
+
+[robots_txt]
+path = "/robots.txt"
+mode = "merge"   # merge | passthrough
+
+[agents_md]
+path    = "/.well-known/agents.md"
+mode    = "merge"   # merge | replace | passthrough | synthesize
+aliases = ["/AGENTS.md", "/agents.md"]
+
+[paths]
+namespace = "/_webmcp"   # private routes prefix
+
+[injection]
+exclude_paths = [
+  "/wp-admin/*",
+  "/wp-login.php",
+  "/checkout/*",
+  "/cart/*",
+  "/my-account/*",
+  "/login",
+  "/logout",
+]
+
+# ---------- Caching ----------
+
+[cache]
+manifest_max_age     = 300
+manifest_s_maxage    = 86400
+manifest_swr         = 604800
+manifest_sie         = 86400
+landing_max_age      = 300
+landing_s_maxage     = 86400
+landing_swr          = 86400
+landing_sie          = 86400
+llms_txt_max_age     = 300
+llms_txt_s_maxage    = 21600
+llms_txt_swr         = 86400
+llms_txt_sie         = 86400
+robots_txt_max_age   = 300
+robots_txt_s_maxage  = 21600
+robots_txt_swr       = 86400
+robots_txt_sie       = 86400
+agents_md_max_age    = 300
+agents_md_s_maxage   = 21600
+agents_md_swr        = 86400
+agents_md_sie        = 86400
+agents_md_redirect_max_age  = 86400
+agents_md_redirect_s_maxage = 604800
+bootstrap_max_age    = 31536000
+widget_max_age       = 31536000
+
+[cache.executor_defaults]
+max_age  = 0
+s_maxage = 300
+swr      = 1800
+sie      = 86400
+
+# ---------- CORS / health / dev ----------
+
+[cors]
+allowed_origins = []   # empty = no CORS, same-origin only
+
+[health]
+public = true
+token  = ""
+
+[dev]
+origin = "http://localhost:8080"
+
+# ---------- Tools ----------
+
+[[tools]]
+name        = "search_pages"
+description = "Search the site by keyword. Returns matching pages with title, URL, and excerpt."
+
+  [tools.input_schema]
+  type     = "object"
+  required = ["query"]
+
+    [tools.input_schema.properties.query]
+    type        = "string"
+    description = "Search keyword or phrase. Matched against page titles and URLs."
+
+  [tools.executor]
+  type        = "sitemap_filter"
+  sitemap_url = "https://example.com/sitemap.xml"
+  max_results = 20
+
+  [tools.cache]
+  s_maxage = 3600
+
+[[tools]]
+name        = "list_posts"
+description = "List recent blog posts ordered by publication date."
+
+  [tools.input_schema]
+  type = "object"
+
+    [tools.input_schema.properties.limit]
+    type        = "integer"
+    description = "Maximum number of posts to return. Defaults to 10."
+    minimum     = 1
+    maximum     = 50
+
+  [tools.executor]
+  type      = "rss_feed"
+  feed_url  = "https://example.com/feed/"
+  max_items = 20
+
+  [tools.cache]
+  s_maxage = 900
+
+[[tools]]
+name        = "get_page"
+description = "Fetch the readable content of a page on this site by its URL path."
+
+  [tools.input_schema]
+  type     = "object"
+  required = ["path"]
+
+    [tools.input_schema.properties.path]
+    type        = "string"
+    description = "Path on the site, starting with /. For example: /about, /pricing."
+    pattern     = "^/[^?#]*$"
+
+  [tools.executor]
+  type         = "dom_extract"
+  url_template = "https://example.com{{path}}"
+  selector     = "main, article, [role=main]"
+  strip        = ["nav", "footer", "aside", "script", "style", "noscript"]
+  max_chars    = 8000
+
+  [tools.cache]
+  s_maxage = 300

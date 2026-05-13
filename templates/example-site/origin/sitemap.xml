@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url>
+    <loc>http://localhost:8787/</loc>
+    <lastmod>2026-05-12</lastmod>
+  </url>
+  <url>
+    <loc>http://localhost:8787/about</loc>
+    <lastmod>2026-05-01</lastmod>
+  </url>
+  <url>
+    <loc>http://localhost:8787/pricing</loc>
+    <lastmod>2026-04-20</lastmod>
+  </url>
+  <url>
+    <loc>http://localhost:8787/blog/hello-world</loc>
+    <lastmod>2026-05-10</lastmod>
+  </url>
+</urlset>
