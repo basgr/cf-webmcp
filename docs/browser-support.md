@@ -39,7 +39,7 @@ Adds a WebMCP panel to Chrome DevTools so you can inspect registered tools and e
 
 After relaunch, your `cf-webmcp` `/mcp` page should show the green **Connected** callout in its diagnostic, and your registered tools are available via `navigator.modelContext` and `navigator.modelContextTesting`.
 
-A screenshot of the flag panel with both flags enabled lives at [`docs/images/chrome-flags-webmcp.png`](images/chrome-flags-webmcp.png) (drop your own there if you want it visible in this doc).
+![Chrome flag panel with WebMCP for testing and WebMCP support in DevTools both set to Enabled](images/chrome-flags-webmcp.png)
 
 ## Verifying the flag is on
 
