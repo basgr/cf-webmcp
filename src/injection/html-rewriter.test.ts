@@ -149,6 +149,23 @@ describe("injectIntoHtml", () => {
     expect(out).not.toContain('"bad"');
     expect(out).toContain("&quot;bad&quot;");
   });
+
+  it("adds <link rel=api-catalog> alongside webmcp when apiCatalogUrl set", async () => {
+    const res = new Response("<html><head></head><body>x</body></html>", { status: 200, headers: { "content-type": "text/html" } });
+    const out = await injectIntoHtml(res, {
+      ...opts,
+      apiCatalogUrl: "https://example.com/.well-known/api-catalog",
+    }).text();
+    expect(out).toContain('<link rel="webmcp" href="https://example.com/.well-known/webmcp.json">');
+    expect(out).toContain('<link rel="api-catalog" href="https://example.com/.well-known/api-catalog">');
+  });
+
+  it("omits the api-catalog link tag when apiCatalogUrl is undefined", async () => {
+    const res = new Response("<html><head></head><body>x</body></html>", { status: 200, headers: { "content-type": "text/html" } });
+    const out = await injectIntoHtml(res, opts).text();
+    expect(out).toContain('<link rel="webmcp"');
+    expect(out).not.toContain('rel="api-catalog"');
+  });
 });
 
 describe("formsForPath", () => {

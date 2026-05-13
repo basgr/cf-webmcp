@@ -27,7 +27,7 @@ cf-webmcp publishes the same tool catalogue through multiple complementary surfa
 - `/llms.txt` augmented with a WebMCP block (idempotent merge with origin's file)
 - `/robots.txt` augmented with `Disallow: /_webmcp/` (idempotent merge)
 - `/.well-known/agents.md` for acting agents, with `/AGENTS.md` and `/agents.md` 301-redirecting to it
-- `/.well-known/api-catalog` ([RFC 9727](https://www.rfc-editor.org/rfc/rfc9727.html)) Linkset entry pointing at the WebMCP manifest
+- `/.well-known/api-catalog` ([RFC 9727](https://www.rfc-editor.org/rfc/rfc9727.html)) Linkset entry pointing at the WebMCP manifest. Also advertised in the `Link` header and as `<link rel="api-catalog">` on every response.
 - `/mcp` landing page that branches at runtime between native, pair, and disabled states
 
 Plus five executor types (`sitemap_filter`, `rss_feed`, `dom_extract`, `http_json`, `http_get`) for the imperative tool path, and a `[[forms]]` block for the declarative form path.

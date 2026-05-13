@@ -73,6 +73,28 @@ When `mode = "merge"`:
 
 Output is canonicalised: 2-space indent, object keys sorted alphabetically, trailing newline. Byte-stable across re-runs.
 
+## Advertised on every response
+
+When the catalog is enabled, cf-webmcp advertises it through two additional surfaces alongside the existing `rel="webmcp"`:
+
+- **HTTP `Link` header** on every Worker response (RFC 8288, comma-separated):
+
+  ```
+  Link: <https://example.com/.well-known/webmcp.json>; rel="webmcp",
+        <https://example.com/.well-known/api-catalog>; rel="api-catalog"
+  ```
+
+- **`<link>` tag** injected into HTML responses (when `[features].link_tag = true`):
+
+  ```html
+  <link rel="webmcp" href="https://example.com/.well-known/webmcp.json">
+  <link rel="api-catalog" href="https://example.com/.well-known/api-catalog">
+  ```
+
+`rel="api-catalog"` is registered in IANA's Link Relations by RFC 9727. Generic crawlers and discovery tools scanning for registered rels find the catalog without prior knowledge of cf-webmcp.
+
+Both surfaces honour the same gate: emitted only when `[features].api_catalog = true` and `[api_catalog].mode != "passthrough"`.
+
 ## Verify
 
 ```bash

@@ -20,6 +20,7 @@ import { llmsTxtResponse } from "./routes/llms-txt";
 import { robotsTxtResponse } from "./routes/robots-txt";
 import { agentsMdResponse, agentsMdRedirect } from "./routes/agents-md";
 import { apiCatalogResponse } from "./routes/api-catalog";
+import { buildLinkHeader, mergeLinkHeader } from "./link-header";
 import { formsForPath, injectIntoHtml, shouldInject } from "./injection/html-rewriter";
 
 export interface Env {
@@ -130,13 +131,19 @@ async function proxyAndMaybeInject(request: Request, env: Env): Promise<Response
   if (!config.features.inject_html) return upstream;
   if (!shouldInject(request, upstream, config)) return withLinkHeader(upstream);
 
-  const manifestUrl = `${config.site.public_url ?? `https://${config.site.domain}`}${config.manifest.path}`;
-  const bootstrapUrl = `${config.site.public_url ?? `https://${config.site.domain}`}${config.paths.namespace}/${BOOTSTRAP_ASSET}`;
+  const base = config.site.public_url ?? `https://${config.site.domain}`;
+  const manifestUrl = `${base}${config.manifest.path}`;
+  const bootstrapUrl = `${base}${config.paths.namespace}/${BOOTSTRAP_ASSET}`;
+  const apiCatalogUrl =
+    config.features.api_catalog && config.api_catalog.mode !== "passthrough"
+      ? `${base}${config.api_catalog.path}`
+      : undefined;
   const forms = formsForPath(config.forms, reqUrl.pathname);
   const injected = injectIntoHtml(upstream, {
     manifestUrl,
     bootstrapUrl,
     emitLinkTag: config.features.link_tag,
+    apiCatalogUrl,
     forms,
   });
   return withLinkHeader(injected);
@@ -144,10 +151,7 @@ async function proxyAndMaybeInject(request: Request, env: Env): Promise<Response
 
 function withLinkHeader(response: Response): Response {
   if (!config.features.link_header) return response;
-  const manifestUrl = `${config.site.public_url ?? `https://${config.site.domain}`}${config.manifest.path}`;
   const headers = new Headers(response.headers);
-  const existing = headers.get("link");
-  const value = `<${manifestUrl}>; rel="webmcp"`;
-  headers.set("link", existing ? `${existing}, ${value}` : value);
+  headers.set("link", mergeLinkHeader(headers.get("link"), buildLinkHeader(config)));
   return new Response(response.body, { status: response.status, headers });
 }

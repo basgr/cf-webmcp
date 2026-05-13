@@ -24,6 +24,8 @@ export interface InjectOptions {
   manifestUrl: string;
   bootstrapUrl: string;
   emitLinkTag: boolean;
+  /** When set, an additional <link rel="api-catalog"> is injected alongside the webmcp link. */
+  apiCatalogUrl?: string;
   /** Forms whose path scope matches the current request. Empty array = no form stamping on this response. */
   forms: FormInjectionConfig[];
 }
@@ -70,14 +72,18 @@ class State {
 
 export function injectIntoHtml(response: Response, opts: InjectOptions): Response {
   const state = new State();
-  const linkTag = `<link rel="webmcp" href="${escapeAttr(opts.manifestUrl)}">`;
+  const webmcpTag = `<link rel="webmcp" href="${escapeAttr(opts.manifestUrl)}">`;
+  const apiCatalogTag = opts.apiCatalogUrl
+    ? `<link rel="api-catalog" href="${escapeAttr(opts.apiCatalogUrl)}">`
+    : "";
+  const linkTags = apiCatalogTag ? webmcpTag + apiCatalogTag : webmcpTag;
   const scriptTag = `<script src="${escapeAttr(opts.bootstrapUrl)}" defer></script>`;
 
   let rewriter = new HTMLRewriter()
     .on("head", {
       element(el) {
         if (state.linkInjected || !opts.emitLinkTag) return;
-        el.append(linkTag, { html: true });
+        el.append(linkTags, { html: true });
         state.linkInjected = true;
       },
     })
