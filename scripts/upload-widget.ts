@@ -35,11 +35,15 @@ async function main(): Promise<void> {
   if (!match || !match[1]) throw new Error("[upload-widget] WIDGET_ASSET not found in generated/hash.ts");
   const objectKey = match[1];
 
-  // Read bucket name from wrangler.toml.
-  const wranglerToml = await fs.readFile(path.join(ROOT, "wrangler.toml"), "utf8");
+  // Read bucket name from wrangler.toml. Honor CF_WEBMCP_WRANGLER_CONFIG so
+  // out-of-tree deploys (the publisher's own repo) can point at their own file.
+  const wranglerPath = process.env.CF_WEBMCP_WRANGLER_CONFIG
+    ? path.resolve(ROOT, process.env.CF_WEBMCP_WRANGLER_CONFIG)
+    : path.join(ROOT, "wrangler.toml");
+  const wranglerToml = await fs.readFile(wranglerPath, "utf8");
   const bucketMatch = wranglerToml.match(/binding\s*=\s*"CF_WEBMCP_ASSETS"[\s\S]*?bucket_name\s*=\s*"([^"]+)"/);
   if (!bucketMatch || !bucketMatch[1]) {
-    throw new Error("[upload-widget] CF_WEBMCP_ASSETS R2 binding not found in wrangler.toml");
+    throw new Error(`[upload-widget] CF_WEBMCP_ASSETS R2 binding not found in ${wranglerPath}`);
   }
   const bucket = bucketMatch[1];
 
