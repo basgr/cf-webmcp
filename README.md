@@ -46,6 +46,34 @@ npm run build
 wrangler deploy
 ```
 
+## Documentation
+
+Full reference docs live in [`docs/`](docs/):
+
+**Getting started**
+
+- [Deployment](docs/deployment.md) - full-proxy vs route-only modes, wrangler config, Bot Management bypass.
+- [Local testing](docs/local-testing.md) - `wrangler dev` against the bundled `templates/example-site/` fixture.
+- [Browser support](docs/browser-support.md) - enabling the WebMCP flag in Chrome and verifying it.
+
+**Configuration**
+
+- [Customisation](docs/customisation.md) - overriding the `/mcp` landing template, placeholders, runtime state branching.
+- [Form injection](docs/form-injection.md) - the `[[forms]]` block, declarative `toolname` / `tooldescription` / `toolparamdescription` / `toolautosubmit` attribute stamping.
+- [AGENTS.md](docs/agents-md.md) - `/.well-known/agents.md` publication + 301 aliases.
+- [API catalog (RFC 9727)](docs/api-catalog.md) - the `/.well-known/api-catalog` Linkset.
+
+**Operations**
+
+- [Costs](docs/costs.md) - Workers, R2, and cache pricing under typical traffic.
+- [Privacy](docs/privacy.md) - what's logged, what's stripped from origin fetches, GDPR posture.
+- [Upgrade](docs/upgrade.md) - `schema_version` policy, tool-name immutability, breaking-change procedure.
+- [Limitations](docs/limitations.md) - SPA story, multi-language sites, service workers, other known edges.
+
+**Project**
+
+- [Scope](docs/scope.md) - what cf-webmcp is and is not. Read this before opening a feature request.
+
 ## Acknowledgements
 
 - Suganthan Mohanadasan, ["WebMCP: I Made My Website AI Agent Ready"](https://suganthan.com/blog/webmcp-implementation-guide/) - the implementation guide that informed the publisher-side discovery patterns.
