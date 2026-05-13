@@ -99,7 +99,9 @@ function checkAllowList(config: Config): void {
     const benign: Record<string, unknown> = {};
     const hostile: Record<string, unknown> = {};
     for (const p of compiled.params) {
-      benign[p] = "x";
+      // Leading "/" so path-position params don't fuse with the host
+      // (e.g. "https://example.com{{path}}" with path="x" → "example.comx").
+      benign[p] = "/x";
       hostile[p] = "https://evil.example.com/";
     }
 

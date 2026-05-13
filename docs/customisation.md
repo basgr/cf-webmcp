@@ -86,18 +86,6 @@ If you want **none** of the runtime branching (e.g. you are building a static "t
 </html>
 ```
 
-## Real-world example
-
-The bundled demo overrides the default with [`demo/site/mcp.template.html`](../demo/site/mcp.template.html). It uses the demo's centralised stylesheet, the same header and footer as the rest of the site, and matches the green-accent branding. Look at it as a worked example of what a fully styled override looks like.
-
-The demo's `webmcp.toml` wires it in with:
-
-```toml
-[webmcp_landing]
-path     = "/mcp"
-template = "site/mcp.template.html"
-```
-
 ## What to consider when customising
 
 - **Asset URLs.** If your template references external CSS, JS, or images, use relative paths (`css/styles.css`) so the same file works at both `localhost:8788/mcp` and `example.com/mcp`. Absolute root-relative paths (`/css/styles.css`) work for full-proxy mode but break if you mount the Worker under a sub-path.

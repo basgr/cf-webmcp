@@ -13,8 +13,6 @@
     "upload-widget": "tsx scripts/upload-widget.ts",
     "dev:origin": "tsx scripts/dev-origin.ts",
     "dev:worker": "cross-env CF_WEBMCP_CONFIG=templates/example-site/webmcp.toml npm run build && wrangler dev --config wrangler.dev.toml",
-    "dev:demo-origin": "cross-env ORIGIN_DIR=demo/site ORIGIN_PORT=8082 tsx scripts/dev-origin.ts",
-    "dev:demo-worker": "cross-env CF_WEBMCP_CONFIG=demo/webmcp.toml npm run build && wrangler dev --config wrangler.demo.toml",
     "dev": "npm run build && wrangler dev",
     "deploy": "npm run build && wrangler deploy",
     "pretest": "cross-env CF_WEBMCP_CONFIG=templates/example-site/webmcp.toml npm run build",

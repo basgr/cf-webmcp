@@ -93,7 +93,7 @@ The W3C draft also defines two `SubmitEvent` extensions that fire when the form 
 - **`event.agentInvoked`** is `true` when the submission came from `navigator.modelContext.executeTool(...)`, `false` for human submissions.
 - **`event.respondWith(promise)`** lets the page return a structured response to the agent instead of (or alongside) the normal form submission flow.
 
-`cf-webmcp` does not generate or inject the submit-handler JS that uses these extensions. The publisher writes it on the origin side. If you want a worked example, look at [`demo/site/forms.html`](../demo/site/forms.html) - the handler at the bottom of that file catches `agentInvoked` submissions and replies with a canned JSON envelope.
+`cf-webmcp` does not generate or inject the submit-handler JS that uses these extensions. The publisher writes it on the origin side: an inline `<script>` (or external file) that calls `form.addEventListener("submit", ...)`, checks `event.agentInvoked`, and calls `event.respondWith(Promise.resolve({...}))` with a structured JSON envelope describing the result.
 
 ## Example: WordPress contact form (Contact Form 7)
 
@@ -153,6 +153,3 @@ You should see the injected `toolname`, `tooldescription`, and optional `toolaut
 - **Not a way to override form behaviour.** Submitting the form still does whatever origin's existing handler does. If you want to intercept agent-invoked submissions, write a `submit` handler on the origin side that checks `event.agentInvoked`.
 - **Not a CMS replacement.** If you want the form attributes managed by content editors rather than by config, hand-stamp on the origin side. The TOML approach suits dev/ops teams managing config independently.
 
-## Demo
-
-The live demo at `/forms` shows three forms. The first two have hand-stamped attributes (the publisher path). The third (`form#search-form`) has no attributes in the origin HTML; the Worker injects them based on a `[[forms]]` block in the demo TOML. Compare source between the Worker-proxied response and the direct origin response (`localhost:8082/forms.html`) to see the rewrite in action.
