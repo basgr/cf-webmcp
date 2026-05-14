@@ -182,8 +182,26 @@ export function slugify(input: string): string {
 }
 
 function yamlString(s: string): string {
-  // Double-quoted YAML scalar. Escape backslashes and double quotes.
-  return `"${s.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+  // Double-quoted YAML scalar. Escape backslashes, double quotes, and the
+  // common control chars that would otherwise produce malformed YAML when
+  // a publisher's site.name or site.description contains LF/CR/TAB. Other
+  // C0 controls (which should never appear in TOML strings anyway) are
+  // emitted as \uXXXX so the scalar remains a single line.
+  let escaped = "";
+  for (const ch of s) {
+    const code = ch.codePointAt(0)!;
+    if (ch === "\\") escaped += "\\\\";
+    else if (ch === '"') escaped += '\\"';
+    else if (ch === "\n") escaped += "\\n";
+    else if (ch === "\r") escaped += "\\r";
+    else if (ch === "\t") escaped += "\\t";
+    else if (code < 0x20 || code === 0x7f) {
+      escaped += `\\u${code.toString(16).padStart(4, "0")}`;
+    } else {
+      escaped += ch;
+    }
+  }
+  return `"${escaped}"`;
 }
 
 function isMarkdownish(ct: string | null): boolean {

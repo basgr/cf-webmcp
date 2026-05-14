@@ -259,6 +259,28 @@ publisher's pitfalls section
     expect(body).toContain('name: "has \\"quotes\\" and \\\\backslash"');
   });
 
+  it("escapes control chars and newlines in YAML frontmatter", async () => {
+    const proxy = async () => new Response("", { status: 404 });
+    const config = makeConfig({
+      agent_skills: {
+        path: "/.well-known/agent-skills/site/SKILL.md",
+        mode: "synthesize",
+        name: "line1\nline2\twith\x07bell",
+        description: "carriage\rreturn",
+        aliases: [],
+        hints: [],
+      },
+    });
+    const body = await (await agentSkillsResponse(new Request("https://example.com/.well-known/agent-skills/site/SKILL.md"), config, proxy)).text();
+    // No literal LF/CR/TAB/BEL inside the YAML scalar value.
+    expect(body).toContain('name: "line1\\nline2\\twith\\u0007bell"');
+    expect(body).toContain('description: "carriage\\rreturn"');
+    // Frontmatter is still a single value line per key (no breakouts).
+    const frontmatter = body.split("---")[1] ?? "";
+    expect(frontmatter.split("\n").filter((l) => l.startsWith("name:"))).toHaveLength(1);
+    expect(frontmatter.split("\n").filter((l) => l.startsWith("description:"))).toHaveLength(1);
+  });
+
   it("sets correct cache-control header", async () => {
     const proxy = async () => new Response("", { status: 404 });
     const res = await agentSkillsResponse(new Request("https://example.com/.well-known/agent-skills/site/SKILL.md"), makeConfig(), proxy);
