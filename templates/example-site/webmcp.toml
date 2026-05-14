@@ -28,6 +28,7 @@ llms_txt         = true
 robots_txt       = true
 agents_md        = true
 api_catalog      = true
+agent_skills     = true
 fallback_widget  = false   # local dev does not have R2 widget ready
 
 [manifest]
@@ -52,6 +53,25 @@ aliases = ["/AGENTS.md", "/agents.md"]
 [api_catalog]
 path = "/.well-known/api-catalog"
 mode = "merge"   # uses templates/example-site/origin/.well-known/api-catalog as a test fixture
+
+
+[agent_skills]
+path    = "/.well-known/agent-skills/site/SKILL.md"
+mode    = "synthesize"   # merge | replace | passthrough | synthesize
+aliases = [
+  "/.well-known/agent-skills/site/SKILLS.md",
+  "/.well-known/agent-skills/site/skill.md",
+  "/.well-known/agent-skills/site/skills.md",
+]
+
+# Optional hand-written hints rendered after the auto-generated tool list.
+# Markdown allowed in body.
+#
+# [[agent_skills.hints]]
+# heading = "When to use which tool"
+# body    = """
+# - "find anything about X" -> search_pages
+# """
 
 [paths]
 namespace = "/_webmcp"

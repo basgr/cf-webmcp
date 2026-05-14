@@ -153,6 +153,7 @@ const Features = z.object({
   robots_txt: z.boolean().default(true),
   agents_md: z.boolean().default(true),
   api_catalog: z.boolean().default(true),
+  agent_skills: z.boolean().default(true),
   fallback_widget: z.boolean().default(true),
 });
 
@@ -203,6 +204,37 @@ const ApiCatalogBlock = z.object({
   mode: z.enum(["merge", "replace", "passthrough", "synthesize"]).default("merge"),
 });
 
+/**
+ * Anthropic-format Agent Skill (SKILL.md). A site-specific operational guide
+ * for agent runtimes that scan skill registries. Auto-generated from
+ * [[tools]] + [[forms]], with optional publisher-written prose hints
+ * appended for "when to use which tool" / "common pitfalls" guidance.
+ *
+ * Aliases 301-redirect common case variants (SKILLS.md, skill.md, skills.md)
+ * to the canonical path. Mirrors the agents.md alias pattern.
+ */
+const AgentSkillHint = z.object({
+  heading: z.string().min(1),
+  body: z.string().min(1),
+});
+
+const AgentSkillsBlock = z.object({
+  path: PathString.default("/.well-known/agent-skills/site/SKILL.md"),
+  mode: z.enum(["merge", "replace", "passthrough", "synthesize"]).default("synthesize"),
+  /** Override the auto-derived skill name (defaults to slugified [site].name). */
+  name: z.string().default(""),
+  /** Override the auto-derived skill description (defaults to [site].description). */
+  description: z.string().default(""),
+  /** Path aliases that 301-redirect to the canonical `path`. Common case-variants by default. */
+  aliases: z.array(PathString).default([
+    "/.well-known/agent-skills/site/SKILLS.md",
+    "/.well-known/agent-skills/site/skill.md",
+    "/.well-known/agent-skills/site/skills.md",
+  ]),
+  /** Hand-written prose sections rendered after the auto-generated tool list. */
+  hints: z.array(AgentSkillHint).default([]),
+});
+
 const PathsBlock = z.object({
   namespace: PathString.default("/_webmcp"),
 });
@@ -239,6 +271,13 @@ const CacheBlock = z.object({
   api_catalog_s_maxage: z.number().int().nonnegative().default(21_600),
   api_catalog_swr: z.number().int().nonnegative().default(86_400),
   api_catalog_sie: z.number().int().nonnegative().default(86_400),
+  agent_skills_max_age: z.number().int().nonnegative().default(300),
+  agent_skills_s_maxage: z.number().int().nonnegative().default(21_600),
+  agent_skills_swr: z.number().int().nonnegative().default(86_400),
+  agent_skills_sie: z.number().int().nonnegative().default(86_400),
+  /** 301 redirect from agent-skills aliases to canonical path. Stable, so cache aggressively. */
+  agent_skills_redirect_max_age: z.number().int().nonnegative().default(86_400),
+  agent_skills_redirect_s_maxage: z.number().int().nonnegative().default(604_800),
   bootstrap_max_age: z.number().int().nonnegative().default(31_536_000),
   widget_max_age: z.number().int().nonnegative().default(31_536_000),
   executor_defaults: z
@@ -314,6 +353,7 @@ export const ConfigSchema = z.object({
   robots_txt: RobotsTxtBlock.default({}),
   agents_md: AgentsMdBlock.default({}),
   api_catalog: ApiCatalogBlock.default({}),
+  agent_skills: AgentSkillsBlock.default({}),
   paths: PathsBlock.default({}),
   injection: InjectionBlock.default({}),
   cache: CacheBlock.default({}),

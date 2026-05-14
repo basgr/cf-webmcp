@@ -16,7 +16,7 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
       llms_txt: true,
       robots_txt: true,
       agents_md: true,
-      api_catalog: true,
+      api_catalog: true, agent_skills: true,
       fallback_widget: true,
     },
     manifest: { path: "/.well-known/webmcp.json" },
@@ -24,7 +24,7 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     llms_txt: { path: "/llms.txt", mode: "merge" },
     robots_txt: { path: "/robots.txt", mode: "merge" },
     agents_md: { path: "/.well-known/agents.md", mode: "merge", aliases: ["/AGENTS.md", "/agents.md"] },
-    api_catalog: { path: "/.well-known/api-catalog", mode: "merge" },
+    api_catalog: { path: "/.well-known/api-catalog", mode: "merge" }, agent_skills: { path: "/.well-known/agent-skills/site/SKILL.md", mode: "synthesize", name: "", description: "", aliases: ["/.well-known/agent-skills/site/SKILLS.md", "/.well-known/agent-skills/site/skill.md", "/.well-known/agent-skills/site/skills.md"], hints: [] },
     paths: { namespace: "/_webmcp" },
     injection: { exclude_paths: [] },
     cache: {
@@ -34,7 +34,7 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
       robots_txt_max_age: 300, robots_txt_s_maxage: 3600, robots_txt_swr: 86400, robots_txt_sie: 86400,
       agents_md_max_age: 300, agents_md_s_maxage: 21600, agents_md_swr: 86400, agents_md_sie: 86400,
       agents_md_redirect_max_age: 86400, agents_md_redirect_s_maxage: 604800,
-      api_catalog_max_age: 300, api_catalog_s_maxage: 21600, api_catalog_swr: 86400, api_catalog_sie: 86400,
+      api_catalog_max_age: 300, api_catalog_s_maxage: 21600, api_catalog_swr: 86400, api_catalog_sie: 86400, agent_skills_max_age: 300, agent_skills_s_maxage: 21600, agent_skills_swr: 86400, agent_skills_sie: 86400, agent_skills_redirect_max_age: 86400, agent_skills_redirect_s_maxage: 604800,
       bootstrap_max_age: 31536000, widget_max_age: 31536000,
       executor_defaults: { max_age: 0, s_maxage: 300, swr: 1800, sie: 86400 },
     },
@@ -82,6 +82,30 @@ describe("buildLinkHeader", () => {
     );
     expect(value).toContain('rel="webmcp"');
     expect(value).not.toContain('rel="api-catalog"');
+  });
+
+  it("includes the agent-skills rel when feature on and mode != passthrough", () => {
+    const value = buildLinkHeader(makeConfig());
+    expect(value).toContain('<https://example.com/.well-known/agent-skills/site/SKILL.md>; rel="agent-skills"');
+  });
+
+  it("omits agent-skills when features.agent_skills is false", () => {
+    const value = buildLinkHeader(
+      makeConfig({ features: { ...makeConfig().features, agent_skills: false } }),
+    );
+    expect(value).not.toContain('rel="agent-skills"');
+  });
+
+  it("omits agent-skills when mode is passthrough", () => {
+    const value = buildLinkHeader(
+      makeConfig({
+        agent_skills: {
+          ...makeConfig().agent_skills,
+          mode: "passthrough",
+        },
+      }),
+    );
+    expect(value).not.toContain('rel="agent-skills"');
   });
 });
 

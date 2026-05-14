@@ -20,6 +20,7 @@ import { llmsTxtResponse } from "./routes/llms-txt";
 import { robotsTxtResponse } from "./routes/robots-txt";
 import { agentsMdResponse, agentsMdRedirect } from "./routes/agents-md";
 import { apiCatalogResponse } from "./routes/api-catalog";
+import { agentSkillsResponse, agentSkillsRedirect } from "./routes/agent-skills";
 import { buildLinkHeader, mergeLinkHeader } from "./link-header";
 import { formsForPath, injectIntoHtml, shouldInject } from "./injection/html-rewriter";
 
@@ -76,6 +77,10 @@ export default {
         return agentsMdRedirect(config);
       case "api_catalog":
         return apiCatalogResponse(request, config, (u) => proxyToOrigin(u, env));
+      case "agent_skills":
+        return agentSkillsResponse(request, config, (u) => proxyToOrigin(u, env));
+      case "agent_skills_redirect":
+        return agentSkillsRedirect(config);
       case "proxy":
         return proxyAndMaybeInject(request, env);
     }
@@ -138,12 +143,17 @@ async function proxyAndMaybeInject(request: Request, env: Env): Promise<Response
     config.features.api_catalog && config.api_catalog.mode !== "passthrough"
       ? `${base}${config.api_catalog.path}`
       : undefined;
+  const agentSkillsUrl =
+    config.features.agent_skills && config.agent_skills.mode !== "passthrough"
+      ? `${base}${config.agent_skills.path}`
+      : undefined;
   const forms = formsForPath(config.forms, reqUrl.pathname);
   const injected = injectIntoHtml(upstream, {
     manifestUrl,
     bootstrapUrl,
     emitLinkTag: config.features.link_tag,
     apiCatalogUrl,
+    agentSkillsUrl,
     forms,
   });
   return withLinkHeader(injected);

@@ -15,6 +15,7 @@
 - **`/robots.txt`** augmentation (marker-block, blocks the Worker's private namespace)
 - **`/.well-known/agents.md`** publication with `/AGENTS.md` and `/agents.md` 301 aliases
 - **`/.well-known/api-catalog`** ([RFC 9727](https://www.rfc-editor.org/rfc/rfc9727.html)) publication pointing at the WebMCP manifest
+- **`/.well-known/agent-skills/<slug>/SKILL.md`** publication (Anthropic-format Agent Skill) with case-variant 301 aliases
 - **Build-time SSRF allow-list** validation
 - **Per-IP and per-tool rate limiting**
 - **`/_webmcp/health`** operational endpoint
@@ -28,7 +29,7 @@ The following are real, useful things, but they are not WebMCP and would dilute 
 ### Alternative protocols
 
 - **MCP server cards.** MCP is a JSON-RPC protocol distinct from WebMCP. cf-webmcp does not publish MCP server descriptors. Desktop MCP clients bridge into a WebMCP site via the fallback widget, which is a runtime concern, not a discovery one.
-- **Agent Skills (Anthropic).** Structured skill manifests. Closest analogue here is `/.well-known/agents.md` (prose) and the WebMCP manifest itself (structured). cf-webmcp does not emit a separate Agent Skills JSON.
+- *(Removed in v0.3.0)* ~~Agent Skills (Anthropic).~~ Originally listed as out-of-scope on the grounds that the manifest covered the same ground. Reversed in v0.3.0 after observing real-world adoption (Cloudflare Browser Run docs, isitagentready.com audits) and that the *operational hints* niche - "when to use which tool", "common pitfalls" - was not actually covered by either the structured manifest or the prose `agents.md`. cf-webmcp now publishes a `SKILL.md` at `/.well-known/agent-skills/site/SKILL.md`. See [`docs/agent-skills.md`](agent-skills.md).
 - **OpenAPI / AsyncAPI generation.** The WebMCP manifest already describes our tools in a WebMCP-native shape. cf-webmcp does not project that into OpenAPI.
 
 ### Authentication

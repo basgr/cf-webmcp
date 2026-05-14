@@ -83,6 +83,15 @@ function pathsToCheck(config: Config): PathCheck[] {
       out.push({ label: alias, url: new URL(alias, base), expect: "claim" });
     }
   }
+  if (config.features.api_catalog && config.api_catalog.mode !== "passthrough") {
+    out.push({ label: config.api_catalog.path, url: new URL(config.api_catalog.path, base), expect: "claim" });
+  }
+  if (config.features.agent_skills && config.agent_skills.mode !== "passthrough") {
+    out.push({ label: config.agent_skills.path, url: new URL(config.agent_skills.path, base), expect: "merge" });
+    for (const alias of config.agent_skills.aliases) {
+      out.push({ label: alias, url: new URL(alias, base), expect: "claim" });
+    }
+  }
   // Namespace probe - verifies origin does not serve anything under /_webmcp/.
   out.push({
     label: `${config.paths.namespace}/__probe`,

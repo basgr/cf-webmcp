@@ -30,6 +30,7 @@ llms_txt         = true
 robots_txt       = true
 agents_md        = true
 api_catalog      = true
+agent_skills     = true
 fallback_widget  = true
 
 [manifest]
@@ -54,6 +55,25 @@ aliases = ["/AGENTS.md", "/agents.md"]
 [api_catalog]
 path = "/.well-known/api-catalog"
 mode = "merge"
+
+
+[agent_skills]
+path    = "/.well-known/agent-skills/site/SKILL.md"
+mode    = "synthesize"   # merge | replace | passthrough | synthesize
+aliases = [
+  "/.well-known/agent-skills/site/SKILLS.md",
+  "/.well-known/agent-skills/site/skill.md",
+  "/.well-known/agent-skills/site/skills.md",
+]
+
+# Optional hand-written hints rendered after the auto-generated tool list.
+# Markdown allowed in body.
+#
+# [[agent_skills.hints]]
+# heading = "When to use which tool"
+# body    = """
+# - "find anything about X" -> search_pages
+# """
 
 [paths]
 namespace = "/_webmcp"
@@ -96,6 +116,12 @@ api_catalog_max_age    = 300
 api_catalog_s_maxage   = 21600
 api_catalog_swr        = 86400
 api_catalog_sie        = 86400
+agent_skills_max_age    = 300
+agent_skills_s_maxage   = 21600
+agent_skills_swr        = 86400
+agent_skills_sie        = 86400
+agent_skills_redirect_max_age  = 86400
+agent_skills_redirect_s_maxage = 604800
 bootstrap_max_age    = 31536000
 widget_max_age       = 31536000
 

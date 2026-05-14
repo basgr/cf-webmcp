@@ -13,13 +13,13 @@ const baseConfig: Config = {
     link_header: true,
     link_tag: true,
     llms_txt: true,
-    robots_txt: true, agents_md: true, api_catalog: true,
+    robots_txt: true, agents_md: true, api_catalog: true, agent_skills: true,
     fallback_widget: true,
   },
   manifest: { path: "/.well-known/webmcp.json" },
   webmcp_landing: { path: "/mcp" },
   llms_txt: { path: "/llms.txt", mode: "merge" },
-  robots_txt: { path: "/robots.txt", mode: "merge" }, agents_md: { path: "/.well-known/agents.md", mode: "merge", aliases: ["/AGENTS.md", "/agents.md"] }, api_catalog: { path: "/.well-known/api-catalog", mode: "merge" },
+  robots_txt: { path: "/robots.txt", mode: "merge" }, agents_md: { path: "/.well-known/agents.md", mode: "merge", aliases: ["/AGENTS.md", "/agents.md"] }, api_catalog: { path: "/.well-known/api-catalog", mode: "merge" }, agent_skills: { path: "/.well-known/agent-skills/site/SKILL.md", mode: "synthesize", name: "", description: "", aliases: ["/.well-known/agent-skills/site/SKILLS.md", "/.well-known/agent-skills/site/skill.md", "/.well-known/agent-skills/site/skills.md"], hints: [] },
   paths: { namespace: "/_webmcp" },
   injection: { exclude_paths: [] },
   cache: {
@@ -31,7 +31,7 @@ const baseConfig: Config = {
     llms_txt_max_age: 300,
     llms_txt_s_maxage: 3600, llms_txt_swr: 86400, llms_txt_sie: 86400,
     robots_txt_max_age: 300,
-    robots_txt_s_maxage: 3600, robots_txt_swr: 86400, robots_txt_sie: 86400, agents_md_max_age: 300, agents_md_s_maxage: 21600, agents_md_swr: 86400, agents_md_sie: 86400, agents_md_redirect_max_age: 86400, agents_md_redirect_s_maxage: 604800, api_catalog_max_age: 300, api_catalog_s_maxage: 21600, api_catalog_swr: 86400, api_catalog_sie: 86400,
+    robots_txt_s_maxage: 3600, robots_txt_swr: 86400, robots_txt_sie: 86400, agents_md_max_age: 300, agents_md_s_maxage: 21600, agents_md_swr: 86400, agents_md_sie: 86400, agents_md_redirect_max_age: 86400, agents_md_redirect_s_maxage: 604800, api_catalog_max_age: 300, api_catalog_s_maxage: 21600, api_catalog_swr: 86400, api_catalog_sie: 86400, agent_skills_max_age: 300, agent_skills_s_maxage: 21600, agent_skills_swr: 86400, agent_skills_sie: 86400, agent_skills_redirect_max_age: 86400, agent_skills_redirect_s_maxage: 604800,
     bootstrap_max_age: 31536000,
     widget_max_age: 31536000,
     executor_defaults: { max_age: 0, s_maxage: 300, swr: 1800, sie: 86400 },
@@ -135,6 +135,23 @@ describe("matchRoute", () => {
     expect(matchRoute(off, url("/.well-known/api-catalog"), BOOTSTRAP, WIDGET).kind).toBe("proxy");
     const passthrough = { ...baseConfig, api_catalog: { ...baseConfig.api_catalog, mode: "passthrough" as const } };
     expect(matchRoute(passthrough, url("/.well-known/api-catalog"), BOOTSTRAP, WIDGET).kind).toBe("proxy");
+  });
+
+  it("routes the canonical agent-skills SKILL.md path", () => {
+    expect(matchRoute(baseConfig, url("/.well-known/agent-skills/site/SKILL.md"), BOOTSTRAP, WIDGET).kind).toBe("agent_skills");
+  });
+
+  it("routes agent-skills aliases (SKILLS.md and lowercase variants) to 301", () => {
+    expect(matchRoute(baseConfig, url("/.well-known/agent-skills/site/SKILLS.md"), BOOTSTRAP, WIDGET).kind).toBe("agent_skills_redirect");
+    expect(matchRoute(baseConfig, url("/.well-known/agent-skills/site/skill.md"), BOOTSTRAP, WIDGET).kind).toBe("agent_skills_redirect");
+    expect(matchRoute(baseConfig, url("/.well-known/agent-skills/site/skills.md"), BOOTSTRAP, WIDGET).kind).toBe("agent_skills_redirect");
+  });
+
+  it("does not route agent-skills when feature off or mode passthrough", () => {
+    const off = { ...baseConfig, features: { ...baseConfig.features, agent_skills: false } };
+    expect(matchRoute(off, url("/.well-known/agent-skills/site/SKILL.md"), BOOTSTRAP, WIDGET).kind).toBe("proxy");
+    const passthrough = { ...baseConfig, agent_skills: { ...baseConfig.agent_skills, mode: "passthrough" as const } };
+    expect(matchRoute(passthrough, url("/.well-known/agent-skills/site/SKILL.md"), BOOTSTRAP, WIDGET).kind).toBe("proxy");
   });
 
   it("falls through to proxy for unrelated paths", () => {

@@ -156,6 +156,7 @@ interface Manifest {
     bootstrap: string;
     health: string;
     api_catalog?: string;
+    agent_skills?: string;
   };
   generated_at: string;
   config_hash: string;
@@ -190,6 +191,9 @@ function buildManifest(config: Config, configHash: string, bootstrapName: string
       health: `${base}${ns}/health`,
       ...(config.features.api_catalog && config.api_catalog.mode !== "passthrough"
         ? { api_catalog: `${base}${config.api_catalog.path}` }
+        : {}),
+      ...(config.features.agent_skills && config.agent_skills.mode !== "passthrough"
+        ? { agent_skills: `${base}${config.agent_skills.path}` }
         : {}),
     },
     generated_at: new Date().toISOString(),

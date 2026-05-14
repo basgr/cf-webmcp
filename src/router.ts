@@ -19,6 +19,8 @@ export interface RouteMatch {
     | "agents_md"
     | "agents_md_redirect"
     | "api_catalog"
+    | "agent_skills"
+    | "agent_skills_redirect"
     | "proxy";
   /** Only set for exec routes. */
   toolName?: string;
@@ -91,6 +93,16 @@ export function matchRoute(config: Config, url: URL, bootstrapAsset: string, wid
     pathname === config.api_catalog.path
   ) {
     return { kind: "api_catalog" };
+  }
+
+  // Anthropic-format Agent Skill (canonical SKILL.md plus 301 aliases)
+  if (config.features.agent_skills && config.agent_skills.mode !== "passthrough") {
+    if (pathname === config.agent_skills.path) {
+      return { kind: "agent_skills" };
+    }
+    if (config.agent_skills.aliases.includes(pathname)) {
+      return { kind: "agent_skills_redirect" };
+    }
   }
 
   return { kind: "proxy" };

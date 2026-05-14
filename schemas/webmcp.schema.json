@@ -101,6 +101,10 @@
               "type": "boolean",
               "default": true
             },
+            "agent_skills": {
+              "type": "boolean",
+              "default": true
+            },
             "fallback_widget": {
               "type": "boolean",
               "default": true
@@ -222,6 +226,68 @@
                 "synthesize"
               ],
               "default": "merge"
+            }
+          },
+          "additionalProperties": false,
+          "default": {}
+        },
+        "agent_skills": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "$ref": "#/definitions/WebMCPConfig/properties/manifest/properties/path",
+              "default": "/.well-known/agent-skills/site/SKILL.md"
+            },
+            "mode": {
+              "type": "string",
+              "enum": [
+                "merge",
+                "replace",
+                "passthrough",
+                "synthesize"
+              ],
+              "default": "synthesize"
+            },
+            "name": {
+              "type": "string",
+              "default": ""
+            },
+            "description": {
+              "type": "string",
+              "default": ""
+            },
+            "aliases": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/WebMCPConfig/properties/manifest/properties/path"
+              },
+              "default": [
+                "/.well-known/agent-skills/site/SKILLS.md",
+                "/.well-known/agent-skills/site/skill.md",
+                "/.well-known/agent-skills/site/skills.md"
+              ]
+            },
+            "hints": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "heading": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "body": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "required": [
+                  "heading",
+                  "body"
+                ],
+                "additionalProperties": false
+              },
+              "default": []
             }
           },
           "additionalProperties": false,
@@ -384,6 +450,36 @@
               "type": "integer",
               "minimum": 0,
               "default": 86400
+            },
+            "agent_skills_max_age": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 300
+            },
+            "agent_skills_s_maxage": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 21600
+            },
+            "agent_skills_swr": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 86400
+            },
+            "agent_skills_sie": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 86400
+            },
+            "agent_skills_redirect_max_age": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 86400
+            },
+            "agent_skills_redirect_s_maxage": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 604800
             },
             "bootstrap_max_age": {
               "type": "integer",

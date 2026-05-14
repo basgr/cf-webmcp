@@ -26,6 +26,8 @@ export interface InjectOptions {
   emitLinkTag: boolean;
   /** When set, an additional <link rel="api-catalog"> is injected alongside the webmcp link. */
   apiCatalogUrl?: string;
+  /** When set, an additional <link rel="agent-skills"> is injected alongside the webmcp link. */
+  agentSkillsUrl?: string;
   /** Forms whose path scope matches the current request. Empty array = no form stamping on this response. */
   forms: FormInjectionConfig[];
 }
@@ -76,7 +78,10 @@ export function injectIntoHtml(response: Response, opts: InjectOptions): Respons
   const apiCatalogTag = opts.apiCatalogUrl
     ? `<link rel="api-catalog" href="${escapeAttr(opts.apiCatalogUrl)}">`
     : "";
-  const linkTags = apiCatalogTag ? webmcpTag + apiCatalogTag : webmcpTag;
+  const agentSkillsTag = opts.agentSkillsUrl
+    ? `<link rel="agent-skills" href="${escapeAttr(opts.agentSkillsUrl)}">`
+    : "";
+  const linkTags = webmcpTag + apiCatalogTag + agentSkillsTag;
   const scriptTag = `<script src="${escapeAttr(opts.bootstrapUrl)}" defer></script>`;
 
   let rewriter = new HTMLRewriter()
