@@ -100,6 +100,58 @@ describe("buildConfig", () => {
     await expect(runBuild(toml)).rejects.toThrow(/validation failed/i);
   });
 
+  it("rejects a path with characters unsafe in HTTP headers", async () => {
+    // One representative from every class blocked by PATH_BAD_CHARS:
+    //   - HTML / Link bracket delimiters: < > "
+    //   - whitespace and C0 controls (response-splitting in Location): space, TAB, CR, LF, NUL
+    //   - RFC 3986 excluded literals: \ ^ ` { | }
+    //   - C1 control (high-byte parser confusion): \x80
+    const cases = [
+      "/foo<bar",
+      "/foo>bar",
+      '/foo"bar',
+      "/foo bar",
+      "/foo\tbar",
+      "/foo\rbar",
+      "/foo\nbar",
+      "/foo\x00bar",
+      "/foo\\bar",
+      "/foo^bar",
+      "/foo`bar",
+      "/foo{bar",
+      "/foo|bar",
+      "/foo}bar",
+      "/foo\x80bar",
+    ];
+    for (const bad of cases) {
+      const toml = `${MINIMAL}\n\n[manifest]\npath = ${JSON.stringify(bad)}\n`;
+      const f = await writeToml(`bad-${Buffer.from(bad).toString("hex")}.toml`, toml);
+      await expect(runBuild(f), `path ${JSON.stringify(bad)} should be rejected`).rejects.toThrow(/unsafe in HTTP headers|validation failed/i);
+    }
+  });
+
+  it("accepts RFC 3986 unreserved and sub-delim characters in paths", async () => {
+    // Sanity: chars that look unusual but are legal per RFC 3986 must still pass.
+    // Catches a regression where the bad-char set accidentally over-blocks.
+    const good = [
+      "/foo~bar",
+      "/foo%20bar",
+      "/foo@bar",
+      "/foo+bar",
+      "/foo,bar",
+      "/foo:bar",
+      "/foo;bar",
+      "/foo=bar",
+      "/foo!bar",
+    ];
+    for (const ok of good) {
+      const toml = `${MINIMAL}\n\n[manifest]\npath = ${JSON.stringify(ok)}\n`;
+      const f = await writeToml(`ok-${Buffer.from(ok).toString("hex")}.toml`, toml);
+      const result = await runBuild(f);
+      expect(result.files, `path ${JSON.stringify(ok)} should be accepted`).toHaveProperty("manifest.json");
+    }
+  });
+
   it("rejects a tool whose url_template can escape allowed_origins", async () => {
     const evil = `${MINIMAL}
 

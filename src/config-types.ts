@@ -7,12 +7,26 @@ import { z } from "zod";
 
 // ---------- Reusable shapes ----------
 
+// Characters we explicitly reject in any PathString. Beyond the standard
+// query/fragment/traversal exclusions, this set covers anything that would
+// be unsafe to embed in:
+//   * an HTTP Link header (`<`, `>`, `"`, control chars)
+//   * a 301 Location header (CR/LF would attempt response-splitting)
+//   * an HTML <link href=...> attribute (`<`, `>`, `"`)
+// The allowed character set is RFC 3986 unreserved + sub-delims + pchar
+// extras + percent-encoded triples. Anything else (literal `<`, `>`, `"`,
+// backticks, whitespace, C0/C1 controls) is rejected at build time so a
+// publisher cannot accidentally produce a malformed Link / Location header.
+const PATH_BAD_CHARS = /[\x00-\x20"<>\\^`{|}\x7f-\x9f]/;
 const PathString = z
   .string()
   .min(1)
   .refine((s) => s.startsWith("/"), { message: "path must start with /" })
   .refine((s) => !s.includes(".."), { message: "path must not contain .." })
-  .refine((s) => !s.includes("?") && !s.includes("#"), { message: "path must not contain query or fragment" });
+  .refine((s) => !s.includes("?") && !s.includes("#"), { message: "path must not contain query or fragment" })
+  .refine((s) => !PATH_BAD_CHARS.test(s), {
+    message: "path contains characters unsafe in HTTP headers (whitespace, controls, or any of < > \" \\ ^ ` { | })",
+  });
 
 const HttpsUrl = z
   .string()
