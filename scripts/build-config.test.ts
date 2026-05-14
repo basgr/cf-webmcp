@@ -122,6 +122,8 @@ describe("buildConfig", () => {
       "/foo|bar",
       "/foo}bar",
       "/foo\x80bar",
+      "/foo\u2028bar",
+      "/foo\u2029bar",
     ];
     for (const bad of cases) {
       const toml = `${MINIMAL}\n\n[manifest]\npath = ${JSON.stringify(bad)}\n`;

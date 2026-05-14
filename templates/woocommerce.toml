@@ -17,14 +17,14 @@ schema_version = 1
 inherits       = "wordpress.toml"
 
 [site]
-domain      = "shop.example.com"
+domain      = "example.com"
 name        = "Example Shop"
 description = "WooCommerce store exposing product search and details to AI agents."
 locale      = "en"
 
 [origin]
-base_url        = "https://shop.example.com"
-allowed_origins = ["https://shop.example.com"]
+base_url        = "https://example.com"
+allowed_origins = ["https://example.com"]
 forward_cookies = false
 
 [features]
@@ -172,7 +172,7 @@ description = "Search products by keyword. Returns matches with name, price, slu
 
   [tools.executor]
   type         = "http_json"
-  url_template = "https://shop.example.com/wp-json/wc/store/v1/products?search={{query}}&per_page={{limit|default:10}}"
+  url_template = "https://example.com/wp-json/wc/store/v1/products?search={{query}}&per_page={{limit|default:10}}"
 
   [tools.executor.project]
   type   = "array"
@@ -195,7 +195,7 @@ description = "Fetch full details for a single product by its slug."
 
   [tools.executor]
   type         = "http_json"
-  url_template = "https://shop.example.com/wp-json/wc/store/v1/products?slug={{slug}}"
+  url_template = "https://example.com/wp-json/wc/store/v1/products?slug={{slug}}"
 
   [tools.executor.project]
   type   = "first"
@@ -234,7 +234,7 @@ description = "Filter products by category, price range, and stock status. Retur
 
   [tools.executor]
   type         = "http_json"
-  url_template = "https://shop.example.com/wp-json/wc/store/v1/products?category={{category|optional}}&min_price={{min_price|optional}}&max_price={{max_price|optional}}&stock_status={{in_stock|map:true=instock,false=outofstock}}&per_page={{limit|default:20}}"
+  url_template = "https://example.com/wp-json/wc/store/v1/products?category={{category|optional}}&min_price={{min_price|optional}}&max_price={{max_price|optional}}&stock_status={{in_stock|map:true=instock,false=outofstock}}&per_page={{limit|default:20}}"
 
   [tools.executor.project]
   type   = "array"
@@ -252,7 +252,7 @@ description = "List all product categories with their slugs and counts."
 
   [tools.executor]
   type         = "http_json"
-  url_template = "https://shop.example.com/wp-json/wc/store/v1/products/categories?per_page=100"
+  url_template = "https://example.com/wp-json/wc/store/v1/products/categories?per_page=100"
 
   [tools.executor.project]
   type   = "array"

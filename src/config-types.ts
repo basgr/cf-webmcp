@@ -17,7 +17,11 @@ import { z } from "zod";
 // extras + percent-encoded triples. Anything else (literal `<`, `>`, `"`,
 // backticks, whitespace, C0/C1 controls) is rejected at build time so a
 // publisher cannot accidentally produce a malformed Link / Location header.
-const PATH_BAD_CHARS = /[\x00-\x20"<>\\^`{|}\x7f-\x9f]/;
+// U+2028 (LINE SEPARATOR) and U+2029 (PARAGRAPH SEPARATOR) are also blocked.
+// They are legal in modern URL parsers but pre-ES2019 inline `<script>`
+// contexts treat them as line terminators. cf-webmcp does not currently
+// inline paths into JS, but blocking here is free defense-in-depth.
+const PATH_BAD_CHARS = /[\x00-\x20"<>\\^`{|}\x7f-\x9f\u2028\u2029]/;
 const PathString = z
   .string()
   .min(1)
