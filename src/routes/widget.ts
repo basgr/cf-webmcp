@@ -28,12 +28,18 @@ export async function widgetResponse(
   widgetAsset: string,
 ): Promise<Response> {
   if (request.method !== "GET" && request.method !== "HEAD") {
-    return new Response("method not allowed", { status: 405, headers: { allow: "GET, HEAD" } });
+    return new Response("method not allowed", {
+      status: 405,
+      headers: { allow: "GET, HEAD", "x-robots-tag": "noindex" },
+    });
   }
 
   const object = await bucket.get(widgetAsset);
   if (!object) {
-    return new Response("widget asset not found on origin bucket", { status: 503 });
+    return new Response("widget asset not found on origin bucket", {
+      status: 503,
+      headers: { "x-robots-tag": "noindex" },
+    });
   }
 
   const cc = `${buildCacheControl({ max_age: config.cache.widget_max_age })}, immutable`;

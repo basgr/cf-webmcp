@@ -64,8 +64,9 @@ export async function apiCatalogResponse(
       }
     } else {
       // Origin returned something we cannot interpret as a catalog (HTML, etc).
-      // Be conservative: pass it through unchanged rather than overwrite.
-      return upstream;
+      // Be conservative: pass it through unchanged rather than overwrite. Add
+      // the noindex tag because the path lives under /.well-known/*.
+      return withNoindex(upstream);
     }
   }
 
@@ -80,6 +81,9 @@ export async function apiCatalogResponse(
         sie: config.cache.api_catalog_sie,
       }),
       "x-content-type-options": "nosniff",
+      // Agent-discovery surface served under /.well-known/, not search-engine
+      // content. See docs/scope.md and the x-robots coverage test.
+      "x-robots-tag": "noindex",
     },
   });
 }
@@ -160,4 +164,15 @@ function sortReplacer(_key: string, value: unknown): unknown {
 function isLinksetContentType(ct: string | null): boolean {
   if (!ct) return true;
   return /^application\/(linkset\+)?json/i.test(ct);
+}
+
+/**
+ * Clone a response and add `X-Robots-Tag: noindex`. Used when relaying an
+ * origin response from a /.well-known/* route - the origin's headers may not
+ * include the noindex tag, but the protected-prefix rule requires it.
+ */
+function withNoindex(res: Response): Response {
+  const headers = new Headers(res.headers);
+  headers.set("x-robots-tag", "noindex");
+  return new Response(res.body, { status: res.status, statusText: res.statusText, headers });
 }

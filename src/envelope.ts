@@ -44,6 +44,9 @@ export function jsonResponse<T>(envelope: Envelope<T>, init: ResponseInit = {}):
     headers: {
       "content-type": "application/json; charset=utf-8",
       "x-content-type-options": "nosniff",
+      // jsonResponse serves /_webmcp/exec/* responses; that prefix is in the
+      // "must noindex" set. See feedback memory and the x-robots coverage test.
+      "x-robots-tag": "noindex",
       ...(init.headers ?? {}),
     },
   });

@@ -27,9 +27,11 @@ export async function agentSkillsResponse(
   const body = await buildBody(config, proxyToOrigin);
   if (body === null) {
     // Origin returned non-markdown in merge mode; pass it through unchanged
-    // rather than overwrite publisher content.
+    // rather than overwrite publisher content. The path is under /.well-known/*
+    // so enforce the noindex tag even on the relayed response.
     const target = new URL(config.agent_skills.path, config.origin.base_url);
-    return proxyToOrigin(target);
+    const upstream = await proxyToOrigin(target);
+    return withNoindex(upstream);
   }
 
   return new Response(body, {
@@ -43,6 +45,9 @@ export async function agentSkillsResponse(
         sie: config.cache.agent_skills_sie,
       }),
       "x-content-type-options": "nosniff",
+      // Agent-discovery surface served under /.well-known/, not search-engine
+      // content. See docs/scope.md and the x-robots coverage test.
+      "x-robots-tag": "noindex",
     },
   });
 }
@@ -56,6 +61,9 @@ export function agentSkillsRedirect(config: Config): Response {
         max_age: config.cache.agent_skills_redirect_max_age,
         s_maxage: config.cache.agent_skills_redirect_s_maxage,
       }),
+      // Aliases live under /.well-known/agent-skills/; same noindex rule
+      // as the canonical response.
+      "x-robots-tag": "noindex",
     },
   });
 }
@@ -207,4 +215,15 @@ function yamlString(s: string): string {
 function isMarkdownish(ct: string | null): boolean {
   if (!ct) return true;
   return /^text\/(plain|markdown|x-markdown)/i.test(ct);
+}
+
+/**
+ * Clone a response and add `X-Robots-Tag: noindex`. Used when relaying an
+ * origin response from a /.well-known/* route - the origin's headers may not
+ * include the noindex tag, but the protected-prefix rule requires it.
+ */
+function withNoindex(res: Response): Response {
+  const headers = new Headers(res.headers);
+  headers.set("x-robots-tag", "noindex");
+  return new Response(res.body, { status: res.status, statusText: res.statusText, headers });
 }

@@ -33,7 +33,10 @@ export async function execResponse(
     if (request.method === "OPTIONS") {
       return preflightCors(request, config);
     }
-    return new Response("method not allowed", { status: 405, headers: { allow: "POST, OPTIONS" } });
+    return new Response("method not allowed", {
+      status: 405,
+      headers: { allow: "POST, OPTIONS", "x-robots-tag": "noindex" },
+    });
   }
 
   const tool = config.tools.find((t) => t.name === toolName);
@@ -138,6 +141,7 @@ function rateLimited(retryAfterSec: number): Response {
 function preflightCors(request: Request, config: Config): Response {
   const headers: Record<string, string> = {
     allow: "POST, OPTIONS",
+    "x-robots-tag": "noindex",
   };
   const reqOrigin = request.headers.get("origin");
   // Echo the request origin only if it is on the allow list. This makes

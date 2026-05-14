@@ -112,11 +112,22 @@ async function proxyToOrigin(url: URL, env: Env): Promise<Response> {
       if (!allowed.includes(finalOrigin)) {
         return new Response(
           `origin redirected to ${finalOrigin} which is not in allowed_origins`,
-          { status: 502, headers: { "content-type": "text/plain; charset=utf-8" } },
+          {
+            status: 502,
+            headers: {
+              "content-type": "text/plain; charset=utf-8",
+              // proxyToOrigin is invoked from routes under /.well-known/*; tag
+              // the SSRF-rejection body too so it never gets indexed.
+              "x-robots-tag": "noindex",
+            },
+          },
         );
       }
     } catch {
-      return new Response("origin returned malformed final URL", { status: 502 });
+      return new Response("origin returned malformed final URL", {
+        status: 502,
+        headers: { "x-robots-tag": "noindex" },
+      });
     }
   }
   return res;

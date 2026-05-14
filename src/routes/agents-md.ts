@@ -42,7 +42,9 @@ export async function agentsMdResponse(
       const original = await upstream.text();
       body = mergeBlock(original, block);
     } else {
-      return upstream;
+      // Origin returned something we cannot interpret (HTML, redirect, 5xx).
+      // Relay it but enforce noindex since the path is under /.well-known/*.
+      return withNoindex(upstream);
     }
   }
 
@@ -57,6 +59,9 @@ export async function agentsMdResponse(
         sie: config.cache.agents_md_sie,
       }),
       "x-content-type-options": "nosniff",
+      // Agent-discovery surface served under /.well-known/, not search-engine
+      // content. See docs/scope.md and the x-robots coverage test.
+      "x-robots-tag": "noindex",
     },
   });
 }
@@ -139,4 +144,15 @@ function buildBlock(config: Config): string {
 function isTextish(ct: string | null): boolean {
   if (!ct) return true;
   return /^text\/(plain|markdown)/i.test(ct);
+}
+
+/**
+ * Clone a response and add `X-Robots-Tag: noindex`. Used when relaying an
+ * origin response from a /.well-known/* route - the origin's headers may not
+ * include the noindex tag, but the protected-prefix rule requires it.
+ */
+function withNoindex(res: Response): Response {
+  const headers = new Headers(res.headers);
+  headers.set("x-robots-tag", "noindex");
+  return new Response(res.body, { status: res.status, statusText: res.statusText, headers });
 }

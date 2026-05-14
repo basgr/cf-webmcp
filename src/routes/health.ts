@@ -28,13 +28,19 @@ function timingSafeEqual(a: string, b: string): boolean {
  */
 export function healthResponse(request: Request, config: Config, opts: HealthOptions): Response {
   if (!config.health.public && !config.health.token) {
-    return new Response("health endpoint disabled", { status: 404 });
+    return new Response("health endpoint disabled", {
+      status: 404,
+      headers: { "x-robots-tag": "noindex" },
+    });
   }
   if (config.health.token) {
     const auth = request.headers.get("authorization") ?? "";
     const expected = `Bearer ${config.health.token}`;
     if (!timingSafeEqual(auth, expected)) {
-      return new Response("unauthorized", { status: 401 });
+      return new Response("unauthorized", {
+        status: 401,
+        headers: { "x-robots-tag": "noindex" },
+      });
     }
   }
   const body = {
