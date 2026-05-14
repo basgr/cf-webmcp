@@ -8,14 +8,35 @@ A Cloudflare Worker that sits in front of a website and equips it with [WebMCP](
 
 ## What it does
 
-For each request:
+For each request, the Worker does one of two things:
 
-- If the request matches a Worker-owned path (manifest, `/mcp` landing, `/_webmcp/exec/*`, `/_webmcp/health`, `/llms.txt`, `/robots.txt`, `/.well-known/agents.md` and its 301 aliases, `/.well-known/api-catalog`, `/.well-known/agent-skills/<slug>/SKILL.md` and its 301 aliases), the Worker handles it directly.
-- Otherwise the Worker proxies to origin. On the way back, two modifications happen:
-  - **HTTP `Link: <...>; rel="webmcp"` header is added to every proxied response**, regardless of body type (HTML, PDF, image, JSON, etc.). Agents that only do a `HEAD` request can find the manifest without parsing the body.
-  - **On HTML responses only** (status 200, `text/html`, UTF-8, path not in `[injection].exclude_paths`), HTMLRewriter additionally injects one `<link rel="webmcp">` into `<head>` and one `<script src="/_webmcp/bootstrap.<hash>.js" defer>` before `</body>`. If a `[[forms]]` block matches the current path, the W3C declarative form attributes (`toolname`, `tooldescription`, `toolparamdescription`, `toolautosubmit`) are also stamped onto matching forms. Non-HTML responses (PDFs, images, JSON, CSS, JS, etc.) pass through with their body unchanged.
+**1. Handle a Worker-owned path directly.**
 
-The tool catalogue lives in one TOML file. Three templates ship: `default`, `wordpress`, `woocommerce` (Store API).
+| Path | What lives there |
+|------|------------------|
+| `/.well-known/webmcp.json` | Tool-catalogue manifest, machine-readable JSON |
+| `/.well-known/api-catalog` | [RFC 9727](https://www.rfc-editor.org/rfc/rfc9727.html) Linkset (RFC 9264) pointing at the manifest |
+| `/.well-known/agents.md` (+ `/AGENTS.md`, `/agents.md` 301 aliases) | AGENTS.md augmentation block for acting agents |
+| `/.well-known/agent-skills/<slug>/SKILL.md` (+ case-variant 301 aliases) | Anthropic-format Agent Skill, auto-generated from `[[tools]]` plus publisher hints |
+| `/llms.txt` | Origin's llms.txt with a WebMCP block merged in |
+| `/robots.txt` | Origin's robots.txt with `Disallow: /_webmcp/` merged in |
+| `/mcp` | Landing page: native-API, desktop-pairing, or disabled state |
+| `/_webmcp/exec/<tool>` | Tool execution endpoint (POST) |
+| `/_webmcp/bootstrap.<hash>.js` | In-page tool registration script |
+| `/_webmcp/widget.<hash>.js` | Optional desktop-bridge widget |
+| `/_webmcp/health` | Operational health endpoint |
+
+**2. Otherwise, proxy to origin and modify the response on the way back.**
+
+- **HTTP `Link` header** added to every proxied response (HTML, PDF, image, JSON, anything). One entry per discovery surface: `rel="webmcp"` to the manifest, `rel="api-catalog"` to the catalog, `rel="agent-skills"` to the SKILL.md. An agent doing a `HEAD` request finds all three without parsing a body.
+- **On HTML responses only** (status 200, `text/html`, UTF-8, path not in `[injection].exclude_paths`), HTMLRewriter injects:
+  - matching `<link>` tags into `<head>` (`rel="webmcp"`, `rel="api-catalog"`, `rel="agent-skills"`),
+  - one `<script src="/_webmcp/bootstrap.<hash>.js" defer>` before `</body>` that auto-registers the tools via `navigator.modelContext`,
+  - W3C declarative form attributes (`toolname`, `tooldescription`, `toolparamdescription`, `toolautosubmit`) stamped onto matching `<form>` elements when a `[[forms]]` block matches the current path.
+
+Non-HTML responses (PDFs, images, JSON, CSS, JS, etc.) pass through with their body unchanged but with the `Link` header added.
+
+The tool catalogue lives in one TOML file. Five server-side executor types (`sitemap_filter`, `rss_feed`, `dom_extract`, `http_json`, `http_get`) cover the imperative tool path; `[[forms]]` blocks cover the declarative-form path. Three deploy templates ship: `default`, `wordpress`, `woocommerce` (Store API).
 
 ## Discovery surfaces
 
