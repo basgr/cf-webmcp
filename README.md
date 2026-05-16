@@ -54,6 +54,9 @@ cf-webmcp publishes the same tool catalogue through multiple complementary surfa
 
 Plus five executor types (`sitemap_filter`, `rss_feed`, `dom_extract`, `http_json`, `http_get`) for the imperative tool path, and a `[[forms]]` block for the declarative form path.
 
+> [!NOTE]
+> **Every surface above is opt-in.** Each one maps to a single boolean in your `[features]` block. If you disagree with a convention or do not want to publish it, flip the flag off and the route disappears, the link advertisement drops out, and no fingerprint is left. `llms.txt` is the most widely-debated example: set `llms_txt = false` and cf-webmcp stops claiming the path entirely. Same applies to `agents.md`, `api-catalog`, `agent-skills`, `fallback_widget`, form-attribute injection, and the in-page `<script>` bootstrap. Defaults are "on" because cf-webmcp's value is publishing discovery surfaces; opting out is one TOML edit away. See [`docs/scope.md`](docs/scope.md) for what is in and out of scope at the project level.
+
 ## Quick start
 
 ```bash
