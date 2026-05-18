@@ -69,6 +69,10 @@ Any `false` or `undefined` value means the flag is not enabled in the current br
 
 The same probe runs automatically on `/mcp` and prints its results in the **"Diagnostic: what this page detected"** disclosure at the bottom.
 
+### Or use the WebMCP Inspector extension
+
+The upstream `webmachinelearning/webmcp` project ships an **Inspector** browser extension. Once installed, it surfaces the tools a page has registered, the `<link rel="webmcp">` it advertises, and (where present) the manifest URL. Useful as a one-glance sanity check that your `cf-webmcp` deploy is doing what you expect, without writing a console probe. See the upstream repo for the install link and current limitations.
+
 ## What if a visitor doesn't enable the flag
 
 That is the entire reason `fallback_widget = true` exists. With the widget enabled:
