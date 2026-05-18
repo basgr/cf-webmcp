@@ -55,6 +55,20 @@ The following are real, useful things, but they are not WebMCP and would dilute 
 
 - **Image transformation, A/B testing, analytics, edge auth, geo-routing.** Worth doing, not by cf-webmcp.
 
+## Watching, not building yet
+
+Things that *could* fit cf-webmcp's scope but where one observed signal isn't enough to justify building. Listed here so contributors don't re-propose them in isolation, and so a second signal flips them to "in scope, file an issue".
+
+### Structured `[[resources]]` block for glossary publication
+
+**Signal**: in May 2026 a third-party WebMCP adoption write-up [described an agent succeeding on a complex SaaS dashboard because the publisher exposed a Glossary alongside tools](https://www.linkedin.com/feed/) - mapping the publisher's terminology ("MID", "CI", "MA") to the spec terms the model recognises. Without that mapping the same agent struggled. Sequencing/timing hints ("space transactions 10s apart to test dupe-check") also helped.
+
+**Why it might fit**: glossary publication is a discovery surface, not a runtime concern. Same shape as our other well-known files (markdown or JSON at a stable path, configurable mode). Auto-generated where possible from existing TOML context.
+
+**Why we're not building yet**: hints/glossary content already fits inside the existing `[[agent_skills.hints]]` blocks (free-form markdown sections after the tool list in `SKILL.md`). A `[[resources]]` block would add a second mechanism for the same job. We need a second signal from a different source - ideally a publisher (not a competing tool author) saying "I tried hints in SKILL.md and they were not enough because X" - before adding the new block.
+
+**What would flip this to in-scope**: a publisher report that publishes a Glossary using a different convention (e.g. JSON-shaped per a draft spec, or a stand-alone `/.well-known/glossary.json` URL that some agent runtime actively scans), OR a published spec in `webmachinelearning/webmcp` or Anthropic Skills that defines a canonical glossary resource shape.
+
 ## How feature requests get triaged
 
 If a proposed feature is on the **in scope** list above, file an issue and let's discuss.
