@@ -271,6 +271,71 @@ description = "child description"
     expect(files["bootstrap.js"]).toContain("registerTool");
   });
 
+  it("bootstrap.js emits WebMCP ToolAnnotations defaults per executor type", async () => {
+    // MINIMAL uses sitemap_filter -> readOnlyHint:true, untrustedContentHint:false
+    const toml = await writeToml("annot-sitemap.toml", MINIMAL);
+    const { files } = await runBuild(toml);
+    const js = files["bootstrap.js"]!;
+    expect(js).toContain('"name":"search_pages"');
+    expect(js).toContain('"annotations":{"readOnlyHint":true,"untrustedContentHint":false}');
+  });
+
+  it("bootstrap.js sets untrustedContentHint:true for content-fetching executors", async () => {
+    const withDom = `${MINIMAL}
+
+[[tools]]
+name        = "get_page"
+description = "Fetch a page"
+
+  [tools.input_schema]
+  type     = "object"
+  required = ["path"]
+
+    [tools.input_schema.properties.path]
+    type = "string"
+
+  [tools.executor]
+  type         = "dom_extract"
+  url_template = "https://example.com{{path}}"
+`;
+    const toml = await writeToml("annot-dom.toml", withDom);
+    const { files } = await runBuild(toml);
+    const js = files["bootstrap.js"]!;
+    expect(js).toContain('"name":"get_page"');
+    expect(js).toContain('"annotations":{"readOnlyHint":true,"untrustedContentHint":true}');
+  });
+
+  it("bootstrap.js honors per-tool [tools.annotations] overrides", async () => {
+    const withOverride = `${MINIMAL}
+
+  [tools.annotations]
+  read_only_hint = false
+  untrusted_content_hint = true
+`;
+    const toml = await writeToml("annot-override.toml", withOverride);
+    const { files } = await runBuild(toml);
+    const js = files["bootstrap.js"]!;
+    // Default for sitemap_filter would be readOnlyHint:true, untrustedContentHint:false.
+    // Override should flip both.
+    expect(js).toContain('"name":"search_pages"');
+    expect(js).toContain('"annotations":{"readOnlyHint":false,"untrustedContentHint":true}');
+  });
+
+  it("bootstrap.js emits title only when set on the tool", async () => {
+    const withTitle = `${MINIMAL.replace(
+      'description = "Search the site."',
+      'title       = "Page Search"\ndescription = "Search the site."',
+    )}`;
+    const toml = await writeToml("title-set.toml", withTitle);
+    const { files } = await runBuild(toml);
+    const js = files["bootstrap.js"]!;
+    expect(js).toContain('"title":"Page Search"');
+    // And the no-title case should not emit a title field.
+    const tomlNoTitle = await writeToml("title-absent.toml", MINIMAL);
+    const { files: filesNoTitle } = await runBuild(tomlNoTitle);
+    expect(filesNoTitle["bootstrap.js"]!).not.toContain('"title"');
+  });
+
   it("landing.html escapes site description HTML", async () => {
     const toml = await writeToml(
       "evil-site.toml",

@@ -202,15 +202,51 @@ function buildManifest(config: Config, configHash: string, bootstrapName: string
 }
 
 /** The script body served at /<namespace>/bootstrap.<hash>.js. */
+/**
+ * Per-executor-type defaults for the WebMCP ToolAnnotations dictionary.
+ *
+ * All five executor types are read-only (none mutate origin state), so
+ * readOnlyHint defaults to true across the board. untrustedContentHint
+ * varies: sitemap_filter returns URL + lastmod strings (structurally
+ * constrained, low free-form-content risk), the other four surface
+ * origin-fetched content that an agent should treat with the usual
+ * untrusted-content care.
+ *
+ * Publishers can override either field per-tool via `[tools.annotations]`.
+ */
+function defaultAnnotationsFor(executorType: string): { readOnlyHint: boolean; untrustedContentHint: boolean } {
+  switch (executorType) {
+    case "sitemap_filter":
+      return { readOnlyHint: true, untrustedContentHint: false };
+    case "rss_feed":
+    case "dom_extract":
+    case "http_json":
+    case "http_get":
+      return { readOnlyHint: true, untrustedContentHint: true };
+    default:
+      return { readOnlyHint: false, untrustedContentHint: true };
+  }
+}
+
 function buildBootstrap(config: Config, configHash: string): string {
   const base = siteBase(config);
   const ns = config.paths.namespace;
-  const toolPayload = config.tools.map((t) => ({
-    name: t.name,
-    description: t.description,
-    inputSchema: t.input_schema,
-    endpoint: `${base}${ns}/exec/${t.name}`,
-  }));
+  const toolPayload = config.tools.map((t) => {
+    const defaults = defaultAnnotationsFor(t.executor.type);
+    const override = t.annotations ?? {};
+    const annotations = {
+      readOnlyHint: override.read_only_hint ?? defaults.readOnlyHint,
+      untrustedContentHint: override.untrusted_content_hint ?? defaults.untrustedContentHint,
+    };
+    return {
+      name: t.name,
+      ...(t.title !== undefined ? { title: t.title } : {}),
+      description: t.description,
+      inputSchema: t.input_schema,
+      annotations,
+      endpoint: `${base}${ns}/exec/${t.name}`,
+    };
+  });
 
   // Worker serves this file with content-type application/javascript; charset=utf-8.
   return `// cf-webmcp bootstrap, config_hash=${configHash}
@@ -222,10 +258,11 @@ function buildBootstrap(config: Config, configHash: string): string {
   var TOOLS = ${JSON.stringify(toolPayload)};
   TOOLS.forEach(function (t) {
     try {
-      ctx.registerTool({
+      var toolDef = {
         name: t.name,
         description: t.description,
         inputSchema: t.inputSchema,
+        annotations: t.annotations,
         execute: function (input) {
           return fetch(t.endpoint, {
             method: 'POST',
@@ -240,7 +277,9 @@ function buildBootstrap(config: Config, configHash: string): string {
             return { ok: false, error: { code: 'internal', message: String(e && e.message || e), retriable: true } };
           });
         },
-      });
+      };
+      if (t.title) toolDef.title = t.title;
+      ctx.registerTool(toolDef);
     } catch (e) {
       if (typeof console !== 'undefined' && console.warn) {
         console.warn('cf-webmcp: failed to register tool', t.name, e);

@@ -127,15 +127,41 @@ const ToolRateLimit = z
   })
   .partial();
 
+/**
+ * Mirrors the WebMCP `ToolAnnotations` dictionary (W3C draft, index.bs):
+ *
+ *   dictionary ToolAnnotations {
+ *     boolean readOnlyHint = false;
+ *     boolean untrustedContentHint = false;
+ *   };
+ *
+ * Snake-case in TOML; emitted as camelCase in the bootstrap registerTool call.
+ * Per-tool overrides take precedence over the executor-type defaults applied
+ * in scripts/build-config.ts.
+ */
+const ToolAnnotations = z
+  .object({
+    read_only_hint: z.boolean().optional(),
+    untrusted_content_hint: z.boolean().optional(),
+  })
+  .partial();
+
 const Tool = z.object({
   name: z
     .string()
     .min(1)
     .max(64)
     .regex(/^[a-z][a-z0-9_]*$/, "tool name must match /^[a-z][a-z0-9_]*$/"),
+  /**
+   * Optional human-friendly tool label. Mirrors the WebMCP draft's
+   * `USVString title` member of `ModelContextTool`. When set, surfaces in
+   * tool pickers as a friendlier label than the machine-friendly `name`.
+   */
+  title: z.string().min(1).optional(),
   description: z.string().min(1),
   input_schema: InputSchema.default({ type: "object", required: [], properties: {} }),
   executor: Executor,
+  annotations: ToolAnnotations.optional(),
   cache: ToolCache.optional(),
   rate_limit: ToolRateLimit.optional(),
 });
