@@ -29,6 +29,7 @@ robots_txt       = true
 agents_md        = true
 api_catalog      = true
 agent_skills     = true
+agent_skills_index = true
 fallback_widget  = false   # local dev does not have R2 widget ready
 
 [manifest]
@@ -72,6 +73,11 @@ aliases = [
 # body    = """
 # - "find anything about X" -> search_pages
 # """
+
+
+[agent_skills_index]
+path = "/.well-known/agent-skills/index.json"
+mode = "synthesize"   # synthesize | passthrough
 
 [paths]
 namespace = "/_webmcp"

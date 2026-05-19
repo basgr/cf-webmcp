@@ -6,7 +6,7 @@
  * to origin.
  */
 
-import { config, CONFIG_HASH, BOOTSTRAP_ASSET, WIDGET_ASSET, BUILD_AT, PREFLIGHT } from "./generated/config";
+import { config, CONFIG_HASH, BOOTSTRAP_ASSET, WIDGET_ASSET, BUILD_AT, PREFLIGHT, AGENT_SKILLS_DIGEST } from "./generated/config";
 import { BOOTSTRAP_JS as bootstrapJs, LANDING_HTML as landingHtml, MANIFEST_JSON as manifestJson } from "./generated/assets";
 
 import { matchRoute } from "./router";
@@ -21,6 +21,7 @@ import { robotsTxtResponse } from "./routes/robots-txt";
 import { agentsMdResponse, agentsMdRedirect } from "./routes/agents-md";
 import { apiCatalogResponse } from "./routes/api-catalog";
 import { agentSkillsResponse, agentSkillsRedirect } from "./routes/agent-skills";
+import { agentSkillsIndexResponse } from "./routes/agent-skills-index";
 import { buildLinkHeader, mergeLinkHeader } from "./link-header";
 import { formsForPath, injectIntoHtml, shouldInject } from "./injection/html-rewriter";
 
@@ -81,6 +82,8 @@ export default {
         return agentSkillsResponse(request, config, (u) => proxyToOrigin(u, env));
       case "agent_skills_redirect":
         return agentSkillsRedirect(config);
+      case "agent_skills_index":
+        return handleHeadable(request, agentSkillsIndexResponse(request, config, AGENT_SKILLS_DIGEST));
       case "proxy":
         return proxyAndMaybeInject(request, env);
     }

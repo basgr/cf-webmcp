@@ -112,7 +112,7 @@ export function mergeBlock(original: string, block: string): string {
   return `${trimmed}\n${BEGIN}\n${block}\n${END}\n`;
 }
 
-function buildFrontmatter(config: Config): string {
+export function buildFrontmatter(config: Config): string {
   const name = config.agent_skills.name || slugify(config.site.name);
   const description = config.agent_skills.description || config.site.description || `WebMCP-enabled site: ${config.site.name}`;
   // YAML frontmatter values are wrapped in double quotes to be defensive
@@ -120,7 +120,15 @@ function buildFrontmatter(config: Config): string {
   return `---\nname: ${yamlString(name)}\ndescription: ${yamlString(description)}\n---\n\n`;
 }
 
-function buildSkillBody(config: Config): string {
+/**
+ * Build the SKILL.md body without frontmatter. Exported so build-config.ts
+ * can compute the SHA-256 digest at build time for /.well-known/agent-skills/
+ * index.json (Cloudflare Agent Skills Discovery RFC). Synthesize and replace
+ * modes produce deterministic output from config; merge mode does not (origin
+ * content is part of the served body), which is why the index handler returns
+ * 404 when agent_skills.mode = "merge".
+ */
+export function buildSkillBody(config: Config): string {
   const base = config.site.public_url ?? `https://${config.site.domain}`;
   const manifestUrl = `${base}${config.manifest.path}`;
   const landingUrl = `${base}${config.webmcp_landing.path}`;

@@ -336,6 +336,45 @@ description = "Fetch a page"
     expect(filesNoTitle["bootstrap.js"]!).not.toContain('"title"');
   });
 
+  it("manifest.json includes links.agent_skills_index when feature on and stable", async () => {
+    const toml = await writeToml("links-on.toml", MINIMAL);
+    const { files } = await runBuild(toml);
+    const manifest = JSON.parse(files["manifest.json"]!);
+    expect(manifest.links.agent_skills_index).toMatch(/^https?:\/\/.+\/\.well-known\/agent-skills\/index\.json$/);
+  });
+
+  it("manifest.json omits links.agent_skills_index when feature off", async () => {
+    const off = `${MINIMAL}\n\n[features]\nagent_skills_index = false\n`;
+    const toml = await writeToml("links-off.toml", off);
+    const { files } = await runBuild(toml);
+    const manifest = JSON.parse(files["manifest.json"]!);
+    expect(manifest.links.agent_skills_index).toBeUndefined();
+  });
+
+  it("manifest.json omits links.agent_skills_index when agent_skills.mode is merge", async () => {
+    // Index URL is not advertised when the digest would be unstable.
+    const merge = `${MINIMAL}\n\n[agent_skills]\nmode = "merge"\n`;
+    const toml = await writeToml("links-merge.toml", merge);
+    const { files } = await runBuild(toml);
+    const manifest = JSON.parse(files["manifest.json"]!);
+    expect(manifest.links.agent_skills_index).toBeUndefined();
+  });
+
+  it("AGENT_SKILLS_DIGEST is a sha256:hex64 string when synthesise mode", async () => {
+    const toml = await writeToml("digest-on.toml", MINIMAL);
+    const { files } = await runBuild(toml);
+    const configTs = files["config.ts"]!;
+    expect(configTs).toMatch(/AGENT_SKILLS_DIGEST[^=]+=\s*"sha256:[0-9a-f]{64}"/);
+  });
+
+  it("AGENT_SKILLS_DIGEST is null when agent_skills.mode is merge", async () => {
+    const merge = `${MINIMAL}\n\n[agent_skills]\nmode = "merge"\n`;
+    const toml = await writeToml("digest-merge.toml", merge);
+    const { files } = await runBuild(toml);
+    const configTs = files["config.ts"]!;
+    expect(configTs).toMatch(/AGENT_SKILLS_DIGEST[^=]+=\s*null/);
+  });
+
   it("landing.html escapes site description HTML", async () => {
     const toml = await writeToml(
       "evil-site.toml",

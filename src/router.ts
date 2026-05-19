@@ -21,6 +21,7 @@ export interface RouteMatch {
     | "api_catalog"
     | "agent_skills"
     | "agent_skills_redirect"
+    | "agent_skills_index"
     | "proxy";
   /** Only set for exec routes. */
   toolName?: string;
@@ -103,6 +104,15 @@ export function matchRoute(config: Config, url: URL, bootstrapAsset: string, wid
     if (config.agent_skills.aliases.includes(pathname)) {
       return { kind: "agent_skills_redirect" };
     }
+  }
+
+  // Cloudflare Agent Skills Discovery RFC index file
+  if (
+    config.features.agent_skills_index &&
+    config.agent_skills_index.mode !== "passthrough" &&
+    pathname === config.agent_skills_index.path
+  ) {
+    return { kind: "agent_skills_index" };
   }
 
   return { kind: "proxy" };

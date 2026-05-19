@@ -28,6 +28,7 @@ import { robotsTxtResponse } from "./routes/robots-txt";
 import { agentsMdResponse, agentsMdRedirect } from "./routes/agents-md";
 import { apiCatalogResponse } from "./routes/api-catalog";
 import { agentSkillsResponse, agentSkillsRedirect } from "./routes/agent-skills";
+import { agentSkillsIndexResponse } from "./routes/agent-skills-index";
 
 const PROTECTED_PREFIXES = ["/_webmcp/", "/.well-known/"] as const;
 
@@ -53,6 +54,7 @@ const CLASSIFICATION: Record<RouteMatch["kind"], Classification> = {
   api_catalog: "noindex_required",              // /.well-known/api-catalog
   agent_skills: "noindex_required",             // /.well-known/agent-skills/<slug>/SKILL.md
   agent_skills_redirect: "noindex_required",    // aliases under /.well-known/agent-skills/
+  agent_skills_index: "noindex_required",       // /.well-known/agent-skills/index.json
   proxy: "exempt",                              // origin content; cf-webmcp does not own the response
 };
 
@@ -74,6 +76,7 @@ function samplePath(kind: RouteMatch["kind"], config: Config): string {
     case "api_catalog": return config.api_catalog.path;
     case "agent_skills": return config.agent_skills.path;
     case "agent_skills_redirect": return config.agent_skills.aliases[0] ?? "/.well-known/agent-skills/site/SKILLS.md";
+    case "agent_skills_index": return config.agent_skills_index.path;
     case "proxy": return "/";
   }
 }
@@ -85,7 +88,7 @@ function makeConfig(): Config {
     origin: { base_url: "https://example.com", allowed_origins: ["https://example.com"], forward_cookies: false },
     features: {
       inject_html: true, webmcp_landing: true, manifest: true, link_header: true, link_tag: true,
-      llms_txt: true, robots_txt: true, agents_md: true, api_catalog: true, agent_skills: true, fallback_widget: true,
+      llms_txt: true, robots_txt: true, agents_md: true, api_catalog: true, agent_skills: true, agent_skills_index: true, fallback_widget: true,
     },
     manifest: { path: "/.well-known/webmcp.json" },
     webmcp_landing: { path: "/mcp" },
@@ -105,6 +108,7 @@ function makeConfig(): Config {
       ],
       hints: [],
     },
+    agent_skills_index: { path: "/.well-known/agent-skills/index.json", mode: "synthesize" },
     paths: { namespace: "/_webmcp" },
     injection: { exclude_paths: [] },
     cache: {
@@ -116,7 +120,7 @@ function makeConfig(): Config {
       agents_md_redirect_max_age: 86400, agents_md_redirect_s_maxage: 604800,
       api_catalog_max_age: 300, api_catalog_s_maxage: 21600, api_catalog_swr: 86400, api_catalog_sie: 86400,
       agent_skills_max_age: 300, agent_skills_s_maxage: 21600, agent_skills_swr: 86400, agent_skills_sie: 86400,
-      agent_skills_redirect_max_age: 86400, agent_skills_redirect_s_maxage: 604800,
+      agent_skills_redirect_max_age: 86400, agent_skills_redirect_s_maxage: 604800, agent_skills_index_max_age: 300, agent_skills_index_s_maxage: 21600, agent_skills_index_swr: 86400, agent_skills_index_sie: 86400,
       bootstrap_max_age: 31536000, widget_max_age: 31536000,
       executor_defaults: { max_age: 0, s_maxage: 300, swr: 1800, sie: 86400 },
     },
@@ -199,6 +203,13 @@ async function responseFor(kind: RouteMatch["kind"], config: Config): Promise<Re
       return agentSkillsResponse(new Request("https://example.com/.well-known/agent-skills/site/SKILL.md"), config, proxy404);
     case "agent_skills_redirect":
       return agentSkillsRedirect(config);
+    case "agent_skills_index":
+      // Use a fake but well-formed digest; the handler emits a 200 either way.
+      return agentSkillsIndexResponse(
+        new Request("https://example.com" + config.agent_skills_index.path),
+        config,
+        `sha256:${"a".repeat(64)}`,
+      );
     case "proxy":
       // cf-webmcp does not own the response on the proxy path; the test verifies
       // only that the kind is classified "exempt", so a stub response suffices.

@@ -198,6 +198,7 @@ const Features = z.object({
   agents_md: z.boolean().default(true),
   api_catalog: z.boolean().default(true),
   agent_skills: z.boolean().default(true),
+  agent_skills_index: z.boolean().default(true),
   fallback_widget: z.boolean().default(true),
 });
 
@@ -262,6 +263,27 @@ const AgentSkillHint = z.object({
   body: z.string().min(1),
 });
 
+/**
+ * Cloudflare Agent Skills Discovery RFC v0.2.0 publishes a manifest of
+ * available skills at /.well-known/agent-skills/index.json. cf-webmcp emits
+ * a single-entry index pointing at its own SKILL.md, with a SHA-256 digest
+ * of the synthesised SKILL.md body computed at build time.
+ *
+ * Modes:
+ *   - synthesize (default): emit the index from config; digest pinned at build
+ *   - passthrough: do not register the route; origin owns the index
+ * Merge / replace are intentionally not exposed - merge is impossible (digest
+ * cannot include origin content without runtime fetches) and replace is
+ * functionally identical to synthesize for our one-skill case.
+ *
+ * When agent_skills.mode is "merge" the index handler returns 404 because
+ * the build-time digest would not match the merged body served at runtime.
+ */
+const AgentSkillsIndexBlock = z.object({
+  path: PathString.default("/.well-known/agent-skills/index.json"),
+  mode: z.enum(["synthesize", "passthrough"]).default("synthesize"),
+});
+
 const AgentSkillsBlock = z.object({
   path: PathString.default("/.well-known/agent-skills/site/SKILL.md"),
   mode: z.enum(["merge", "replace", "passthrough", "synthesize"]).default("synthesize"),
@@ -322,6 +344,10 @@ const CacheBlock = z.object({
   /** 301 redirect from agent-skills aliases to canonical path. Stable, so cache aggressively. */
   agent_skills_redirect_max_age: z.number().int().nonnegative().default(86_400),
   agent_skills_redirect_s_maxage: z.number().int().nonnegative().default(604_800),
+  agent_skills_index_max_age: z.number().int().nonnegative().default(300),
+  agent_skills_index_s_maxage: z.number().int().nonnegative().default(21_600),
+  agent_skills_index_swr: z.number().int().nonnegative().default(86_400),
+  agent_skills_index_sie: z.number().int().nonnegative().default(86_400),
   bootstrap_max_age: z.number().int().nonnegative().default(31_536_000),
   widget_max_age: z.number().int().nonnegative().default(31_536_000),
   executor_defaults: z
@@ -398,6 +424,7 @@ export const ConfigSchema = z.object({
   agents_md: AgentsMdBlock.default({}),
   api_catalog: ApiCatalogBlock.default({}),
   agent_skills: AgentSkillsBlock.default({}),
+  agent_skills_index: AgentSkillsIndexBlock.default({}),
   paths: PathsBlock.default({}),
   injection: InjectionBlock.default({}),
   cache: CacheBlock.default({}),

@@ -122,6 +122,61 @@ When the skill is enabled (`features.agent_skills = true` and mode not `passthro
 
 `rel="agent-skills"` is not yet IANA-registered; it follows the convention used in Anthropic's Agent Skills format. Same pattern as the existing private `rel="webmcp"`.
 
+## Discovery via `/.well-known/agent-skills/index.json`
+
+cf-webmcp also publishes a [Cloudflare Agent Skills Discovery RFC](https://github.com/cloudflare/agent-skills-discovery-rfc) index file (v0.2.0 draft) listing the SKILL.md with a SHA-256 digest. Agent runtimes that scan well-known paths for an index find your skill there, verify its integrity, then fetch the SKILL.md.
+
+Default emitted shape:
+
+```json
+{
+  "$schema": "https://schemas.agentskills.io/discovery/0.2.0/schema.json",
+  "skills": [
+    {
+      "name": "example-site",
+      "type": "skill-md",
+      "description": "...",
+      "url": "/.well-known/agent-skills/site/SKILL.md",
+      "digest": "sha256:<64hex>"
+    }
+  ]
+}
+```
+
+The digest is computed at build time over the SKILL.md body (frontmatter + body). Agents per the RFC verify it before parsing.
+
+### Modes
+
+- **`synthesize`** (default): cf-webmcp emits the index pointing at our SKILL.md
+- **`passthrough`**: do not register the route; origin owns it (use if you author a multi-skill index by hand)
+
+`merge` and `replace` are intentionally not supported. `merge` would require fetching origin on every request to compute a stable digest; `replace` is functionally identical to `synthesize` for our one-skill case.
+
+### Constraint: requires stable SKILL.md content
+
+If `[agent_skills].mode = "merge"`, the served SKILL.md mixes in origin content and the build-time digest cannot represent it. The index route returns `404` with an explanatory body in that case rather than serve a stale digest. Switch `[agent_skills].mode` to `synthesize` or `replace` to enable the index, or set `[features].agent_skills_index = false` to silence it.
+
+### Config
+
+```toml
+[features]
+agent_skills_index = true   # default true
+
+[agent_skills_index]
+path = "/.well-known/agent-skills/index.json"   # RFC well-known
+mode = "synthesize"                              # synthesize | passthrough
+
+[cache]
+agent_skills_index_max_age   = 300
+agent_skills_index_s_maxage  = 21600
+agent_skills_index_swr       = 86400
+agent_skills_index_sie       = 86400
+```
+
+### Version lock
+
+cf-webmcp emits the `$schema` URI for v0.2.0 of the RFC. If the RFC bumps incompatibly (as v0.1.0 → v0.2.0 already did), we revise in a future release. Per the spec, agents MUST check `$schema` and skip unknown versions cleanly.
+
 ## Verify
 
 ```bash

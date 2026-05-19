@@ -16,6 +16,7 @@
 - **`/.well-known/agents.md`** publication with `/AGENTS.md` and `/agents.md` 301 aliases
 - **`/.well-known/api-catalog`** ([RFC 9727](https://www.rfc-editor.org/rfc/rfc9727.html)) publication pointing at the WebMCP manifest
 - **`/.well-known/agent-skills/<slug>/SKILL.md`** publication (Anthropic-format Agent Skill) with case-variant 301 aliases
+- **`/.well-known/agent-skills/index.json`** publication ([Cloudflare Agent Skills Discovery RFC](https://github.com/cloudflare/agent-skills-discovery-rfc) v0.2.0) with a build-time SHA-256 digest of the SKILL.md
 - **Build-time SSRF allow-list** validation
 - **Per-IP and per-tool rate limiting**
 - **`/_webmcp/health`** operational endpoint

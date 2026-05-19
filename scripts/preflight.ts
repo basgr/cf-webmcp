@@ -92,6 +92,9 @@ function pathsToCheck(config: Config): PathCheck[] {
       out.push({ label: alias, url: new URL(alias, base), expect: "claim" });
     }
   }
+  if (config.features.agent_skills_index && config.agent_skills_index.mode !== "passthrough") {
+    out.push({ label: config.agent_skills_index.path, url: new URL(config.agent_skills_index.path, base), expect: "claim" });
+  }
   // Namespace probe - verifies origin does not serve anything under /_webmcp/.
   out.push({
     label: `${config.paths.namespace}/__probe`,

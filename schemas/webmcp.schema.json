@@ -105,6 +105,10 @@
               "type": "boolean",
               "default": true
             },
+            "agent_skills_index": {
+              "type": "boolean",
+              "default": true
+            },
             "fallback_widget": {
               "type": "boolean",
               "default": true
@@ -288,6 +292,25 @@
                 "additionalProperties": false
               },
               "default": []
+            }
+          },
+          "additionalProperties": false,
+          "default": {}
+        },
+        "agent_skills_index": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "$ref": "#/definitions/WebMCPConfig/properties/manifest/properties/path",
+              "default": "/.well-known/agent-skills/index.json"
+            },
+            "mode": {
+              "type": "string",
+              "enum": [
+                "synthesize",
+                "passthrough"
+              ],
+              "default": "synthesize"
             }
           },
           "additionalProperties": false,
@@ -481,6 +504,26 @@
               "minimum": 0,
               "default": 604800
             },
+            "agent_skills_index_max_age": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 300
+            },
+            "agent_skills_index_s_maxage": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 21600
+            },
+            "agent_skills_index_swr": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 86400
+            },
+            "agent_skills_index_sie": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 86400
+            },
             "bootstrap_max_age": {
               "type": "integer",
               "minimum": 0,
@@ -584,6 +627,10 @@
                 "minLength": 1,
                 "maxLength": 64,
                 "pattern": "^[a-z][a-z0-9_]*$"
+              },
+              "title": {
+                "type": "string",
+                "minLength": 1
               },
               "description": {
                 "type": "string",
@@ -851,6 +898,18 @@
                     "additionalProperties": false
                   }
                 ]
+              },
+              "annotations": {
+                "type": "object",
+                "properties": {
+                  "read_only_hint": {
+                    "type": "boolean"
+                  },
+                  "untrusted_content_hint": {
+                    "type": "boolean"
+                  }
+                },
+                "additionalProperties": false
               },
               "cache": {
                 "type": "object",
