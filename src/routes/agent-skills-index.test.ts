@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { createHash } from "node:crypto";
 import { agentSkillsIndexResponse, AGENT_SKILLS_INDEX_SCHEMA_URI } from "./agent-skills-index";
-import { buildFrontmatter, buildSkillBody } from "./agent-skills";
+import { agentSkillsResponse, buildFrontmatter, buildSkillBody } from "./agent-skills";
 import type { Config } from "../config-types";
 
 function makeConfig(overrides: Partial<Config> = {}): Config {
@@ -147,6 +147,25 @@ describe("agentSkillsIndexResponse", () => {
     });
     const body = await (await agentSkillsIndexResponse(new Request("https://example.com/.well-known/agent-skills/index.json"), config, FAKE_DIGEST)).json() as { skills: Array<{ name: string }> };
     expect(body.skills[0]!.name).toBe("custom-name-with-spaces");
+  });
+
+  it("digest matches the actual served SKILL.md body end-to-end (synthesize)", async () => {
+    // Defends against future refactors of agentSkillsResponse drifting from
+    // buildFrontmatter+buildSkillBody. The build pipeline hashes the latter;
+    // the runtime serves whatever agentSkillsResponse produces; the two
+    // must remain byte-identical or the digest claim is broken.
+    const config = makeConfig();
+    const proxy404 = async () => new Response("", { status: 404 });
+    const servedBody = await (
+      await agentSkillsResponse(
+        new Request("https://example.com" + config.agent_skills.path),
+        config,
+        proxy404,
+      )
+    ).text();
+    const servedDigest = `sha256:${sha256Hex(servedBody)}`;
+    const buildDigest = `sha256:${sha256Hex(buildFrontmatter(config) + buildSkillBody(config))}`;
+    expect(servedDigest).toBe(buildDigest);
   });
 
   it("emits a stable byte-exact JSON output (trailing newline, 2-space indent)", async () => {

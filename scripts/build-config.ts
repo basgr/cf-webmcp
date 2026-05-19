@@ -470,6 +470,45 @@ const EMPTY_PREFLIGHT: PreflightResult = { ran_at: null, collisions: [], warning
  *   - agent_skills mode is merge (origin content is part of the body)
  *   - agent_skills mode is passthrough (we do not serve the SKILL.md)
  */
+/**
+ * Refuse builds where two cf-webmcp surfaces are configured to the same
+ * path. Router uses first-match semantics, so colliding paths cause the
+ * second-listed surface to silently never serve. Catches publisher
+ * misconfiguration at build time rather than at production smoke.
+ */
+function checkPathCollisions(config: Config): void {
+  const claimed: Array<{ name: string; path: string }> = [];
+  if (config.features.manifest) claimed.push({ name: "manifest", path: config.manifest.path });
+  if (config.features.webmcp_landing) claimed.push({ name: "webmcp_landing", path: config.webmcp_landing.path });
+  if (config.features.llms_txt && config.llms_txt.mode !== "passthrough") claimed.push({ name: "llms_txt", path: config.llms_txt.path });
+  if (config.features.robots_txt && config.robots_txt.mode !== "passthrough") claimed.push({ name: "robots_txt", path: config.robots_txt.path });
+  if (config.features.agents_md && config.agents_md.mode !== "passthrough") {
+    claimed.push({ name: "agents_md", path: config.agents_md.path });
+    for (const a of config.agents_md.aliases) claimed.push({ name: "agents_md.alias", path: a });
+  }
+  if (config.features.api_catalog && config.api_catalog.mode !== "passthrough") {
+    claimed.push({ name: "api_catalog", path: config.api_catalog.path });
+  }
+  if (config.features.agent_skills && config.agent_skills.mode !== "passthrough") {
+    claimed.push({ name: "agent_skills", path: config.agent_skills.path });
+    for (const a of config.agent_skills.aliases) claimed.push({ name: "agent_skills.alias", path: a });
+  }
+  if (config.features.agent_skills_index && config.agent_skills_index.mode !== "passthrough") {
+    claimed.push({ name: "agent_skills_index", path: config.agent_skills_index.path });
+  }
+  const seen = new Map<string, string>();
+  for (const c of claimed) {
+    const existing = seen.get(c.path);
+    if (existing) {
+      throw new Error(
+        `[build-config] path collision: both "${existing}" and "${c.name}" are configured to claim ${c.path}. ` +
+          `Router uses first-match semantics; one surface would silently never serve. Reconfigure one of the paths.`,
+      );
+    }
+    seen.set(c.path, c.name);
+  }
+}
+
 async function computeAgentSkillsDigest(config: Config): Promise<string | null> {
   if (!config.features.agent_skills_index) return null;
   if (config.agent_skills_index.mode === "passthrough") return null;
@@ -505,6 +544,7 @@ export async function buildConfig(opts: BuildOptions): Promise<void> {
     }
   }
   checkAllowList(config);
+  checkPathCollisions(config);
 
   const canonical = JSON.stringify(config); // deterministic enough
   const configHash = computeHash(canonical);

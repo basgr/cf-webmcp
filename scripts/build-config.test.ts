@@ -375,6 +375,19 @@ description = "Fetch a page"
     expect(configTs).toMatch(/AGENT_SKILLS_DIGEST[^=]+=\s*null/);
   });
 
+  it("refuses path collisions between any two Worker-owned surfaces", async () => {
+    // Pointing agent_skills_index at the same path as agent_skills would
+    // cause the index to silently never serve (router first-match wins).
+    const collision = `${MINIMAL}
+
+[agent_skills_index]
+path = "/.well-known/agent-skills/site/SKILL.md"
+mode = "synthesize"
+`;
+    const toml = await writeToml("collision.toml", collision);
+    await expect(runBuild(toml)).rejects.toThrow(/path collision/i);
+  });
+
   it("landing.html escapes site description HTML", async () => {
     const toml = await writeToml(
       "evil-site.toml",
