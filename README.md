@@ -15,7 +15,7 @@ For each request, the Worker does one of two things:
 | Path | What lives there |
 |------|------------------|
 | `/.well-known/webmcp.json` | Tool-catalogue manifest, machine-readable JSON |
-| `/.well-known/api-catalog` | [RFC 9727](https://www.rfc-editor.org/rfc/rfc9727.html) Linkset (RFC 9264) pointing at the manifest |
+| `/.well-known/api-catalog` | RFC 9727 Linkset (RFC 9264) pointing at the manifest |
 | `/.well-known/agents.md` (+ `/AGENTS.md`, `/agents.md` 301 aliases) | AGENTS.md augmentation block for acting agents |
 | `/.well-known/agent-skills/<slug>/SKILL.md` (+ case-variant 301 aliases) | Anthropic-format Agent Skill, auto-generated from `[[tools]]` plus publisher hints |
 | `/.well-known/agent-skills/index.json` | Cloudflare Agent Skills Discovery RFC v0.2.0 index with build-time SHA-256 digest |
