@@ -106,6 +106,18 @@ After deploy, hit `https://yourdomain.com/_webmcp/health` to confirm the Worker 
 - **Use one origin per deployment.** `allowed_origins` is a defence-in-depth measure, not a multi-tenant feature. If you genuinely need multiple origins (e.g. CDN + API on different hosts), list all of them; otherwise keep it to one.
 - **The Worker double-checks the post-redirect URL.** If your origin 301s to a host outside `allowed_origins`, the Worker refuses to relay the response. This is intentional and prevents an open-redirect at origin from defeating the allow-list. If you have a legitimate cross-host redirect, add the target to `allowed_origins`.
 
+## Subresource Integrity (SRI) on the injected bootstrap
+
+Since v0.3.6 the injected `<script src="/_webmcp/bootstrap.<hash>.js" defer>` tag carries `integrity="sha384-..."` and `crossorigin="anonymous"`. Browsers refuse to execute the bootstrap if its body has been substituted between server and client (compromised CDN node, intermediary cache poisoning). Toggle via `[features].subresource_integrity` (default `true`).
+
+If the origin publishes a Content Security Policy with `script-src` restrictions, two cases:
+
+- **`script-src 'self'`** - works without changes; the bootstrap is same-origin.
+- **`script-src 'self' 'unsafe-inline'` or `'strict-dynamic'`** - works without changes; SRI integrates with the CSP hash mechanism.
+- **`script-src 'sha384-X'`** (explicit hash allowlist) - add the bootstrap hash from `src/generated/config.ts::BOOTSTRAP_SRI` to your CSP's `script-src` list. It rotates whenever the bootstrap content rotates (any TOML change that affects the bootstrap output).
+
+SRI does not defend against prompt-injection content embedded in TOML descriptions; see [`docs/security.md`](security.md) for that boundary.
+
 ## Bot Management / WAF
 
 Some Cloudflare products (Bot Management, custom WAF rules, rate-limiting) will see executor calls and origin fetches as bot traffic and may block them. The Worker sends:

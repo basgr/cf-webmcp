@@ -18,7 +18,7 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
       agents_md: true,
       api_catalog: true,
       agent_skills: true,
-      agent_skills_index: true,
+      agent_skills_index: true, subresource_integrity: true,
       fallback_widget: true,
     },
     manifest: { path: "/.well-known/webmcp.json" },

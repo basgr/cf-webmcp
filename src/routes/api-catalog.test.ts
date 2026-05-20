@@ -22,7 +22,7 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
       llms_txt: true,
       robots_txt: true,
       agents_md: true,
-      api_catalog: true, agent_skills: true, agent_skills_index: true,
+      api_catalog: true, agent_skills: true, agent_skills_index: true, subresource_integrity: true,
       fallback_widget: true,
     },
     manifest: { path: "/.well-known/webmcp.json" },

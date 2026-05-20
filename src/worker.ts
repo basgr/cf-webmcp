@@ -6,7 +6,7 @@
  * to origin.
  */
 
-import { config, CONFIG_HASH, BOOTSTRAP_ASSET, WIDGET_ASSET, BUILD_AT, PREFLIGHT, AGENT_SKILLS_DIGEST } from "./generated/config";
+import { config, CONFIG_HASH, BOOTSTRAP_ASSET, WIDGET_ASSET, BUILD_AT, PREFLIGHT, AGENT_SKILLS_DIGEST, BOOTSTRAP_SRI } from "./generated/config";
 import { BOOTSTRAP_JS as bootstrapJs, LANDING_HTML as landingHtml, MANIFEST_JSON as manifestJson } from "./generated/assets";
 
 import { matchRoute } from "./router";
@@ -161,6 +161,7 @@ async function proxyAndMaybeInject(request: Request, env: Env): Promise<Response
     config.features.agent_skills && config.agent_skills.mode !== "passthrough"
       ? `${base}${config.agent_skills.path}`
       : undefined;
+  const bootstrapIntegrity = BOOTSTRAP_SRI ?? undefined;
   const forms = formsForPath(config.forms, reqUrl.pathname);
   const injected = injectIntoHtml(upstream, {
     manifestUrl,
@@ -168,6 +169,7 @@ async function proxyAndMaybeInject(request: Request, env: Env): Promise<Response
     emitLinkTag: config.features.link_tag,
     apiCatalogUrl,
     agentSkillsUrl,
+    bootstrapIntegrity,
     forms,
   });
   return withLinkHeader(injected);

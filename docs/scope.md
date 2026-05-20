@@ -2,6 +2,8 @@
 
 `cf-webmcp` is a Cloudflare Worker that adds **WebMCP** to a website. It is not "the agent-ready everything Worker". This page lists what's in scope and what isn't, so feature requests get clear, fast answers.
 
+For the security boundary cf-webmcp does and does not enforce, see [`docs/security.md`](security.md).
+
 ## In scope
 
 - **WebMCP manifest** at `/.well-known/webmcp.json`

@@ -48,6 +48,8 @@ Search is path-based, not full-text.
 
 The frontmatter `name` and `description` derive from `[site].name` and `[site].description`. The tool list is auto-generated from `[[tools]]` and `[[forms]]`. The "When to use which" and "Common pitfalls" sections come from `[[agent_skills.hints]]` blocks you write in TOML.
 
+Hint `body` is rendered into agent-visible markdown - see [`docs/security.md`](security.md) before pasting user-generated content into hint fields.
+
 ## Config
 
 ```toml

@@ -13,7 +13,7 @@ const baseConfig: Config = {
     link_header: true,
     link_tag: true,
     llms_txt: true,
-    robots_txt: true, agents_md: true, api_catalog: true, agent_skills: true, agent_skills_index: true,
+    robots_txt: true, agents_md: true, api_catalog: true, agent_skills: true, agent_skills_index: true, subresource_integrity: true,
     fallback_widget: true,
   },
   manifest: { path: "/.well-known/webmcp.json" },
@@ -181,6 +181,35 @@ describe("injectIntoHtml", () => {
     const res = new Response("<html><head></head><body>x</body></html>", { status: 200, headers: { "content-type": "text/html" } });
     const out = await injectIntoHtml(res, opts).text();
     expect(out).not.toContain('rel="agent-skills"');
+  });
+
+  it("adds integrity + crossorigin attributes when bootstrapIntegrity is set", async () => {
+    const sri = "sha384-X3vKvL7n9bN0kfZj0xJpYY2pVDxQ4dQsB6mHcqLwTLZ7l6gAqQB1qO2xkSjqJ7Tk";
+    const res = new Response("<html><head></head><body>x</body></html>", { status: 200, headers: { "content-type": "text/html" } });
+    const out = await injectIntoHtml(res, { ...opts, bootstrapIntegrity: sri }).text();
+    expect(out).toContain(`integrity="${sri}"`);
+    expect(out).toContain('crossorigin="anonymous"');
+    // Must remain on the same <script> tag (no order regression that would
+    // drop crossorigin onto a different element).
+    expect(out).toMatch(/<script[^>]+defer[^>]+integrity[^>]+crossorigin[^>]*>/);
+  });
+
+  it("omits integrity + crossorigin when bootstrapIntegrity is undefined", async () => {
+    const res = new Response("<html><head></head><body>x</body></html>", { status: 200, headers: { "content-type": "text/html" } });
+    const out = await injectIntoHtml(res, opts).text();
+    expect(out).not.toContain("integrity=");
+    expect(out).not.toContain('crossorigin="anonymous"');
+  });
+
+  it("escapes bootstrapIntegrity value to prevent attribute breakout", async () => {
+    // A pathological integrity string with quotes / brackets must not break
+    // out of the attribute. Real SRI hashes never contain these chars, but
+    // the escape applies regardless.
+    const evil = 'sha384-x"><script>alert(1)</script>';
+    const res = new Response("<html><head></head><body>x</body></html>", { status: 200, headers: { "content-type": "text/html" } });
+    const out = await injectIntoHtml(res, { ...opts, bootstrapIntegrity: evil }).text();
+    expect(out).not.toContain('"><script>alert(1)');
+    expect(out).toContain("&quot;");
   });
 });
 

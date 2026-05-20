@@ -28,6 +28,13 @@ export interface InjectOptions {
   apiCatalogUrl?: string;
   /** When set, an additional <link rel="agent-skills"> is injected alongside the webmcp link. */
   agentSkillsUrl?: string;
+  /**
+   * Subresource Integrity hash for the bootstrap body, formatted as
+   * "sha384-<base64>". When set, the injected script tag carries both
+   * `integrity="<value>"` and `crossorigin="anonymous"` so browsers
+   * refuse to execute a substituted bootstrap body.
+   */
+  bootstrapIntegrity?: string;
   /** Forms whose path scope matches the current request. Empty array = no form stamping on this response. */
   forms: FormInjectionConfig[];
 }
@@ -82,7 +89,15 @@ export function injectIntoHtml(response: Response, opts: InjectOptions): Respons
     ? `<link rel="agent-skills" href="${escapeAttr(opts.agentSkillsUrl)}">`
     : "";
   const linkTags = webmcpTag + apiCatalogTag + agentSkillsTag;
-  const scriptTag = `<script src="${escapeAttr(opts.bootstrapUrl)}" defer></script>`;
+  // Subresource Integrity: when a "sha384-<base64>" digest is supplied, emit
+  // it on the script tag. `crossorigin="anonymous"` is required by the SRI
+  // spec for the browser to perform the integrity check (even on same-origin
+  // scripts, where it is technically optional, an explicit anonymous request
+  // makes the intent unambiguous).
+  const sriAttrs = opts.bootstrapIntegrity
+    ? ` integrity="${escapeAttr(opts.bootstrapIntegrity)}" crossorigin="anonymous"`
+    : "";
+  const scriptTag = `<script src="${escapeAttr(opts.bootstrapUrl)}" defer${sriAttrs}></script>`;
 
   let rewriter = new HTMLRewriter()
     .on("head", {

@@ -375,6 +375,32 @@ description = "Fetch a page"
     expect(configTs).toMatch(/AGENT_SKILLS_DIGEST[^=]+=\s*null/);
   });
 
+  it("BOOTSTRAP_SRI is a sha384-base64 string when feature on", async () => {
+    const toml = await writeToml("sri-on.toml", MINIMAL);
+    const { files } = await runBuild(toml);
+    const configTs = files["config.ts"]!;
+    // Match sha384- followed by 64-char base64 (output of digest('base64') for 48 bytes).
+    expect(configTs).toMatch(/BOOTSTRAP_SRI[^=]+=\s*"sha384-[A-Za-z0-9+/]+=*"/);
+  });
+
+  it("BOOTSTRAP_SRI matches sha384(bootstrap.js bytes) byte-for-byte", async () => {
+    const { createHash } = await import("node:crypto");
+    const toml = await writeToml("sri-match.toml", MINIMAL);
+    const { files } = await runBuild(toml);
+    const configTs = files["config.ts"]!;
+    const sriMatch = configTs.match(/BOOTSTRAP_SRI[^=]+=\s*"(sha384-[^"]+)"/);
+    expect(sriMatch).not.toBeNull();
+    const expected = `sha384-${createHash("sha384").update(files["bootstrap.js"]!, "utf8").digest("base64")}`;
+    expect(sriMatch![1]).toBe(expected);
+  });
+
+  it("BOOTSTRAP_SRI is null when [features].subresource_integrity = false", async () => {
+    const off = `${MINIMAL}\n\n[features]\nsubresource_integrity = false\n`;
+    const toml = await writeToml("sri-off.toml", off);
+    const { files } = await runBuild(toml);
+    expect(files["config.ts"]!).toMatch(/BOOTSTRAP_SRI[^=]+=\s*null/);
+  });
+
   it("refuses path collisions between any two Worker-owned surfaces", async () => {
     // Pointing agent_skills_index at the same path as agent_skills would
     // cause the index to silently never serve (router first-match wins).

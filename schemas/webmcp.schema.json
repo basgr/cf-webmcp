@@ -109,6 +109,10 @@
               "type": "boolean",
               "default": true
             },
+            "subresource_integrity": {
+              "type": "boolean",
+              "default": true
+            },
             "fallback_widget": {
               "type": "boolean",
               "default": true

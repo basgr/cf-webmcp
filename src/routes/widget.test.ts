@@ -14,7 +14,7 @@ function makeConfig(): Config {
       link_header: true,
       link_tag: true,
       llms_txt: true,
-      robots_txt: true, agents_md: true, api_catalog: true, agent_skills: true, agent_skills_index: true,
+      robots_txt: true, agents_md: true, api_catalog: true, agent_skills: true, agent_skills_index: true, subresource_integrity: true,
       fallback_widget: true,
     },
     manifest: { path: "/.well-known/webmcp.json" },

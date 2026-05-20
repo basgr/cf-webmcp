@@ -199,6 +199,15 @@ const Features = z.object({
   api_catalog: z.boolean().default(true),
   agent_skills: z.boolean().default(true),
   agent_skills_index: z.boolean().default(true),
+  /**
+   * When true, cf-webmcp emits `integrity="sha384-..."` and
+   * `crossorigin="anonymous"` on the injected bootstrap `<script>` tag.
+   * Defends against network-level substitution of the bootstrap body
+   * (compromised CDN node, MITM on non-HTTPS legs, intermediary cache
+   * poisoning). Default true; turn off only if a downstream CSP or
+   * tooling layer cannot accept the integrity attribute (unusual).
+   */
+  subresource_integrity: z.boolean().default(true),
   fallback_widget: z.boolean().default(true),
 });
 

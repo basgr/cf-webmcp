@@ -9,7 +9,7 @@ This is the difference between "to add WebMCP to your forms, edit your codebase"
 For each `[[forms]]` block that matches the current request path, the Worker stamps four attributes:
 
 - **`toolname`** on the matched `<form>` element
-- **`tooldescription`** on the matched `<form>` element
+- **`tooldescription`** on the matched `<form>` element (rendered as agent-visible text; see [`docs/security.md`](security.md) before pasting user-generated content into description fields)
 - **`toolautosubmit`** on the matched `<form>` element (only when `autosubmit = true`)
 - **`toolparamdescription`** on each matched input/select/textarea inside the form
 

@@ -101,6 +101,7 @@ Full reference docs live in [`docs/`](docs/):
 **Project**
 
 - [Scope](docs/scope.md) - what cf-webmcp is and is not. Read this before opening a feature request.
+- [Security model](docs/security.md) - tool descriptions are not a security boundary; what cf-webmcp does and does not defend against.
 
 ## Acknowledgements
 
