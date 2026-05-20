@@ -110,11 +110,13 @@ After deploy, hit `https://yourdomain.com/_webmcp/health` to confirm the Worker 
 
 Since v0.3.6 the injected `<script src="/_webmcp/bootstrap.<hash>.js" defer>` tag carries `integrity="sha384-..."` and `crossorigin="anonymous"`. Browsers refuse to execute the bootstrap if its body has been substituted between server and client (compromised CDN node, intermediary cache poisoning). Toggle via `[features].subresource_integrity` (default `true`).
 
-If the origin publishes a Content Security Policy with `script-src` restrictions, two cases:
+If the origin publishes a Content Security Policy with `script-src` restrictions, three cases:
 
-- **`script-src 'self'`** - works without changes; the bootstrap is same-origin.
-- **`script-src 'self' 'unsafe-inline'` or `'strict-dynamic'`** - works without changes; SRI integrates with the CSP hash mechanism.
-- **`script-src 'sha384-X'`** (explicit hash allowlist) - add the bootstrap hash from `src/generated/config.ts::BOOTSTRAP_SRI` to your CSP's `script-src` list. It rotates whenever the bootstrap content rotates (any TOML change that affects the bootstrap output).
+- **`script-src 'self'`** (or anything that lists same-origin) - works without changes; the bootstrap is same-origin so the source-list match covers it. SRI on the tag is independent of CSP and continues to verify the body.
+- **`script-src 'strict-dynamic' ...`** (nonce/hash-propagating policy) - the injected `<script src=...>` tag is parser-inserted, not loaded by an already-trusted script, so `'strict-dynamic'` will NOT auto-trust it. Either pin the bootstrap in `script-src` with its SRI hash (see next bullet), or add `nonce-<value>` to the policy and stamp a matching `nonce` on the tag (cf-webmcp does not emit nonces today, so the hash route is simpler).
+- **`script-src 'sha384-X'`** (explicit hash allowlist) - add the bootstrap hash from `src/generated/config.ts::BOOTSTRAP_SRI` to your CSP's `script-src` list. The CSP hash-source for an external script and the SRI `integrity` value both hash the response body, so the same `sha384-X` string serves both. It rotates whenever the bootstrap rotates (any TOML change that affects the bootstrap output).
+
+Note: `'unsafe-inline'` has no effect on the bootstrap because the tag uses `src=...` rather than an inline body.
 
 SRI does not defend against prompt-injection content embedded in TOML descriptions; see [`docs/security.md`](security.md) for that boundary.
 
