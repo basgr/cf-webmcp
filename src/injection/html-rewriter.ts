@@ -29,6 +29,13 @@ export interface InjectOptions {
   /** When set, an additional <link rel="agent-skills"> is injected alongside the webmcp link. */
   agentSkillsUrl?: string;
   /**
+   * When set, an additional `<link rel="describedby" type="text/markdown">`
+   * is injected pointing at the llms.txt. IANA-registered relation per
+   * RFC 8288; lets generic scanners that only recognise standard rels
+   * find a publisher description of the site.
+   */
+  llmsTxtUrl?: string;
+  /**
    * Subresource Integrity hash for the bootstrap body, formatted as
    * "sha384-<base64>". When set, the injected script tag carries both
    * `integrity="<value>"` and `crossorigin="anonymous"` so browsers
@@ -88,7 +95,10 @@ export function injectIntoHtml(response: Response, opts: InjectOptions): Respons
   const agentSkillsTag = opts.agentSkillsUrl
     ? `<link rel="agent-skills" href="${escapeAttr(opts.agentSkillsUrl)}">`
     : "";
-  const linkTags = webmcpTag + apiCatalogTag + agentSkillsTag;
+  const describedByTag = opts.llmsTxtUrl
+    ? `<link rel="describedby" type="text/markdown" href="${escapeAttr(opts.llmsTxtUrl)}">`
+    : "";
+  const linkTags = webmcpTag + apiCatalogTag + agentSkillsTag + describedByTag;
   // Subresource Integrity: when a "sha384-<base64>" digest is supplied, emit
   // it on the script tag. `crossorigin="anonymous"` is required by the SRI
   // spec for the browser to perform the integrity check (even on same-origin

@@ -161,6 +161,10 @@ async function proxyAndMaybeInject(request: Request, env: Env): Promise<Response
     config.features.agent_skills && config.agent_skills.mode !== "passthrough"
       ? `${base}${config.agent_skills.path}`
       : undefined;
+  const llmsTxtUrl =
+    config.features.llms_txt && config.llms_txt.mode !== "passthrough"
+      ? `${base}${config.llms_txt.path}`
+      : undefined;
   const bootstrapIntegrity = BOOTSTRAP_SRI ?? undefined;
   const forms = formsForPath(config.forms, reqUrl.pathname);
   const injected = injectIntoHtml(upstream, {
@@ -169,6 +173,7 @@ async function proxyAndMaybeInject(request: Request, env: Env): Promise<Response
     emitLinkTag: config.features.link_tag,
     apiCatalogUrl,
     agentSkillsUrl,
+    llmsTxtUrl,
     bootstrapIntegrity,
     forms,
   });

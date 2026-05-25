@@ -201,6 +201,21 @@ describe("injectIntoHtml", () => {
     expect(out).not.toContain('crossorigin="anonymous"');
   });
 
+  it("adds <link rel=describedby type=text/markdown> when llmsTxtUrl set", async () => {
+    const res = new Response("<html><head></head><body>x</body></html>", { status: 200, headers: { "content-type": "text/html" } });
+    const out = await injectIntoHtml(res, {
+      ...opts,
+      llmsTxtUrl: "https://example.com/llms.txt",
+    }).text();
+    expect(out).toContain('<link rel="describedby" type="text/markdown" href="https://example.com/llms.txt">');
+  });
+
+  it("omits describedby link tag when llmsTxtUrl is undefined", async () => {
+    const res = new Response("<html><head></head><body>x</body></html>", { status: 200, headers: { "content-type": "text/html" } });
+    const out = await injectIntoHtml(res, opts).text();
+    expect(out).not.toContain('rel="describedby"');
+  });
+
   it("escapes bootstrapIntegrity value to prevent attribute breakout", async () => {
     // A pathological integrity string with quotes / brackets must not break
     // out of the attribute. Real SRI hashes never contain these chars, but

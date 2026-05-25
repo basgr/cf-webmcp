@@ -46,7 +46,7 @@ cf-webmcp publishes the same tool catalogue through multiple complementary surfa
 - `/.well-known/webmcp.json` (manifest, machine-readable)
 - `<link rel="webmcp">` injected into every HTML page
 - `Link: rel="webmcp"` HTTP header on every response
-- `/llms.txt` augmented with a WebMCP block (idempotent merge with origin's file)
+- `/llms.txt` augmented with a WebMCP block (idempotent merge with origin's file). Also advertised in the `Link` header and as `<link rel="describedby" type="text/markdown">` via the IANA-registered RFC 8288 relation, so generic agent-aware scanners that only recognise standard rels find a description of the site.
 - `/robots.txt` augmented with `Disallow: /_webmcp/` (idempotent merge)
 - `/.well-known/agents.md` for acting agents, with `/AGENTS.md` and `/agents.md` 301-redirecting to it
 - `/.well-known/api-catalog` ([RFC 9727](https://www.rfc-editor.org/rfc/rfc9727.html)) Linkset entry pointing at the WebMCP manifest. Also advertised in the `Link` header and as `<link rel="api-catalog">` on every response.

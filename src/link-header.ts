@@ -23,6 +23,13 @@ export function buildLinkHeader(config: Config): string {
     // Agent Skills format. Same pattern as our existing private rel="webmcp".
     entries.push(`<${base}${config.agent_skills.path}>; rel="agent-skills"`);
   }
+  if (config.features.llms_txt && config.llms_txt.mode !== "passthrough") {
+    // IANA-registered general "describedby" relation (RFC 8288). Points at
+    // /llms.txt - a publisher description in markdown. Generic agent-aware
+    // scanners that anchor on registered rel-types only (not our private
+    // rel="webmcp") find a description of the site through this entry.
+    entries.push(`<${base}${config.llms_txt.path}>; rel="describedby"; type="text/markdown"`);
+  }
   return entries.join(", ");
 }
 

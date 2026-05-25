@@ -107,6 +107,26 @@ describe("buildLinkHeader", () => {
     );
     expect(value).not.toContain('rel="agent-skills"');
   });
+
+  it("includes describedby rel pointing at llms.txt when llms_txt feature on", () => {
+    const value = buildLinkHeader(makeConfig());
+    // IANA-registered rel (RFC 8288); type hint per the same RFC.
+    expect(value).toContain('<https://example.com/llms.txt>; rel="describedby"; type="text/markdown"');
+  });
+
+  it("omits describedby when features.llms_txt is false", () => {
+    const value = buildLinkHeader(
+      makeConfig({ features: { ...makeConfig().features, llms_txt: false } }),
+    );
+    expect(value).not.toContain('rel="describedby"');
+  });
+
+  it("omits describedby when llms_txt mode is passthrough", () => {
+    const value = buildLinkHeader(
+      makeConfig({ llms_txt: { path: "/llms.txt", mode: "passthrough" } }),
+    );
+    expect(value).not.toContain('rel="describedby"');
+  });
 });
 
 describe("mergeLinkHeader", () => {
