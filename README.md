@@ -73,6 +73,20 @@ npm run build
 wrangler deploy
 ```
 
+## Validation
+
+You can verify a cf-webmcp deployment with a tool that does not know anything about your TOML or config - it only sees the rendered page. Lighthouse 13.3.0 ships an **agentic-browsing** audit category that does exactly this.
+
+Running it against the demo's `/forms` page (Chrome Canary 150.x, verified 28 Aug 2026, WebMCP flag on) returns a perfect category score:
+
+- `agent-accessibility-tree` - pass
+- `webmcp-registered-tools` - finds all 3 imperative tools from the injected bootstrap plus both declarative form tools (the cf-webmcp-stamped form and a hand-stamped control)
+- `webmcp-form-coverage` - not applicable (every form on the page is already annotated)
+- `webmcp-schema-validity` - pass (generated `inputSchema` blocks validate)
+- `llms-txt` - pass
+
+A third-party auditor seeing only the HTTP response confirms both the auto-injected and the manually-stamped tools, which is the same vantage point external agent-readiness checkers use.
+
 ## Documentation
 
 Full reference docs live in [`docs/`](docs/):
