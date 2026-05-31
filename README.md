@@ -122,7 +122,7 @@ Full reference docs live in [`docs/`](docs/):
 - Suganthan Mohanadasan, ["WebMCP: I Made My Website AI Agent Ready"](https://suganthan.com/blog/webmcp-implementation-guide/) - the implementation guide that informed the publisher-side discovery patterns.
 - [jasonjmcghee/WebMCP](https://github.com/jasonjmcghee/WebMCP) - the fallback widget that bridges desktop MCP clients to WebMCP sites.
 - [webmachinelearning/webmcp](https://github.com/webmachinelearning/webmcp) - the W3C draft.
-- [`specification.website`](https://specification.website/) (Joost de Valk) - independent worked-example reference for agent-ready websites; converges on the same `/.well-known/agent-skills/index.json` (Cloudflare Discovery RFC v0.2.0), RFC 9727 `api-catalog`, `rel="describedby"` for llms.txt, and `rel="agent-skills"` conventions that cf-webmcp ships.
+- [specification.website](https://specification.website/) (Joost de Valk) - independent worked-example reference for agent-ready websites; converges on the same `/.well-known/agent-skills/index.json`, RFC 9727 `api-catalog`, `rel="describedby"` for llms.txt, and `rel="agent-skills"` conventions that cf-webmcp ships.
 
 ## License
 
