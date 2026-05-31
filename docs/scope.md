@@ -32,6 +32,7 @@ The following are real, useful things, but they are not WebMCP and would dilute 
 ### Alternative protocols
 
 - **MCP server cards.** MCP is a JSON-RPC protocol distinct from WebMCP. cf-webmcp does not publish MCP server descriptors (`/.well-known/mcp/server-card.json`) and does not run a streamable HTTP MCP endpoint. Desktop MCP clients bridge into a WebMCP site via the fallback widget, which is a runtime concern, not a discovery one. Publishers running cf-webmcp *and* a separately-deployed MCP JSON-RPC endpoint at `POST /mcp` should be aware that cf-webmcp claims `GET /mcp` for its landing page by default; the two paths share a URL but differ by method. cf-webmcp's current router does not split on method, so a publisher needing both should move the landing page (`[webmcp_landing].path = "/pair"`) to free `/mcp` for the MCP JSON-RPC endpoint.
+- **A2A agent cards.** [Agent-to-Agent](https://a2a-protocol.org/) is a JSON-RPC protocol for agent-to-agent communication; its `/.well-known/agent-card.json` discovery file presupposes a running A2A endpoint. cf-webmcp publishes browser-side WebMCP, not an A2A endpoint, so emitting the card would be misleading. Publishers running A2A alongside can publish the card from origin.
 - *(Removed in v0.3.0)* ~~Agent Skills (Anthropic).~~ Originally listed as out-of-scope on the grounds that the manifest covered the same ground. Reversed in v0.3.0 after observing real-world adoption (Cloudflare Browser Run docs, isitagentready.com audits) and that the *operational hints* niche - "when to use which tool", "common pitfalls" - was not actually covered by either the structured manifest or the prose `agents.md`. cf-webmcp now publishes a `SKILL.md` at `/.well-known/agent-skills/site/SKILL.md`. See [`docs/agent-skills.md`](agent-skills.md).
 - **OpenAPI / AsyncAPI generation.** The WebMCP manifest already describes our tools in a WebMCP-native shape. cf-webmcp does not project that into OpenAPI.
 
@@ -57,6 +58,10 @@ The following are real, useful things, but they are not WebMCP and would dilute 
 ### General-purpose stuff
 
 - **Image transformation, A/B testing, analytics, edge auth, geo-routing.** Worth doing, not by cf-webmcp.
+
+### Adjacent agent-readiness surfaces
+
+The broader "agent-ready website" landscape includes surfaces beyond WebMCP discovery: markdown source endpoints with `Accept: text/markdown` negotiation, AI-crawler preferences via robots.txt `Content-Signal`, A2A agent cards, MCP server cards, web-bot-auth, schemamap, DNS-AID. [`specification.website`](https://specification.website/) (Joost de Valk) documents and ships these as a worked example. cf-webmcp deliberately covers only the subset that is WebMCP discovery; publishers wanting the rest can layer them on top of the proxied origin, or take them straight from that reference.
 
 ## How feature requests get triaged
 

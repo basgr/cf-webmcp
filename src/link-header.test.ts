@@ -64,8 +64,9 @@ describe("buildLinkHeader", () => {
     const value = buildLinkHeader(makeConfig());
     expect(value).toContain('<https://example.com/.well-known/api-catalog>; rel="api-catalog"');
     expect(value).toContain('<https://example.com/.well-known/webmcp.json>; rel="webmcp"');
-    // Comma-separated per RFC 8288
-    expect(value).toMatch(/rel="webmcp", <.*>; rel="api-catalog"/);
+    // Comma-separated per RFC 8288; allow any params (e.g. title) on the
+    // webmcp entry before the comma that delimits the next entry.
+    expect(value).toMatch(/rel="webmcp"[^,]*,\s*<[^>]+>;\s*rel="api-catalog"/);
   });
 
   it("omits api-catalog when features.api_catalog is false", () => {
@@ -126,6 +127,19 @@ describe("buildLinkHeader", () => {
       makeConfig({ llms_txt: { path: "/llms.txt", mode: "passthrough" } }),
     );
     expect(value).not.toContain('rel="describedby"');
+  });
+
+  it("emits RFC 8288 title parameter on every advertised rel", () => {
+    const value = buildLinkHeader(makeConfig());
+    // webmcp: our private rel, our wording.
+    expect(value).toContain('rel="webmcp"; title="WebMCP tool catalogue"');
+    // api-catalog: RFC 9727 / 9264.
+    expect(value).toContain('rel="api-catalog"; title="API catalogue (RFC 9727 Linkset)"');
+    // agent-skills: Anthropic SKILL.md.
+    expect(value).toContain('rel="agent-skills"; title="Agent Skill (SKILL.md)"');
+    // describedby: title matches specification.website (Joost de Valk) for the
+    // same target, so peer publishers see identical wording on the same rel.
+    expect(value).toContain('rel="describedby"; type="text/markdown"; title="Site index for LLMs"');
   });
 });
 
