@@ -29,10 +29,14 @@ export interface InjectOptions {
   /** When set, an additional <link rel="agent-skills"> is injected alongside the webmcp link. */
   agentSkillsUrl?: string;
   /**
-   * When set, an additional `<link rel="describedby" type="text/markdown">`
-   * is injected pointing at the llms.txt. IANA-registered relation per
-   * RFC 8288; lets generic scanners that only recognise standard rels
-   * find a publisher description of the site.
+   * When set, two additional `<link>` tags are injected pointing at the
+   * llms.txt:
+   *   - `rel="describedby" type="text/markdown"` (IANA-registered per
+   *     RFC 8288) so generic scanners that anchor on standard rels find a
+   *     publisher description of the site.
+   *   - `rel="alternate" type="text/markdown"` matching the convention
+   *     used by agent-readiness tooling (Addy Osmani's agentic-seo,
+   *     specification.website) for advertising a markdown representation.
    */
   llmsTxtUrl?: string;
   /**
@@ -98,7 +102,10 @@ export function injectIntoHtml(response: Response, opts: InjectOptions): Respons
   const describedByTag = opts.llmsTxtUrl
     ? `<link rel="describedby" type="text/markdown" href="${escapeAttr(opts.llmsTxtUrl)}">`
     : "";
-  const linkTags = webmcpTag + apiCatalogTag + agentSkillsTag + describedByTag;
+  const alternateMarkdownTag = opts.llmsTxtUrl
+    ? `<link rel="alternate" type="text/markdown" href="${escapeAttr(opts.llmsTxtUrl)}">`
+    : "";
+  const linkTags = webmcpTag + apiCatalogTag + agentSkillsTag + describedByTag + alternateMarkdownTag;
   // Subresource Integrity: when a "sha384-<base64>" digest is supplied, emit
   // it on the script tag. `crossorigin="anonymous"` is required by the SRI
   // spec for the browser to perform the integrity check (even on same-origin

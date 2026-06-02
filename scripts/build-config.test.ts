@@ -375,6 +375,19 @@ description = "Fetch a page"
     expect(configTs).toMatch(/AGENT_SKILLS_DIGEST[^=]+=\s*null/);
   });
 
+  it("LLMS_TXT_TOKEN_HINTS emits positive integer estimates for manifest and landing", async () => {
+    const toml = await writeToml("token-hints.toml", MINIMAL);
+    const { files } = await runBuild(toml);
+    const configTs = files["config.ts"]!;
+    const m = configTs.match(/LLMS_TXT_TOKEN_HINTS[^=]+=\s*(\{[^}]*\})/);
+    expect(m).not.toBeNull();
+    const hints = JSON.parse(m![1]!);
+    expect(hints.manifest).toBeGreaterThan(0);
+    expect(hints.landing).toBeGreaterThan(0);
+    expect(Number.isInteger(hints.manifest)).toBe(true);
+    expect(Number.isInteger(hints.landing)).toBe(true);
+  });
+
   it("BOOTSTRAP_SRI is a sha384-base64 string when feature on", async () => {
     const toml = await writeToml("sri-on.toml", MINIMAL);
     const { files } = await runBuild(toml);

@@ -114,4 +114,29 @@ describe("llmsTxtResponse", () => {
     const res = await llmsTxtResponse(new Request("https://example.com/llms.txt"), config, proxy);
     expect(await res.text()).toContain("<html>");
   });
+
+  it("annotates the pairing and catalogue links with token hints when supplied", async () => {
+    const proxy = async () => new Response("not found", { status: 404 });
+    const config = makeConfig({ llms_txt: { path: "/llms.txt", mode: "synthesize" } });
+    const res = await llmsTxtResponse(
+      new Request("https://example.com/llms.txt"),
+      config,
+      proxy,
+      { manifest: 1500, landing: 320 },
+    );
+    const text = await res.text();
+    expect(text).toContain("Tool catalogue: [https://example.com/.well-known/webmcp.json](https://example.com/.well-known/webmcp.json) (~1500 tokens)");
+    expect(text).toContain("Pairing page: [https://example.com/mcp/](https://example.com/mcp/) (~320 tokens)");
+    // The regex agentic-seo's llms.txt checker uses to award the token-hint point.
+    expect(text).toMatch(/\d+[Kk]?\s*tokens?/i);
+  });
+
+  it("omits token hints when none supplied", async () => {
+    const proxy = async () => new Response("not found", { status: 404 });
+    const config = makeConfig({ llms_txt: { path: "/llms.txt", mode: "synthesize" } });
+    const res = await llmsTxtResponse(new Request("https://example.com/llms.txt"), config, proxy);
+    const text = await res.text();
+    expect(text).not.toContain("tokens)");
+    expect(text).toContain("Tool catalogue: [https://example.com/.well-known/webmcp.json](https://example.com/.well-known/webmcp.json)");
+  });
 });

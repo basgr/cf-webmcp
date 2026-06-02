@@ -15,12 +15,24 @@ import { buildCacheControl } from "../cache";
 const BEGIN = "<!-- cf-webmcp:begin -->";
 const END = "<!-- cf-webmcp:end -->";
 
+/**
+ * Build-time token-count estimates for the documents the WebMCP block links
+ * to. When supplied, the matching links are annotated with `(~N tokens)`
+ * context-budget hints. Optional so the function stays usable (and testable)
+ * without the generated constant.
+ */
+export interface LlmsTxtTokenHints {
+  manifest: number;
+  landing: number;
+}
+
 export async function llmsTxtResponse(
   _request: Request,
   config: Config,
   proxyToOrigin: (url: URL) => Promise<Response>,
+  tokenHints?: LlmsTxtTokenHints,
 ): Promise<Response> {
-  const block = buildBlock(config);
+  const block = buildBlock(config, tokenHints);
   let body: string;
 
   if (config.llms_txt.mode === "synthesize" || config.llms_txt.mode === "replace") {
@@ -67,19 +79,23 @@ export function mergeBlock(original: string, block: string): string {
   return `${trimmed}\n${BEGIN}\n${block}\n${END}\n`;
 }
 
-function buildBlock(config: Config): string {
+function buildBlock(config: Config, tokenHints?: LlmsTxtTokenHints): string {
   const base = config.site.public_url ?? `https://${config.site.domain}`;
   const landing = `${base}${config.webmcp_landing.path}`;
   const manifest = `${base}${config.manifest.path}`;
   const agentsMd = `${base}${config.agents_md.path}`;
   const apiCatalog = `${base}${config.api_catalog.path}`;
+  // `(~N tokens)` budget hints, only on the two links whose bodies are known
+  // at build time. Empty string when no hints supplied.
+  const landingTokens = tokenHints ? ` (~${tokenHints.landing} tokens)` : "";
+  const manifestTokens = tokenHints ? ` (~${tokenHints.manifest} tokens)` : "";
   const lines: string[] = [
     `## WebMCP`,
     ``,
     `${config.site.name} exposes structured tools to AI agents via WebMCP.`,
     ``,
-    `- Pairing page: [${landing}](${landing})`,
-    `- Tool catalogue: [${manifest}](${manifest})`,
+    `- Pairing page: [${landing}](${landing})${landingTokens}`,
+    `- Tool catalogue: [${manifest}](${manifest})${manifestTokens}`,
   ];
   if (config.features.agents_md && config.agents_md.mode !== "passthrough") {
     lines.push(`- Agent instructions: [${agentsMd}](${agentsMd})`);

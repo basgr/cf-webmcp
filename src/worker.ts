@@ -6,7 +6,7 @@
  * to origin.
  */
 
-import { config, CONFIG_HASH, BOOTSTRAP_ASSET, WIDGET_ASSET, BUILD_AT, PREFLIGHT, AGENT_SKILLS_DIGEST, BOOTSTRAP_SRI } from "./generated/config";
+import { config, CONFIG_HASH, BOOTSTRAP_ASSET, WIDGET_ASSET, BUILD_AT, PREFLIGHT, AGENT_SKILLS_DIGEST, BOOTSTRAP_SRI, LLMS_TXT_TOKEN_HINTS } from "./generated/config";
 import { BOOTSTRAP_JS as bootstrapJs, LANDING_HTML as landingHtml, MANIFEST_JSON as manifestJson } from "./generated/assets";
 
 import { matchRoute } from "./router";
@@ -69,7 +69,7 @@ export default {
           preflight: PREFLIGHT,
         });
       case "llms_txt":
-        return llmsTxtResponse(request, config, (u) => proxyToOrigin(u, env));
+        return llmsTxtResponse(request, config, (u) => proxyToOrigin(u, env), LLMS_TXT_TOKEN_HINTS);
       case "robots_txt":
         return robotsTxtResponse(request, config, (u) => proxyToOrigin(u, env));
       case "agents_md":
