@@ -19,3 +19,7 @@ webmcp.toml
 # Exception: the example-site config is a checked-in fixture used by
 # `npm run dev` against the bundled static origin. Not a publisher deploy.
 !templates/example-site/webmcp.toml
+
+# Superpowers planning scaffolding (brainstorming specs, implementation plans).
+# Working artifacts, not product. The real docs/ files live outside this path.
+docs/superpowers/
