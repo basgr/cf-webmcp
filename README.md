@@ -14,7 +14,7 @@ For each request, the Worker does one of two things:
 
 | Path | What lives there |
 |------|------------------|
-| `/.well-known/webmcp.json` | Tool-catalogue manifest, machine-readable JSON |
+| `/.well-known/webmcp` (+ `/.well-known/webmcp.json` 301 alias) | Tool-catalogue manifest, machine-readable JSON |
 | `/.well-known/api-catalog` | RFC 9727 Linkset (RFC 9264) pointing at the manifest |
 | `/.well-known/agents.md` (+ `/AGENTS.md`, `/agents.md` 301 aliases) | AGENTS.md augmentation block for acting agents |
 | `/.well-known/agent-skills/<slug>/SKILL.md` (+ case-variant 301 aliases) | Anthropic-format Agent Skill, auto-generated from `[[tools]]` plus publisher hints |
@@ -43,7 +43,7 @@ The tool catalogue lives in one TOML file. Five server-side executor types (`sit
 
 cf-webmcp publishes the same tool catalogue through multiple complementary surfaces, all driven from the single TOML:
 
-- `/.well-known/webmcp.json` (manifest, machine-readable)
+- `/.well-known/webmcp` (manifest, machine-readable)
 - `<link rel="webmcp">` injected into every HTML page
 - `Link: rel="webmcp"` HTTP header on every response
 - `/llms.txt` augmented with a WebMCP block (idempotent merge with origin's file). Also advertised in the `Link` header and as `<link rel="describedby" type="text/markdown">` via the IANA-registered RFC 8288 relation, so generic agent-aware scanners that only recognise standard rels find a description of the site.
@@ -123,6 +123,7 @@ Full reference docs live in [`docs/`](docs/):
 - [jasonjmcghee/WebMCP](https://github.com/jasonjmcghee/WebMCP) - the fallback widget that bridges desktop MCP clients to WebMCP sites.
 - [webmachinelearning/webmcp](https://github.com/webmachinelearning/webmcp) - the W3C draft.
 - [specification.website](https://specification.website/) (Joost de Valk) - independent worked-example reference for agent-ready websites; converges on the same `/.well-known/agent-skills/index.json`, RFC 9727 `api-catalog`, `rel="describedby"` for llms.txt, and `rel="agent-skills"` conventions that cf-webmcp ships.
+- Chudi Nnorukam, ["A Developer's Guide to WebMCP"](https://www.freecodecamp.org/news/a-developers-guide-to-webmcp/) - hands-on WebMCP shipping guide; informed the extensionless `/.well-known/webmcp` path and the bootstrap's runtime-compat work (host detection across `navigator`/`document.modelContext` and the MCP `{ content: [...] }` tool-result shape), and independently measured ~0% WebMCP adoption across 111k domains.
 
 ## License
 

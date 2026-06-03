@@ -1,5 +1,15 @@
 # Upgrades and versioning
 
+## v0.4.0: manifest path is extensionless by default
+
+As of v0.4.0 the default WebMCP manifest path is **`/.well-known/webmcp`** (extensionless), matching the convention of IANA-registered well-known suffixes (`api-catalog`, `openid-configuration`). The legacy `/.well-known/webmcp.json` is kept as a **301 redirect alias** by default, so older links and any cached `rel="webmcp"` references keep working.
+
+- No action is required: rebuilding moves the canonical manifest to `/.well-known/webmcp`, advertises that path in the `Link` header / `<link rel="webmcp">` / llms.txt / agents.md, and 301s the `.json` path to it.
+- To keep `.json` as the canonical path instead, set `[manifest].path = "/.well-known/webmcp.json"` and `[manifest].aliases = ["/.well-known/webmcp"]` (or `[]` to disable the redirect).
+- The injected bootstrap also gained feature detection and a corrected return shape:
+  - It registers tools on whichever host object exposes `registerTool` - `navigator.modelContext` (current Chrome Canary) or `document.modelContext` (the Apr 2026 WebMCP draft) - and no-ops when neither is present.
+  - Each tool's `execute` now returns the WebMCP/MCP tool-result shape `{ content: [{ type: "text", text }], isError }` instead of cf-webmcp's raw `{ ok, data }` envelope. The full executor envelope is carried as the `text` payload (so the agent keeps structured success/error), and `isError` mirrors `ok: false`. The `POST /_webmcp/exec/<tool>` endpoint itself is unchanged and still returns the envelope; only the in-page registered tool adapts it to the runtime's expected shape.
+
 ## Schema version
 
 Every `webmcp.toml` declares `schema_version = 1` at the top. The build script refuses unknown versions. Future breaking changes to the TOML format will bump this number and require a manual migration step.

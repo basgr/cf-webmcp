@@ -127,7 +127,16 @@
             "path": {
               "type": "string",
               "minLength": 1,
-              "default": "/.well-known/webmcp.json"
+              "default": "/.well-known/webmcp"
+            },
+            "aliases": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/WebMCPConfig/properties/manifest/properties/path"
+              },
+              "default": [
+                "/.well-known/webmcp.json"
+              ]
             }
           },
           "additionalProperties": false,

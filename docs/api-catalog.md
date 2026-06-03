@@ -13,7 +13,7 @@ One Linkset (per [RFC 9264](https://www.rfc-editor.org/rfc/rfc9264.html)) entry,
       "anchor": "https://example.com/",
       "webmcp": [
         {
-          "href": "https://example.com/.well-known/webmcp.json",
+          "href": "https://example.com/.well-known/webmcp",
           "type": "application/json"
         }
       ]
@@ -80,14 +80,14 @@ When the catalog is enabled, cf-webmcp advertises it through two additional surf
 - **HTTP `Link` header** on every Worker response (RFC 8288, comma-separated):
 
   ```
-  Link: <https://example.com/.well-known/webmcp.json>; rel="webmcp",
+  Link: <https://example.com/.well-known/webmcp>; rel="webmcp",
         <https://example.com/.well-known/api-catalog>; rel="api-catalog"
   ```
 
 - **`<link>` tag** injected into HTML responses (when `[features].link_tag = true`):
 
   ```html
-  <link rel="webmcp" href="https://example.com/.well-known/webmcp.json">
+  <link rel="webmcp" href="https://example.com/.well-known/webmcp">
   <link rel="api-catalog" href="https://example.com/.well-known/api-catalog">
   ```
 

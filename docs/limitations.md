@@ -33,7 +33,7 @@ Workaround: configure the origin to serve UTF-8.
 Two deployment modes are supported:
 
 - Full proxy (recommended): Worker sees every request, injects on HTML.
-- Route-only: Worker only sees explicit paths (`/_webmcp/*`, `/.well-known/webmcp.json`, etc.). The in-page bootstrapper is never served because the Worker never sees HTML responses.
+- Route-only: Worker only sees explicit paths (`/_webmcp/*`, `/.well-known/webmcp`, etc.). The in-page bootstrapper is never served because the Worker never sees HTML responses.
 
 In route-only mode, browser-native agents must discover tools via the manifest. There is no auto-registration on page load.
 

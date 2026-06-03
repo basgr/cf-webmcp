@@ -49,7 +49,7 @@ fallback_widget  = true   # desktop MCP client reach matters; widget is opt-in b
 #   "/mcp.html"  → file, served at exact path
 
 [manifest]
-path = "/.well-known/webmcp.json"
+path = "/.well-known/webmcp"
 
 [webmcp_landing]
 path = "/mcp"

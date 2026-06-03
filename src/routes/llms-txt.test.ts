@@ -17,7 +17,7 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
       robots_txt: true, agents_md: true, api_catalog: true, agent_skills: true, agent_skills_index: true, subresource_integrity: true,
       fallback_widget: true,
     },
-    manifest: { path: "/.well-known/webmcp.json" },
+    manifest: { path: "/.well-known/webmcp.json", aliases: ["/.well-known/webmcp"] },
     webmcp_landing: { path: "/mcp/" },
     llms_txt: { path: "/llms.txt", mode: "merge" },
     robots_txt: { path: "/robots.txt", mode: "merge" }, agents_md: { path: "/.well-known/agents.md", mode: "merge", aliases: ["/AGENTS.md", "/agents.md"] }, api_catalog: { path: "/.well-known/api-catalog", mode: "merge" }, agent_skills: { path: "/.well-known/agent-skills/site/SKILL.md", mode: "synthesize", name: "", description: "", aliases: ["/.well-known/agent-skills/site/SKILLS.md", "/.well-known/agent-skills/site/skill.md", "/.well-known/agent-skills/site/skills.md"], hints: [] }, agent_skills_index: { path: "/.well-known/agent-skills/index.json", mode: "synthesize" },

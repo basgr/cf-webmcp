@@ -212,7 +212,16 @@ const Features = z.object({
 });
 
 const ManifestBlock = z.object({
-  path: PathString.default("/.well-known/webmcp.json"),
+  // Extensionless by convention, matching IANA-registered well-known suffixes
+  // (api-catalog, openid-configuration). Served as application/json.
+  path: PathString.default("/.well-known/webmcp"),
+  /**
+   * Path aliases that 301-redirect to the canonical `path`. The legacy `.json`
+   * form is redirected by default so older links and cached `rel="webmcp"`
+   * references keep working. Set to an empty array to disable redirects. An
+   * alias equal to `path` is ignored (no self-redirect / no collision).
+   */
+  aliases: z.array(PathString).default(["/.well-known/webmcp.json"]),
 });
 
 const LandingBlock = z.object({

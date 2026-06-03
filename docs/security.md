@@ -8,7 +8,7 @@ For SSRF, cookie handling, rate limiting, CORS, content caps, path validation, a
 
 `[[tools]].description`, `[[forms]].description`, `[[forms.params]].description`, and `[[agent_skills.hints]].body` are rendered into agent-visible text:
 
-- The manifest at `/.well-known/webmcp.json`
+- The manifest at `/.well-known/webmcp`
 - The `tooldescription` / `toolparamdescription` HTML attributes stamped onto matching `<form>` elements
 - The SKILL.md body and AGENTS.md block
 

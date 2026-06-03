@@ -42,7 +42,7 @@ agent_skills_index = true
 fallback_widget  = true
 
 [manifest]
-path = "/.well-known/webmcp.json"
+path = "/.well-known/webmcp"
 
 [webmcp_landing]
 path = "/mcp"

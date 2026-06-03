@@ -8,6 +8,7 @@ import type { Config } from "./config-types";
 export interface RouteMatch {
   kind:
     | "manifest"
+    | "manifest_redirect"
     | "landing"
     | "landing_redirect"
     | "bootstrap"
@@ -31,9 +32,14 @@ export function matchRoute(config: Config, url: URL, bootstrapAsset: string, wid
   const pathname = url.pathname;
   const ns = config.paths.namespace;
 
-  // Manifest
-  if (config.features.manifest && pathname === config.manifest.path) {
-    return { kind: "manifest" };
+  // Manifest (canonical) plus 301-aliases (e.g. legacy /.well-known/webmcp.json).
+  if (config.features.manifest) {
+    if (pathname === config.manifest.path) {
+      return { kind: "manifest" };
+    }
+    if (pathname !== config.manifest.path && config.manifest.aliases.includes(pathname)) {
+      return { kind: "manifest_redirect" };
+    }
   }
 
   // Landing with directory semantics: redirect "/foo" → "/foo/"

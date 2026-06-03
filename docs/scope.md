@@ -6,7 +6,7 @@ For the security boundary cf-webmcp does and does not enforce, see [`docs/securi
 
 ## In scope
 
-- **WebMCP manifest** at `/.well-known/webmcp.json`
+- **WebMCP manifest** at `/.well-known/webmcp`
 - **In-page tool registration** via injected `<script>` and `<link rel="webmcp">`
 - **HTTP `Link` header** with `rel="webmcp"` on every response
 - **`/mcp` landing page** for desktop MCP client pairing

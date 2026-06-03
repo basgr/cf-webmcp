@@ -103,7 +103,7 @@ With AGENTS.md added, cf-webmcp publishes five complementary surfaces from one T
 
 | Surface | Format | Audience |
 |---------|--------|----------|
-| `/.well-known/webmcp.json` | JSON | Programmatic agents, typed contracts |
+| `/.well-known/webmcp` | JSON | Programmatic agents, typed contracts |
 | `<link rel="webmcp">` on every page | HTML | Crawlers parsing HTML |
 | `Link: rel="webmcp"` HTTP header | HTTP | Agents that only do `HEAD` requests |
 | `/llms.txt` | Markdown | LLM retrieval/training crawlers |

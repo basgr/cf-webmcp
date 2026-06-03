@@ -267,8 +267,17 @@ description = "child description"
     const toml = await writeToml("a.toml", MINIMAL);
     const { files } = await runBuild(toml);
     expect(files["bootstrap.js"]).toContain("search_pages");
+    // Host detection covers both the navigator.modelContext (Chrome Canary)
+    // and document.modelContext (Apr 2026 WebMCP draft) bindings.
     expect(files["bootstrap.js"]).toContain("navigator.modelContext");
+    expect(files["bootstrap.js"]).toContain("document.modelContext");
     expect(files["bootstrap.js"]).toContain("registerTool");
+    // execute returns the MCP tool-result shape (content array), not the raw
+    // cf-webmcp envelope.
+    expect(files["bootstrap.js"]).toContain("content");
+    expect(files["bootstrap.js"]).toContain("isError");
+    // The stale provideContext fallback must be gone (not in current API).
+    expect(files["bootstrap.js"]).not.toContain("provideContext");
   });
 
   it("bootstrap.js emits WebMCP ToolAnnotations defaults per executor type", async () => {

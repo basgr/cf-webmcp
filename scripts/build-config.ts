@@ -272,13 +272,45 @@ function buildBootstrap(config: Config, configHash: string): string {
   });
 
   // Worker serves this file with content-type application/javascript; charset=utf-8.
+  // ES5 style for maximum browser reach (no arrow fns / spread).
   return `// cf-webmcp bootstrap, config_hash=${configHash}
 (function () {
-  if (!('modelContext' in navigator) || typeof navigator.modelContext.registerTool !== 'function') {
-    return;
+  // Host object: navigator.modelContext (current Chrome Canary) or
+  // document.modelContext (the Apr 2026 WebMCP draft). Use whichever exposes
+  // registerTool; same tool shape on both.
+  var ctx = null;
+  if (typeof navigator !== 'undefined' && navigator.modelContext && typeof navigator.modelContext.registerTool === 'function') {
+    ctx = navigator.modelContext;
+  } else if (typeof document !== 'undefined' && document.modelContext && typeof document.modelContext.registerTool === 'function') {
+    ctx = document.modelContext;
   }
-  var ctx = navigator.modelContext;
+  if (!ctx) return;
   var TOOLS = ${JSON.stringify(toolPayload)};
+  // Returns the WebMCP/MCP tool-result shape: a content array. The cf-webmcp
+  // executor envelope ({ ok, data | error }) is carried as the text payload so
+  // the agent retains structured success/error, and isError is set unless the
+  // envelope is an explicit ok:true.
+  function run(endpoint, input) {
+    return fetch(endpoint, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(input || {}),
+      credentials: 'omit',
+    }).then(function (r) {
+      return r.json().catch(function () {
+        return { ok: false, error: { code: 'internal', message: 'invalid json from executor', retriable: false } };
+      });
+    }).catch(function (e) {
+      return { ok: false, error: { code: 'internal', message: String(e && e.message || e), retriable: true } };
+    }).then(function (envelope) {
+      return {
+        content: [{ type: 'text', text: JSON.stringify(envelope) }],
+        // Anything that is not an explicit ok:true counts as an error, so a
+        // structurally-broken envelope is never silently surfaced as success.
+        isError: !(envelope && envelope.ok === true),
+      };
+    });
+  }
   TOOLS.forEach(function (t) {
     try {
       var toolDef = {
@@ -286,20 +318,7 @@ function buildBootstrap(config: Config, configHash: string): string {
         description: t.description,
         inputSchema: t.inputSchema,
         annotations: t.annotations,
-        execute: function (input) {
-          return fetch(t.endpoint, {
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify(input || {}),
-            credentials: 'omit',
-          }).then(function (r) {
-            return r.json().catch(function () {
-              return { ok: false, error: { code: 'internal', message: 'invalid json from executor', retriable: false } };
-            });
-          }).catch(function (e) {
-            return { ok: false, error: { code: 'internal', message: String(e && e.message || e), retriable: true } };
-          });
-        },
+        execute: function (input) { return run(t.endpoint, input); },
       };
       if (t.title) toolDef.title = t.title;
       ctx.registerTool(toolDef);
@@ -517,7 +536,12 @@ const EMPTY_PREFLIGHT: PreflightResult = { ran_at: null, collisions: [], warning
  */
 function checkPathCollisions(config: Config): void {
   const claimed: Array<{ name: string; path: string }> = [];
-  if (config.features.manifest) claimed.push({ name: "manifest", path: config.manifest.path });
+  if (config.features.manifest) {
+    claimed.push({ name: "manifest", path: config.manifest.path });
+    for (const a of config.manifest.aliases) {
+      if (a !== config.manifest.path) claimed.push({ name: "manifest.alias", path: a });
+    }
+  }
   if (config.features.webmcp_landing) claimed.push({ name: "webmcp_landing", path: config.webmcp_landing.path });
   if (config.features.llms_txt && config.llms_txt.mode !== "passthrough") claimed.push({ name: "llms_txt", path: config.llms_txt.path });
   if (config.features.robots_txt && config.robots_txt.mode !== "passthrough") claimed.push({ name: "robots_txt", path: config.robots_txt.path });

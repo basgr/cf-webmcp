@@ -27,3 +27,25 @@ export function manifestResponse(
     },
   });
 }
+
+/**
+ * 301 from a manifest alias (e.g. the legacy `/.well-known/webmcp.json`) to the
+ * canonical `config.manifest.path`. Emits X-Robots-Tag: noindex because the
+ * alias lives under `/.well-known/*`.
+ */
+export function manifestRedirect(config: Config): Response {
+  return new Response(null, {
+    status: 301,
+    headers: {
+      location: config.manifest.path,
+      "cache-control": buildCacheControl({
+        max_age: config.cache.manifest_max_age,
+        s_maxage: config.cache.manifest_s_maxage,
+        swr: config.cache.manifest_swr,
+        sie: config.cache.manifest_sie,
+      }),
+      "x-robots-tag": "noindex",
+      "x-content-type-options": "nosniff",
+    },
+  });
+}

@@ -10,7 +10,7 @@ import { config, CONFIG_HASH, BOOTSTRAP_ASSET, WIDGET_ASSET, BUILD_AT, PREFLIGHT
 import { BOOTSTRAP_JS as bootstrapJs, LANDING_HTML as landingHtml, MANIFEST_JSON as manifestJson } from "./generated/assets";
 
 import { matchRoute } from "./router";
-import { manifestResponse } from "./routes/manifest";
+import { manifestResponse, manifestRedirect } from "./routes/manifest";
 import { landingRedirect, landingResponse } from "./routes/landing";
 import { bootstrapResponse } from "./routes/bootstrap";
 import { execResponse } from "./routes/exec";
@@ -45,6 +45,8 @@ export default {
     switch (match.kind) {
       case "manifest":
         return handleHeadable(request, manifestResponse(manifestJson, config, CONFIG_HASH));
+      case "manifest_redirect":
+        return manifestRedirect(config);
       case "landing":
         return handleHeadable(request, landingResponse(landingHtml, config, CONFIG_HASH));
       case "landing_redirect":

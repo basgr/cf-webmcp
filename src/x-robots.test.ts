@@ -17,7 +17,7 @@
 import { describe, it, expect } from "vitest";
 import type { Config, FormInjectionConfig } from "./config-types";
 import type { RouteMatch } from "./router";
-import { manifestResponse } from "./routes/manifest";
+import { manifestResponse, manifestRedirect } from "./routes/manifest";
 import { landingResponse, landingRedirect } from "./routes/landing";
 import { bootstrapResponse } from "./routes/bootstrap";
 import { execResponse } from "./routes/exec";
@@ -40,7 +40,8 @@ function isProtected(path: string): boolean {
 // file if a new kind is added to router.ts without a classification entry.
 type Classification = "noindex_required" | "exempt";
 const CLASSIFICATION: Record<RouteMatch["kind"], Classification> = {
-  manifest: "noindex_required",                // /.well-known/webmcp.json
+  manifest: "noindex_required",                // /.well-known/webmcp
+  manifest_redirect: "noindex_required",        // alias /.well-known/webmcp.json under a protected prefix
   landing: "exempt",                            // /mcp at apex (noindex is set anyway, but not required by rule)
   landing_redirect: "exempt",                   // /mcp at apex
   bootstrap: "noindex_required",                // /_webmcp/bootstrap.<hash>.js
@@ -63,6 +64,7 @@ const CLASSIFICATION: Record<RouteMatch["kind"], Classification> = {
 function samplePath(kind: RouteMatch["kind"], config: Config): string {
   switch (kind) {
     case "manifest": return config.manifest.path;
+    case "manifest_redirect": return config.manifest.aliases[0] ?? "/.well-known/webmcp.json";
     case "landing":
     case "landing_redirect": return config.webmcp_landing.path;
     case "bootstrap": return `${config.paths.namespace}/bootstrap.abc12345.js`;
@@ -90,7 +92,7 @@ function makeConfig(): Config {
       inject_html: true, webmcp_landing: true, manifest: true, link_header: true, link_tag: true,
       llms_txt: true, robots_txt: true, agents_md: true, api_catalog: true, agent_skills: true, agent_skills_index: true, subresource_integrity: true, fallback_widget: true,
     },
-    manifest: { path: "/.well-known/webmcp.json" },
+    manifest: { path: "/.well-known/webmcp.json", aliases: ["/.well-known/webmcp"] },
     webmcp_landing: { path: "/mcp" },
     llms_txt: { path: "/llms.txt", mode: "merge" },
     robots_txt: { path: "/robots.txt", mode: "merge" },
@@ -162,6 +164,8 @@ async function responseFor(kind: RouteMatch["kind"], config: Config): Promise<Re
   switch (kind) {
     case "manifest":
       return manifestResponse("{}", config, "abc12345");
+    case "manifest_redirect":
+      return manifestRedirect(config);
     case "landing":
       return landingResponse("<html><head></head><body></body></html>", config, "abc12345");
     case "landing_redirect":

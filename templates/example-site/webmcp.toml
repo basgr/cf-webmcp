@@ -33,7 +33,7 @@ agent_skills_index = true
 fallback_widget  = false   # local dev does not have R2 widget ready
 
 [manifest]
-path = "/.well-known/webmcp.json"
+path = "/.well-known/webmcp"
 
 [webmcp_landing]
 path = "/mcp"

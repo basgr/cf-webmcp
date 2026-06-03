@@ -11,7 +11,7 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
       inject_html: true, webmcp_landing: true, manifest: true, link_header: true,
       link_tag: true, llms_txt: true, robots_txt: true, agents_md: true, api_catalog: true, agent_skills: true, agent_skills_index: true, subresource_integrity: true, fallback_widget: true,
     },
-    manifest: { path: "/.well-known/webmcp.json" },
+    manifest: { path: "/.well-known/webmcp.json", aliases: ["/.well-known/webmcp"] },
     webmcp_landing: { path: "/mcp" },
     llms_txt: { path: "/llms.txt", mode: "merge" },
     robots_txt: { path: "/robots.txt", mode: "merge" },
