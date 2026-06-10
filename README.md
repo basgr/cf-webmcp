@@ -32,7 +32,7 @@ For each request, the Worker does one of two things:
 - **HTTP `Link` header** added to every proxied response (HTML, PDF, image, JSON, anything). One entry per discovery surface: `rel="webmcp"` to the manifest, `rel="api-catalog"` to the catalog, `rel="agent-skills"` to the SKILL.md. An agent doing a `HEAD` request finds all three without parsing a body.
 - **On HTML responses only** (status 200, `text/html`, UTF-8, path not in `[injection].exclude_paths`), HTMLRewriter injects:
   - matching `<link>` tags into `<head>` (`rel="webmcp"`, `rel="api-catalog"`, `rel="agent-skills"`),
-  - one `<script src="/_webmcp/bootstrap.<hash>.js" defer>` before `</body>` that auto-registers the tools via `navigator.modelContext`,
+  - one `<script src="/_webmcp/bootstrap.<hash>.js" defer>` before `</body>` that auto-registers the tools via the WebMCP runtime (`document.modelContext`, falling back to the deprecated `navigator.modelContext`), skipping any tool name already declared on the page as a `<form toolname>` so a name is never registered twice,
   - W3C declarative form attributes (`toolname`, `tooldescription`, `toolparamdescription`, `toolautosubmit`) stamped onto matching `<form>` elements when a `[[forms]]` block matches the current path.
 
 Non-HTML responses (PDFs, images, JSON, CSS, JS, etc.) pass through with their body unchanged but with the `Link` header added.

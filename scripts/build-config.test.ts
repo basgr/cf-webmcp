@@ -280,6 +280,79 @@ description = "child description"
     expect(files["bootstrap.js"]).not.toContain("provideContext");
   });
 
+  it("bootstrap.js prefers document.modelContext over navigator.modelContext", async () => {
+    // document.modelContext is the current binding (Chrome 150+); navigator is
+    // the deprecated 146-149 one and touching it logs a console deprecation
+    // warning. Probe document first.
+    const toml = await writeToml("host-order.toml", MINIMAL);
+    const { files } = await runBuild(toml);
+    const js = files["bootstrap.js"]!;
+    const docIdx = js.indexOf("document.modelContext");
+    const navIdx = js.indexOf("navigator.modelContext");
+    expect(docIdx).toBeGreaterThan(-1);
+    expect(navIdx).toBeGreaterThan(-1);
+    expect(docIdx).toBeLessThan(navIdx);
+  });
+
+  it("bootstrap.js skips tool names already stamped on the page as [toolname]", async () => {
+    // Runtime de-dupe against declarative form attributes: registering the same
+    // WebMCP tool name from both the bootstrap (registerTool) and a stamped
+    // <form toolname> crashes the renderer (Chrome bad_message 345). The
+    // bootstrap must scan existing [toolname] elements and skip those names.
+    const toml = await writeToml("dedupe.toml", MINIMAL);
+    const { files } = await runBuild(toml);
+    const js = files["bootstrap.js"]!;
+    expect(js).toContain("querySelectorAll('[toolname]')");
+  });
+
+  it("rejects a [[forms]] name that collides with a [[tools]] name", async () => {
+    const collide = `${MINIMAL}
+
+[[forms]]
+name        = "search_pages"
+description = "Contact us."
+selector    = "form#contact"
+`;
+    const toml = await writeToml("collide.toml", collide);
+    await expect(runBuild(toml)).rejects.toThrow(/name collision/i);
+  });
+
+  it("rejects duplicate names within [[tools]]", async () => {
+    const dup = `${MINIMAL}
+
+[[tools]]
+name        = "search_pages"
+description = "A second tool with the same name."
+
+  [tools.input_schema]
+  type     = "object"
+  required = []
+
+  [tools.executor]
+  type        = "sitemap_filter"
+  sitemap_url = "https://example.com/sitemap.xml"
+`;
+    const toml = await writeToml("dup-tool.toml", dup);
+    await expect(runBuild(toml)).rejects.toThrow(/duplicate tool name/i);
+  });
+
+  it("rejects duplicate names within [[forms]]", async () => {
+    const dup = `${MINIMAL}
+
+[[forms]]
+name        = "contact"
+description = "Contact us."
+selector    = "form#contact"
+
+[[forms]]
+name        = "contact"
+description = "Contact us again."
+selector    = "form#contact2"
+`;
+    const toml = await writeToml("dup-form.toml", dup);
+    await expect(runBuild(toml)).rejects.toThrow(/duplicate \[\[forms\]\] name/i);
+  });
+
   it("bootstrap.js emits WebMCP ToolAnnotations defaults per executor type", async () => {
     // MINIMAL uses sitemap_filter -> readOnlyHint:true, untrustedContentHint:false
     const toml = await writeToml("annot-sitemap.toml", MINIMAL);

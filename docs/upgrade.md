@@ -1,5 +1,13 @@
 # Upgrades and versioning
 
+## v0.4.1: duplicate WebMCP tool-name crash hardening
+
+Registering the same WebMCP tool name twice on one page kills the Chrome renderer (`bad_message` 345, `RFHI_WEBMCP_REGISTER_DUPLICATE_TOOL_NAME`) - a browser-side Mojo IPC validation kill that no `try/catch` can trap. cf-webmcp emits two registration surfaces on a page (the bootstrap's `registerTool` calls and any `<form toolname>` it stamps from a `[[forms]]` rule), so a name shared across `[[tools]]` and `[[forms]]` would crash. v0.4.1 closes this on both ends:
+
+- **Build-time guard.** The build now fails if any name is duplicated within `[[tools]]`, duplicated within `[[forms]]`, or shared between `[[tools]]` and `[[forms]]`. Rename one side to fix. (No action needed unless your config already had such a collision, in which case the build will now tell you.)
+- **Runtime de-dupe.** The injected bootstrap scans `[toolname]` elements on the page and skips registering any tool whose name is already declared declaratively - covering names you hand-stamped in origin HTML, which the build cannot see.
+- **Host detection order.** The bootstrap now probes `document.modelContext` (current, Chrome 150+) before `navigator.modelContext` (the deprecated 146-149 binding, whose accessor logs a console deprecation warning). No behaviour change on browsers that expose only one.
+
 ## v0.4.0: manifest path is extensionless by default
 
 As of v0.4.0 the default WebMCP manifest path is **`/.well-known/webmcp`** (extensionless), matching the convention of IANA-registered well-known suffixes (`api-catalog`, `openid-configuration`). The legacy `/.well-known/webmcp.json` is kept as a **301 redirect alias** by default, so older links and any cached `rel="webmcp"` references keep working.

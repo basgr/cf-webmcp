@@ -275,17 +275,34 @@ function buildBootstrap(config: Config, configHash: string): string {
   // ES5 style for maximum browser reach (no arrow fns / spread).
   return `// cf-webmcp bootstrap, config_hash=${configHash}
 (function () {
-  // Host object: navigator.modelContext (current Chrome Canary) or
-  // document.modelContext (the Apr 2026 WebMCP draft). Use whichever exposes
-  // registerTool; same tool shape on both.
+  // Host object: document.modelContext is the current binding (Apr 2026 WebMCP
+  // draft, Chrome 150+); navigator.modelContext is the deprecated 146-149 one
+  // and merely reading it logs a console deprecation warning, so probe document
+  // first and only fall back to navigator. Same tool shape on both.
   var ctx = null;
-  if (typeof navigator !== 'undefined' && navigator.modelContext && typeof navigator.modelContext.registerTool === 'function') {
-    ctx = navigator.modelContext;
-  } else if (typeof document !== 'undefined' && document.modelContext && typeof document.modelContext.registerTool === 'function') {
+  if (typeof document !== 'undefined' && document.modelContext && typeof document.modelContext.registerTool === 'function') {
     ctx = document.modelContext;
+  } else if (typeof navigator !== 'undefined' && navigator.modelContext && typeof navigator.modelContext.registerTool === 'function') {
+    ctx = navigator.modelContext;
   }
   if (!ctx) return;
   var TOOLS = ${JSON.stringify(toolPayload)};
+  // De-dupe against declarative form tools already on the page. Registering the
+  // same WebMCP tool name from both this script (registerTool) and a stamped
+  // <form toolname> crashes the renderer (Chrome bad_message 345,
+  // RFHI_WEBMCP_REGISTER_DUPLICATE_TOOL_NAME) - a Mojo IPC kill that try/catch
+  // cannot trap. The build refuses cf-webmcp's own tool/form name collisions;
+  // this guard additionally covers names a publisher hand-stamped in origin
+  // HTML, which the build cannot see. Object.create(null) so a hostile
+  // toolname like "__proto__" cannot poison the lookup.
+  var declared = Object.create(null);
+  try {
+    var stamped = document.querySelectorAll('[toolname]');
+    for (var i = 0; i < stamped.length; i++) {
+      var nm = stamped[i].getAttribute('toolname');
+      if (nm) declared[nm] = true;
+    }
+  } catch (e) {}
   // Returns the WebMCP/MCP tool-result shape: a content array. The cf-webmcp
   // executor envelope ({ ok, data | error }) is carried as the text payload so
   // the agent retains structured success/error, and isError is set unless the
@@ -312,6 +329,7 @@ function buildBootstrap(config: Config, configHash: string): string {
     });
   }
   TOOLS.forEach(function (t) {
+    if (declared[t.name]) return; // already declared on the page via a stamped form
     try {
       var toolDef = {
         name: t.name,
@@ -573,6 +591,53 @@ function checkPathCollisions(config: Config): void {
 }
 
 /**
+ * Refuse builds where one WebMCP tool name would be registered twice on a page.
+ * A duplicate name kills the Chrome renderer (bad_message 345,
+ * RFHI_WEBMCP_REGISTER_DUPLICATE_TOOL_NAME) - a browser-side Mojo IPC
+ * validation kill that no try/catch can trap. cf-webmcp emits two registration
+ * surfaces on one page: the injected bootstrap calls `registerTool` for every
+ * `[[tools]]` entry, and a matching `[[forms]]` rule stamps a `toolname`
+ * attribute that the browser auto-registers. So the build must guarantee:
+ *   - no duplicate name within `[[tools]]`,
+ *   - no duplicate name within `[[forms]]`,
+ *   - and the `[[tools]]` and `[[forms]]` name sets are disjoint.
+ * (The bootstrap also de-dupes at runtime against names hand-stamped in origin
+ * HTML, which the build cannot see; this guard covers cf-webmcp's own config.)
+ */
+function checkToolNameCollisions(config: Config): void {
+  const toolNames = new Set<string>();
+  for (const t of config.tools) {
+    if (toolNames.has(t.name)) {
+      throw new Error(
+        `[build-config] duplicate tool name "${t.name}" in [[tools]]. ` +
+          `Registering the same WebMCP tool name twice crashes the browser renderer (Chrome bad_message 345). ` +
+          `Each tool name must be unique.`,
+      );
+    }
+    toolNames.add(t.name);
+  }
+  const formNames = new Set<string>();
+  for (const f of config.forms) {
+    if (formNames.has(f.name)) {
+      throw new Error(
+        `[build-config] duplicate [[forms]] name "${f.name}". ` +
+          `Two forms stamping the same toolname on one page register a WebMCP tool twice and crash the renderer (Chrome bad_message 345). ` +
+          `Each form name must be unique.`,
+      );
+    }
+    formNames.add(f.name);
+    if (toolNames.has(f.name)) {
+      throw new Error(
+        `[build-config] tool/form name collision: "${f.name}" is both a [[tools]] name and a [[forms]] name. ` +
+          `The bootstrap registers it via registerTool while the matching form stamps the same toolname on the page, ` +
+          `registering the tool twice and killing the renderer (Chrome bad_message 345, RFHI_WEBMCP_REGISTER_DUPLICATE_TOOL_NAME). ` +
+          `Rename one of them.`,
+      );
+    }
+  }
+}
+
+/**
  * Compute the Subresource Integrity hash for the bootstrap body in the
  * "sha384-<base64>" format browsers accept on `<script integrity="...">`.
  * Returns null when [features].subresource_integrity is false so the
@@ -623,6 +688,7 @@ export async function buildConfig(opts: BuildOptions): Promise<void> {
   }
   checkAllowList(config);
   checkPathCollisions(config);
+  checkToolNameCollisions(config);
 
   const canonical = JSON.stringify(config); // deterministic enough
   const configHash = computeHash(canonical);
