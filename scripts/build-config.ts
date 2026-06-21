@@ -570,6 +570,9 @@ function checkPathCollisions(config: Config): void {
   if (config.features.api_catalog && config.api_catalog.mode !== "passthrough") {
     claimed.push({ name: "api_catalog", path: config.api_catalog.path });
   }
+  if (config.features.ai_catalog && config.ai_catalog.mode !== "passthrough") {
+    claimed.push({ name: "ai_catalog", path: config.ai_catalog.path });
+  }
   if (config.features.agent_skills && config.agent_skills.mode !== "passthrough") {
     claimed.push({ name: "agent_skills", path: config.agent_skills.path });
     for (const a of config.agent_skills.aliases) claimed.push({ name: "agent_skills.alias", path: a });
@@ -661,6 +664,87 @@ async function computeAgentSkillsDigest(config: Config): Promise<string | null> 
   return `sha256:${hex}`;
 }
 
+export function stringifyCanonical(obj: unknown): string {
+  const sortReplacer = (_key: string, value: unknown): unknown => {
+    if (value && typeof value === "object" && !Array.isArray(value)) {
+      const sorted: Record<string, unknown> = {};
+      for (const k of Object.keys(value as Record<string, unknown>).sort()) {
+        sorted[k] = (value as Record<string, unknown>)[k];
+      }
+      return sorted;
+    }
+    return value;
+  };
+  return JSON.stringify(obj, sortReplacer, 2) + "\n";
+}
+
+function skillSlug(config: Config): string {
+  const raw = config.agent_skills.name || config.site.name || "site";
+  const slug = raw.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  return slug || "site";
+}
+
+export interface AiCatalogEntry {
+  identifier: string;
+  displayName: string;
+  type: string;
+  url: string;
+  description?: string;
+  capabilities?: string[];
+  representativeQueries?: string[];
+  tags?: string[];
+}
+
+export interface AiCatalogDoc {
+  specVersion: "1.0";
+  host: { displayName: string; identifier: string };
+  entries: AiCatalogEntry[];
+}
+
+/**
+ * Build the ARD ai-catalog.json document. One entry, auto-derived from the
+ * Agent Skill, emitted only when agent_skills is enabled (any mode - the
+ * SKILL.md URL on the publisher domain is valid even in passthrough). When
+ * agent_skills is off, entries is [] and a warning is logged.
+ */
+export function buildAiCatalog(config: Config): AiCatalogDoc {
+  const base = siteBase(config);
+  const domain = config.site.domain;
+  const host = {
+    displayName: config.site.name,
+    identifier: config.ai_catalog.host_identifier || `did:web:${domain}`,
+  };
+  const entries: AiCatalogEntry[] = [];
+  if (config.features.agent_skills) {
+    const capabilities = [
+      ...config.tools.map((t) => t.name),
+      ...config.forms.map((f) => f.name),
+    ];
+    const entry: AiCatalogEntry = {
+      identifier: `urn:air:${domain}:skill:${skillSlug(config)}`,
+      displayName: config.agent_skills.name || config.site.name,
+      type: "application/ai-skill+md",
+      url: `${base}${config.agent_skills.path}`,
+      description: config.agent_skills.description || config.site.description || undefined,
+      capabilities: capabilities.length ? capabilities : undefined,
+    };
+    if (config.ai_catalog.representative_queries.length) {
+      entry.representativeQueries = config.ai_catalog.representative_queries;
+    }
+    if (config.ai_catalog.tags.length) entry.tags = config.ai_catalog.tags;
+    for (const k of Object.keys(entry) as (keyof AiCatalogEntry)[]) {
+      if (entry[k] === undefined) delete entry[k];
+    }
+    entries.push(entry);
+  } else {
+    // eslint-disable-next-line no-console
+    console.warn(
+      "[build-config] ai_catalog is enabled but agent_skills is off; the catalog will have no entries. Enable agent_skills to list the site skill.",
+    );
+  }
+  return { specVersion: "1.0", host, entries };
+}
+
 export async function buildConfig(opts: BuildOptions): Promise<void> {
   const baseDir = path.dirname(opts.tomlPath);
   const rawIn = await readToml(opts.tomlPath);
@@ -700,6 +784,8 @@ export async function buildConfig(opts: BuildOptions): Promise<void> {
   const manifest = buildManifest(config, configHash, bootstrapName);
   const bootstrap = buildBootstrap(config, configHash);
   const landing = await buildLanding(config, configHash, widgetName, opts.tomlPath);
+  const aiCatalog = config.features.ai_catalog ? buildAiCatalog(config) : null;
+  const aiCatalogStr = aiCatalog ? stringifyCanonical(aiCatalog) : "";
   const buildAt = new Date().toISOString();
   const preflight = await loadPreflightResult(opts.outDir, configHash);
   const agentSkillsDigest = await computeAgentSkillsDigest(config);
@@ -719,6 +805,7 @@ export async function buildConfig(opts: BuildOptions): Promise<void> {
 export const BOOTSTRAP_JS: string = ${JSON.stringify(bootstrap)};
 export const LANDING_HTML: string = ${JSON.stringify(landing)};
 export const MANIFEST_JSON: string = ${JSON.stringify(manifestStr)};
+export const AI_CATALOG_JSON: string = ${JSON.stringify(aiCatalogStr)};
 `;
 
   await fs.mkdir(opts.outDir, { recursive: true });
@@ -732,6 +819,7 @@ export const MANIFEST_JSON: string = ${JSON.stringify(manifestStr)};
       path.join(opts.outDir, "hash.ts"),
       `export const CONFIG_HASH = ${JSON.stringify(configHash)};\nexport const BOOTSTRAP_ASSET = ${JSON.stringify(bootstrapName)};\nexport const WIDGET_ASSET = ${JSON.stringify(widgetName)};\n`,
     ),
+    ...(aiCatalog ? [fs.writeFile(path.join(opts.outDir, "ai-catalog.json"), aiCatalogStr)] : []),
   ]);
 
   // eslint-disable-next-line no-console

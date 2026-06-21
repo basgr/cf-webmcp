@@ -519,3 +519,62 @@ mode = "synthesize"
     expect(files["landing.html"]).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
   });
 });
+
+const WITH_AI_CATALOG = `${MINIMAL}
+
+[features]
+ai_catalog = true
+
+[ai_catalog]
+representative_queries = ["find a page about X"]
+tags = ["docs"]
+`;
+
+describe("ai_catalog generation", () => {
+  it("emits a spec-conformant catalog with one skill entry", async () => {
+    const toml = await writeToml("ai-catalog.toml", WITH_AI_CATALOG);
+    const { files } = await runBuild(toml);
+    expect(files).toHaveProperty("ai-catalog.json");
+    const cat = JSON.parse(files["ai-catalog.json"]!);
+    expect(cat.specVersion).toBe("1.0");
+    expect(cat.host.displayName).toBe("Example Co.");
+    expect(cat.host.identifier).toBe("did:web:example.com");
+    expect(cat.entries).toHaveLength(1);
+    const e = cat.entries[0];
+    expect(e.identifier).toMatch(/^urn:air:example\.com:skill:/);
+    expect(e.type).toBe("application/ai-skill+md");
+    expect(e.url).toBe("https://example.com/.well-known/agent-skills/site/SKILL.md");
+    expect(e.capabilities).toContain("search_pages");
+    expect(e.representativeQueries).toEqual(["find a page about X"]);
+    expect(e.tags).toEqual(["docs"]);
+  });
+
+  it("omits representativeQueries and tags when not configured", async () => {
+    const bare = `${MINIMAL}\n\n[features]\nai_catalog = true\n`;
+    const toml = await writeToml("ai-catalog-bare.toml", bare);
+    const { files } = await runBuild(toml);
+    const e = JSON.parse(files["ai-catalog.json"]!).entries[0];
+    expect(e).not.toHaveProperty("representativeQueries");
+    expect(e).not.toHaveProperty("tags");
+  });
+
+  it("honors host_identifier override", async () => {
+    const ov = `${MINIMAL}\n\n[features]\nai_catalog = true\n\n[ai_catalog]\nhost_identifier = "did:web:acme.com"\n`;
+    const toml = await writeToml("ai-catalog-host.toml", ov);
+    const { files } = await runBuild(toml);
+    expect(JSON.parse(files["ai-catalog.json"]!).host.identifier).toBe("did:web:acme.com");
+  });
+
+  it("emits empty entries when agent_skills is off", async () => {
+    const noSkill = `${MINIMAL}\n\n[features]\nai_catalog = true\nagent_skills = false\n`;
+    const toml = await writeToml("ai-catalog-noskill.toml", noSkill);
+    const { files } = await runBuild(toml);
+    expect(JSON.parse(files["ai-catalog.json"]!).entries).toEqual([]);
+  });
+
+  it("fails the build when ai_catalog.path collides with another surface", async () => {
+    const collide = `${MINIMAL}\n\n[features]\nai_catalog = true\n\n[ai_catalog]\npath = "/.well-known/api-catalog"\n`;
+    const toml = await writeToml("ai-catalog-collide.toml", collide);
+    await expect(runBuild(toml)).rejects.toThrow(/path collision/i);
+  });
+});
