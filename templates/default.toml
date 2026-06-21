@@ -41,6 +41,7 @@ agents_md        = true
 api_catalog      = true
 agent_skills     = true
 agent_skills_index = true
+# ai_catalog     = true   # ARD publisher catalog at /.well-known/ai-catalog.json (opt-in; ARD is a v0.9 draft)
 fallback_widget  = true   # desktop MCP client reach matters; widget is opt-in but ON by default
 
 # ---------- Paths ----------
@@ -70,6 +71,15 @@ aliases = ["/AGENTS.md", "/agents.md"]
 [api_catalog]
 path = "/.well-known/api-catalog"
 mode = "merge"   # merge | replace | passthrough | synthesize
+
+# Agentic Resource Discovery (ARD) publisher catalog. Opt-in: also set
+# ai_catalog = true in [features] above. Lists this site's Agent Skill so ARD
+# registries can index it. Publisher half only (no registry API, no signing).
+# [ai_catalog]
+# path = "/.well-known/ai-catalog.json"
+# mode = "synthesize"   # synthesize | merge | passthrough
+# representative_queries = ["find a page about X", "list recent posts"]
+# tags = ["docs"]
 
 
 [agent_skills]
