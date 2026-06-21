@@ -1,5 +1,25 @@
 # Upgrades and versioning
 
+## v0.5.0: ARD ai-catalog (opt-in)
+
+v0.5.0 adds an [Agentic Resource Discovery (ARD)](https://github.com/ards-project/ard-spec) publisher catalog at `/.well-known/ai-catalog.json`. When enabled, cf-webmcp synthesizes a catalog with one entry derived from the site's Agent Skill and advertises it via four surfaces: a `robots.txt` Agentmap directive, `rel="ai-catalog"` in the HTTP Link header and as an HTML link tag, and a line in llms.txt.
+
+**This feature is OFF by default.** ARD is a v0.9 draft; the media types (`application/ai-catalog+json`, `application/ai-skill+md`) are not yet IANA-registered. Enable only after evaluating spec stability.
+
+To enable:
+
+```toml
+[features]
+ai_catalog = true
+
+[ai_catalog]
+mode = "synthesize"   # or "merge" if your origin already publishes an ai-catalog.json
+```
+
+Available modes: `synthesize` (default, generate from config only), `merge` (splice into origin's catalog), `passthrough` (route not registered). See [`docs/ai-catalog.md`](ai-catalog.md) for all config fields.
+
+No breaking changes. Existing TOMLs work unchanged - the new fields all have defaults and the feature gate is `false`.
+
 ## v0.4.1: duplicate WebMCP tool-name crash hardening
 
 Registering the same WebMCP tool name twice on one page kills the Chrome renderer (`bad_message` 345, `RFHI_WEBMCP_REGISTER_DUPLICATE_TOOL_NAME`) - a browser-side Mojo IPC validation kill that no `try/catch` can trap. cf-webmcp emits two registration surfaces on a page (the bootstrap's `registerTool` calls and any `<form toolname>` it stamps from a `[[forms]]` rule), so a name shared across `[[tools]]` and `[[forms]]` would crash. v0.4.1 closes this on both ends:

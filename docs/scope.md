@@ -19,6 +19,7 @@ For the security boundary cf-webmcp does and does not enforce, see [`docs/securi
 - **`/.well-known/api-catalog`** ([RFC 9727](https://www.rfc-editor.org/rfc/rfc9727.html)) publication pointing at the WebMCP manifest
 - **`/.well-known/agent-skills/<slug>/SKILL.md`** publication (Anthropic-format Agent Skill) with case-variant 301 aliases
 - **`/.well-known/agent-skills/index.json`** publication ([Cloudflare Agent Skills Discovery RFC](https://github.com/cloudflare/agent-skills-discovery-rfc) v0.2.0) with a build-time SHA-256 digest of the SKILL.md
+- **ARD publisher catalog (`/.well-known/ai-catalog.json`)** - lists the site's Agent Skill as an ARD entry; advertised via `robots.txt` Agentmap directive, `rel="ai-catalog"` Link header and link tag, and llms.txt. Default OFF (ARD v0.9 draft). See [`docs/ai-catalog.md`](ai-catalog.md).
 - **Build-time SSRF allow-list** validation
 - **Per-IP and per-tool rate limiting**
 - **`/_webmcp/health`** operational endpoint
@@ -35,6 +36,9 @@ The following are real, useful things, but they are not WebMCP and would dilute 
 - **A2A agent cards.** [Agent-to-Agent](https://a2a-protocol.org/) is a JSON-RPC protocol for agent-to-agent communication; its `/.well-known/agent-card.json` discovery file presupposes a running A2A endpoint. cf-webmcp publishes browser-side WebMCP, not an A2A endpoint, so emitting the card would be misleading. Publishers running A2A alongside can publish the card from origin.
 - *(Removed in v0.3.0)* ~~Agent Skills (Anthropic).~~ Originally listed as out-of-scope on the grounds that the manifest covered the same ground. Reversed in v0.3.0 after observing real-world adoption (Cloudflare Browser Run docs, isitagentready.com audits) and that the *operational hints* niche - "when to use which tool", "common pitfalls" - was not actually covered by either the structured manifest or the prose `agents.md`. cf-webmcp now publishes a `SKILL.md` at `/.well-known/agent-skills/site/SKILL.md`. See [`docs/agent-skills.md`](agent-skills.md).
 - **OpenAPI / AsyncAPI generation.** The WebMCP manifest already describes our tools in a WebMCP-native shape. cf-webmcp does not project that into OpenAPI.
+- **ARD registry REST API** (`/search`, `/explore`, `/agents`). cf-webmcp publishes the ARD publisher catalog (the document a site serves at `/.well-known/ai-catalog.json`) but does not run a registry. The registry is a separate centralised service that aggregates publisher catalogs.
+- **ARD JWS signing / attestations.** cf-webmcp does not attach cryptographic claims to ARD entries.
+- **ARD DNS-based discovery.** cf-webmcp does not generate or manage DNS TXT records for ARD catalog URLs.
 
 ### Authentication
 

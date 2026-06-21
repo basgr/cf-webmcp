@@ -101,6 +101,10 @@
               "type": "boolean",
               "default": true
             },
+            "ai_catalog": {
+              "type": "boolean",
+              "default": false
+            },
             "agent_skills": {
               "type": "boolean",
               "default": true
@@ -243,6 +247,47 @@
                 "synthesize"
               ],
               "default": "merge"
+            }
+          },
+          "additionalProperties": false,
+          "default": {}
+        },
+        "ai_catalog": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "$ref": "#/definitions/WebMCPConfig/properties/manifest/properties/path",
+              "default": "/.well-known/ai-catalog.json"
+            },
+            "mode": {
+              "type": "string",
+              "enum": [
+                "synthesize",
+                "merge",
+                "passthrough"
+              ],
+              "default": "synthesize"
+            },
+            "host_identifier": {
+              "type": "string",
+              "default": ""
+            },
+            "representative_queries": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              },
+              "maxItems": 5,
+              "default": []
+            },
+            "tags": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              },
+              "default": []
             }
           },
           "additionalProperties": false,
@@ -483,6 +528,26 @@
               "default": 86400
             },
             "api_catalog_sie": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 86400
+            },
+            "ai_catalog_max_age": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 300
+            },
+            "ai_catalog_s_maxage": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 21600
+            },
+            "ai_catalog_swr": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 86400
+            },
+            "ai_catalog_sie": {
               "type": "integer",
               "minimum": 0,
               "default": 86400
