@@ -36,7 +36,7 @@ export async function aiCatalogResponse(
     const upstream = await proxyToOrigin(new URL(config.ai_catalog.path, config.origin.base_url));
     if (upstream.status === 404) {
       body = synthesizedBody;
-    } else if (upstream.status === 200 && /json/i.test(upstream.headers.get("content-type") ?? "")) {
+    } else if (upstream.status === 200 && isAiCatalogContentType(upstream.headers.get("content-type"))) {
       const merged = tryMergeAiCatalog(await upstream.text(), synthesizedBody);
       body = merged ?? synthesizedBody;
     } else if (upstream.status === 200) {
@@ -74,45 +74,49 @@ export async function aiCatalogResponse(
  * origin document is unparseable or does not look like a valid ARD catalog.
  */
 export function tryMergeAiCatalog(originText: string, synthesizedBody: string): string | null {
-  // Parse our own synthesized doc to get our entry.
-  let ourDoc: ArdCatalog;
   try {
-    ourDoc = JSON.parse(synthesizedBody) as ArdCatalog;
-  } catch {
-    return null;
-  }
-  const ourEntry = ourDoc.entries?.[0];
-  if (!ourEntry) return null;
-
-  // Parse origin doc.
-  let origin: unknown;
-  try {
-    origin = JSON.parse(originText);
-  } catch {
-    return null;
-  }
-
-  // Validate: must be a non-null object with an entries array where every
-  // member is a non-null object with a string identifier.
-  if (!origin || typeof origin !== "object") return null;
-  const entries = (origin as { entries?: unknown }).entries;
-  if (!Array.isArray(entries)) return null;
-  for (const entry of entries) {
-    if (!entry || typeof entry !== "object" || typeof (entry as ArdEntry).identifier !== "string") {
+    // Parse our own synthesized doc to get our entry.
+    let ourDoc: ArdCatalog;
+    try {
+      ourDoc = JSON.parse(synthesizedBody) as ArdCatalog;
+    } catch {
       return null;
     }
-  }
+    const ourEntry = ourDoc.entries?.[0];
+    if (!ourEntry) return null;
 
-  // Splice: replace in-place if our identifier already exists, else append.
-  const merged = (entries as ArdEntry[]).slice();
-  const idx = merged.findIndex((e) => e.identifier === ourEntry.identifier);
-  if (idx === -1) {
-    merged.push(ourEntry);
-  } else {
-    merged[idx] = ourEntry;
-  }
+    // Parse origin doc.
+    let origin: unknown;
+    try {
+      origin = JSON.parse(originText);
+    } catch {
+      return null;
+    }
 
-  return stringify({ ...(origin as object), entries: merged });
+    // Validate: must be a non-null object with an entries array where every
+    // member is a non-null object with a string identifier.
+    if (!origin || typeof origin !== "object") return null;
+    const entries = (origin as { entries?: unknown }).entries;
+    if (!Array.isArray(entries)) return null;
+    for (const entry of entries) {
+      if (!entry || typeof entry !== "object" || typeof (entry as ArdEntry).identifier !== "string") {
+        return null;
+      }
+    }
+
+    // Splice: replace in-place if our identifier already exists, else append.
+    const merged = (entries as ArdEntry[]).slice();
+    const idx = merged.findIndex((e) => e.identifier === ourEntry.identifier);
+    if (idx === -1) {
+      merged.push(ourEntry);
+    } else {
+      merged[idx] = ourEntry;
+    }
+
+    return stringify({ ...(origin as object), entries: merged });
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -133,6 +137,16 @@ function sortReplacer(_key: string, value: unknown): unknown {
     return sorted;
   }
   return value;
+}
+
+/**
+ * Accept only application/json and application/ai-catalog+json (anchored,
+ * mirroring isLinksetContentType in api-catalog.ts). Rejects text/json and
+ * other non-application types so they fall through to the relay path.
+ */
+function isAiCatalogContentType(ct: string | null): boolean {
+  if (!ct) return true;
+  return /^application\/(ai-catalog\+)?json/i.test(ct);
 }
 
 /**

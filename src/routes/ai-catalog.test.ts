@@ -193,4 +193,23 @@ describe("aiCatalogResponse (merge)", () => {
       new Response("<html></html>", { status: 200, headers: { "content-type": "text/html" } }));
     expect(res.headers.get("x-robots-tag")).toBe("noindex");
   });
+
+  it("does NOT merge when origin content-type is text/json or text/plain - relays unchanged (Fix B)", async () => {
+    // text/json and text/plain look JSON-ish but are not application/* types.
+    // The anchored regex should reject them and fall through to the relay path,
+    // NOT splice our entry in.
+    const jsonBody = JSON.stringify({
+      specVersion: "1.0",
+      host: { displayName: "O", identifier: "did:web:example.com" },
+      entries: [{ identifier: "urn:air:example.com:agent:other", displayName: "Other", type: "application/a2a-agent-card+json", url: "https://example.com/a.json" }],
+    });
+    for (const ct of ["text/json", "text/plain"]) {
+      const res = await aiCatalogResponse(req, cfgMerge, SYNTH_ONE, async () =>
+        new Response(jsonBody, { status: 200, headers: { "content-type": ct } }));
+      // Relayed: x-robots-tag must be noindex (withNoindex path) and the body
+      // must be the raw origin body, NOT the merged ai-catalog+json document.
+      expect(res.headers.get("x-robots-tag")).toBe("noindex");
+      expect(res.headers.get("content-type")).not.toBe("application/ai-catalog+json");
+    }
+  });
 });
