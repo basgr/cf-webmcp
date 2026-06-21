@@ -29,6 +29,7 @@ import { agentsMdResponse, agentsMdRedirect } from "./routes/agents-md";
 import { apiCatalogResponse } from "./routes/api-catalog";
 import { agentSkillsResponse, agentSkillsRedirect } from "./routes/agent-skills";
 import { agentSkillsIndexResponse } from "./routes/agent-skills-index";
+import { aiCatalogResponse } from "./routes/ai-catalog";
 
 const PROTECTED_PREFIXES = ["/_webmcp/", "/.well-known/"] as const;
 
@@ -56,6 +57,7 @@ const CLASSIFICATION: Record<RouteMatch["kind"], Classification> = {
   agent_skills: "noindex_required",             // /.well-known/agent-skills/<slug>/SKILL.md
   agent_skills_redirect: "noindex_required",    // aliases under /.well-known/agent-skills/
   agent_skills_index: "noindex_required",       // /.well-known/agent-skills/index.json
+  ards_catalog: "noindex_required",             // /.well-known/ai-catalog.json
   proxy: "exempt",                              // origin content; cf-webmcp does not own the response
 };
 
@@ -79,6 +81,7 @@ function samplePath(kind: RouteMatch["kind"], config: Config): string {
     case "agent_skills": return config.agent_skills.path;
     case "agent_skills_redirect": return config.agent_skills.aliases[0] ?? "/.well-known/agent-skills/site/SKILLS.md";
     case "agent_skills_index": return config.agent_skills_index.path;
+    case "ards_catalog": return config.ai_catalog.path;
     case "proxy": return "/";
   }
 }
@@ -90,7 +93,7 @@ function makeConfig(): Config {
     origin: { base_url: "https://example.com", allowed_origins: ["https://example.com"], forward_cookies: false },
     features: {
       inject_html: true, webmcp_landing: true, manifest: true, link_header: true, link_tag: true,
-      llms_txt: true, robots_txt: true, agents_md: true, api_catalog: true, agent_skills: true, agent_skills_index: true, subresource_integrity: true, fallback_widget: true,
+      llms_txt: true, robots_txt: true, agents_md: true, api_catalog: true, ai_catalog: true, agent_skills: true, agent_skills_index: true, subresource_integrity: true, fallback_widget: true,
     },
     manifest: { path: "/.well-known/webmcp.json", aliases: ["/.well-known/webmcp"] },
     webmcp_landing: { path: "/mcp" },
@@ -111,6 +114,7 @@ function makeConfig(): Config {
       hints: [],
     },
     agent_skills_index: { path: "/.well-known/agent-skills/index.json", mode: "synthesize" },
+    ai_catalog: { path: "/.well-known/ai-catalog.json", mode: "synthesize", host_identifier: "", representative_queries: [], tags: [] },
     paths: { namespace: "/_webmcp" },
     injection: { exclude_paths: [] },
     cache: {
@@ -121,6 +125,7 @@ function makeConfig(): Config {
       agents_md_max_age: 300, agents_md_s_maxage: 21600, agents_md_swr: 86400, agents_md_sie: 86400,
       agents_md_redirect_max_age: 86400, agents_md_redirect_s_maxage: 604800,
       api_catalog_max_age: 300, api_catalog_s_maxage: 21600, api_catalog_swr: 86400, api_catalog_sie: 86400,
+      ai_catalog_max_age: 300, ai_catalog_s_maxage: 21600, ai_catalog_swr: 86400, ai_catalog_sie: 86400,
       agent_skills_max_age: 300, agent_skills_s_maxage: 21600, agent_skills_swr: 86400, agent_skills_sie: 86400,
       agent_skills_redirect_max_age: 86400, agent_skills_redirect_s_maxage: 604800, agent_skills_index_max_age: 300, agent_skills_index_s_maxage: 21600, agent_skills_index_swr: 86400, agent_skills_index_sie: 86400,
       bootstrap_max_age: 31536000, widget_max_age: 31536000,
@@ -213,6 +218,13 @@ async function responseFor(kind: RouteMatch["kind"], config: Config): Promise<Re
         new Request("https://example.com" + config.agent_skills_index.path),
         config,
         `sha256:${"a".repeat(64)}`,
+      );
+    case "ards_catalog":
+      return aiCatalogResponse(
+        new Request("https://example.com" + config.ai_catalog.path),
+        config,
+        JSON.stringify({ specVersion: "1.0", host: { displayName: "x", identifier: "did:web:example.com" }, entries: [] }, null, 2) + "\n",
+        async (_url: URL) => new Response(null, { status: 404 }),
       );
     case "proxy":
       // cf-webmcp does not own the response on the proxy path; the test verifies
