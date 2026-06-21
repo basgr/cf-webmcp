@@ -38,6 +38,9 @@
     "wrangler": "^4.95.0",
     "zod-to-json-schema": "^3.23.0"
   },
+  "overrides": {
+    "esbuild": ">=0.28.1"
+  },
   "engines": {
     "node": ">=20"
   }
