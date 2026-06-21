@@ -103,6 +103,10 @@ function buildBlock(config: Config, tokenHints?: LlmsTxtTokenHints): string {
   if (config.features.api_catalog && config.api_catalog.mode !== "passthrough") {
     lines.push(`- API catalog (RFC 9727): [${apiCatalog}](${apiCatalog})`);
   }
+  if (config.features.ai_catalog && config.ai_catalog.mode !== "passthrough") {
+    const aiCatalog = `${base}${config.ai_catalog.path}`;
+    lines.push(`- AI agent catalog (ARD): [${aiCatalog}](${aiCatalog})`);
+  }
   lines.push(``, `### Tools`, ``);
   for (const t of config.tools) {
     lines.push(`- \`${t.name}\` - ${t.description}`);

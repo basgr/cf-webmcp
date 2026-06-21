@@ -14,13 +14,13 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
       link_header: true,
       link_tag: true,
       llms_txt: true,
-      robots_txt: true, agents_md: true, api_catalog: true, agent_skills: true, agent_skills_index: true, subresource_integrity: true,
+      robots_txt: true, agents_md: true, api_catalog: true, ai_catalog: true, agent_skills: true, agent_skills_index: true, subresource_integrity: true,
       fallback_widget: true,
     },
     manifest: { path: "/.well-known/webmcp.json", aliases: ["/.well-known/webmcp"] },
     webmcp_landing: { path: "/mcp/" },
     llms_txt: { path: "/llms.txt", mode: "merge" },
-    robots_txt: { path: "/robots.txt", mode: "merge" }, agents_md: { path: "/.well-known/agents.md", mode: "merge", aliases: ["/AGENTS.md", "/agents.md"] }, api_catalog: { path: "/.well-known/api-catalog", mode: "merge" }, agent_skills: { path: "/.well-known/agent-skills/site/SKILL.md", mode: "synthesize", name: "", description: "", aliases: ["/.well-known/agent-skills/site/SKILLS.md", "/.well-known/agent-skills/site/skill.md", "/.well-known/agent-skills/site/skills.md"], hints: [] }, agent_skills_index: { path: "/.well-known/agent-skills/index.json", mode: "synthesize" },
+    robots_txt: { path: "/robots.txt", mode: "merge" }, agents_md: { path: "/.well-known/agents.md", mode: "merge", aliases: ["/AGENTS.md", "/agents.md"] }, api_catalog: { path: "/.well-known/api-catalog", mode: "merge" }, ai_catalog: { path: "/.well-known/ai-catalog.json", mode: "synthesize", host_identifier: "", representative_queries: [], tags: [] }, agent_skills: { path: "/.well-known/agent-skills/site/SKILL.md", mode: "synthesize", name: "", description: "", aliases: ["/.well-known/agent-skills/site/SKILLS.md", "/.well-known/agent-skills/site/skill.md", "/.well-known/agent-skills/site/skills.md"], hints: [] }, agent_skills_index: { path: "/.well-known/agent-skills/index.json", mode: "synthesize" },
     paths: { namespace: "/_webmcp" },
     injection: { exclude_paths: [] },
     cache: {
@@ -32,7 +32,7 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
       llms_txt_max_age: 300,
       llms_txt_s_maxage: 3600, llms_txt_swr: 86400, llms_txt_sie: 86400,
       robots_txt_max_age: 300,
-      robots_txt_s_maxage: 3600, robots_txt_swr: 86400, robots_txt_sie: 86400, agents_md_max_age: 300, agents_md_s_maxage: 21600, agents_md_swr: 86400, agents_md_sie: 86400, agents_md_redirect_max_age: 86400, agents_md_redirect_s_maxage: 604800, api_catalog_max_age: 300, api_catalog_s_maxage: 21600, api_catalog_swr: 86400, api_catalog_sie: 86400, agent_skills_max_age: 300, agent_skills_s_maxage: 21600, agent_skills_swr: 86400, agent_skills_sie: 86400, agent_skills_redirect_max_age: 86400, agent_skills_redirect_s_maxage: 604800, agent_skills_index_max_age: 300, agent_skills_index_s_maxage: 21600, agent_skills_index_swr: 86400, agent_skills_index_sie: 86400,
+      robots_txt_s_maxage: 3600, robots_txt_swr: 86400, robots_txt_sie: 86400, agents_md_max_age: 300, agents_md_s_maxage: 21600, agents_md_swr: 86400, agents_md_sie: 86400, agents_md_redirect_max_age: 86400, agents_md_redirect_s_maxage: 604800, api_catalog_max_age: 300, api_catalog_s_maxage: 21600, api_catalog_swr: 86400, api_catalog_sie: 86400, ai_catalog_max_age: 300, ai_catalog_s_maxage: 21600, ai_catalog_swr: 86400, ai_catalog_sie: 86400, agent_skills_max_age: 300, agent_skills_s_maxage: 21600, agent_skills_swr: 86400, agent_skills_sie: 86400, agent_skills_redirect_max_age: 86400, agent_skills_redirect_s_maxage: 604800, agent_skills_index_max_age: 300, agent_skills_index_s_maxage: 21600, agent_skills_index_swr: 86400, agent_skills_index_sie: 86400,
       bootstrap_max_age: 31536000,
       widget_max_age: 31536000,
       executor_defaults: { max_age: 0, s_maxage: 300, swr: 1800, sie: 86400 },
@@ -138,5 +138,40 @@ describe("llmsTxtResponse", () => {
     const text = await res.text();
     expect(text).not.toContain("tokens)");
     expect(text).toContain("Tool catalogue: [https://example.com/.well-known/webmcp.json](https://example.com/.well-known/webmcp.json)");
+  });
+
+  it("includes ai-catalog link when ai_catalog and llms_txt features are on", async () => {
+    const proxy = async () => new Response("not found", { status: 404 });
+    const config = makeConfig({ llms_txt: { path: "/llms.txt", mode: "synthesize" } });
+    const res = await llmsTxtResponse(new Request("https://example.com/llms.txt"), config, proxy);
+    const text = await res.text();
+    expect(text).toContain("/.well-known/ai-catalog.json");
+  });
+
+  it("omits ai-catalog link when ai_catalog feature is off", async () => {
+    const proxy = async () => new Response("not found", { status: 404 });
+    const config = makeConfig({
+      llms_txt: { path: "/llms.txt", mode: "synthesize" },
+      features: { ...makeConfig().features, ai_catalog: false },
+    });
+    const res = await llmsTxtResponse(new Request("https://example.com/llms.txt"), config, proxy);
+    const text = await res.text();
+    expect(text).not.toContain("ai-catalog.json");
+  });
+
+  it("ai-catalog llms.txt entry is idempotent on re-merge", async () => {
+    const proxy = async () => new Response("not found", { status: 404 });
+    const config = makeConfig({ llms_txt: { path: "/llms.txt", mode: "merge" } });
+    const res1 = await llmsTxtResponse(new Request("https://example.com/llms.txt"), config, proxy);
+    const first = await res1.text();
+    // Second merge pass treats first output as origin content
+    const proxy2 = async () => new Response(first, { status: 200, headers: { "content-type": "text/plain" } });
+    const res2 = await llmsTxtResponse(new Request("https://example.com/llms.txt"), config, proxy2);
+    const second = await res2.text();
+    // Count the link lines containing ai-catalog.json (each line has the URL twice in markdown [url](url))
+    const lineCount = second.split("\n").filter((l) => l.includes("ai-catalog.json")).length;
+    expect(lineCount).toBe(1);
+    const beginCount = (second.match(/cf-webmcp:begin/g) ?? []).length;
+    expect(beginCount).toBe(1);
   });
 });

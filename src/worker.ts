@@ -162,6 +162,10 @@ async function proxyAndMaybeInject(request: Request, env: Env): Promise<Response
     config.features.api_catalog && config.api_catalog.mode !== "passthrough"
       ? `${base}${config.api_catalog.path}`
       : undefined;
+  const aiCatalogUrl =
+    config.features.ai_catalog && config.ai_catalog.mode !== "passthrough"
+      ? `${base}${config.ai_catalog.path}`
+      : undefined;
   const agentSkillsUrl =
     config.features.agent_skills && config.agent_skills.mode !== "passthrough"
       ? `${base}${config.agent_skills.path}`
@@ -177,6 +181,7 @@ async function proxyAndMaybeInject(request: Request, env: Env): Promise<Response
     bootstrapUrl,
     emitLinkTag: config.features.link_tag,
     apiCatalogUrl,
+    aiCatalogUrl,
     agentSkillsUrl,
     llmsTxtUrl,
     bootstrapIntegrity,

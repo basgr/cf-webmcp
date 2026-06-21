@@ -26,6 +26,8 @@ export interface InjectOptions {
   emitLinkTag: boolean;
   /** When set, an additional <link rel="api-catalog"> is injected alongside the webmcp link. */
   apiCatalogUrl?: string;
+  /** When set, an additional <link rel="ai-catalog"> is injected alongside the webmcp link. */
+  aiCatalogUrl?: string;
   /** When set, an additional <link rel="agent-skills"> is injected alongside the webmcp link. */
   agentSkillsUrl?: string;
   /**
@@ -96,6 +98,9 @@ export function injectIntoHtml(response: Response, opts: InjectOptions): Respons
   const apiCatalogTag = opts.apiCatalogUrl
     ? `<link rel="api-catalog" href="${escapeAttr(opts.apiCatalogUrl)}">`
     : "";
+  const aiCatalogTag = opts.aiCatalogUrl
+    ? `<link rel="ai-catalog" href="${escapeAttr(opts.aiCatalogUrl)}">`
+    : "";
   const agentSkillsTag = opts.agentSkillsUrl
     ? `<link rel="agent-skills" href="${escapeAttr(opts.agentSkillsUrl)}">`
     : "";
@@ -105,7 +110,7 @@ export function injectIntoHtml(response: Response, opts: InjectOptions): Respons
   const alternateMarkdownTag = opts.llmsTxtUrl
     ? `<link rel="alternate" type="text/markdown" href="${escapeAttr(opts.llmsTxtUrl)}">`
     : "";
-  const linkTags = webmcpTag + apiCatalogTag + agentSkillsTag + describedByTag + alternateMarkdownTag;
+  const linkTags = webmcpTag + apiCatalogTag + aiCatalogTag + agentSkillsTag + describedByTag + alternateMarkdownTag;
   // Subresource Integrity: when a "sha384-<base64>" digest is supplied, emit
   // it on the script tag. `crossorigin="anonymous"` is required by the SRI
   // spec for the browser to perform the integrity check (even on same-origin

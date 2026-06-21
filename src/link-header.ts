@@ -28,6 +28,11 @@ export function buildLinkHeader(config: Config): string {
       `<${base}${config.api_catalog.path}>; rel="api-catalog"; title="API catalogue (RFC 9727 Linkset)"`,
     );
   }
+  if (config.features.ai_catalog && config.ai_catalog.mode !== "passthrough") {
+    entries.push(
+      `<${base}${config.ai_catalog.path}>; rel="ai-catalog"; title="AI agent catalog (ARD)"`,
+    );
+  }
   if (config.features.agent_skills && config.agent_skills.mode !== "passthrough") {
     // Not (yet) IANA-registered; matches the convention used in Anthropic's
     // Agent Skills format. Same pattern as our existing private rel="webmcp".
