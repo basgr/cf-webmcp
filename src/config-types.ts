@@ -197,6 +197,7 @@ const Features = z.object({
   robots_txt: z.boolean().default(true),
   agents_md: z.boolean().default(true),
   api_catalog: z.boolean().default(true),
+  ai_catalog: z.boolean().default(false),
   agent_skills: z.boolean().default(true),
   agent_skills_index: z.boolean().default(true),
   /**
@@ -302,6 +303,29 @@ const AgentSkillsIndexBlock = z.object({
   mode: z.enum(["synthesize", "passthrough"]).default("synthesize"),
 });
 
+/**
+ * Agentic Resource Discovery (ARD) publisher catalog. Publishes a
+ * /.well-known/ai-catalog.json listing this site's agentic resources. cf-webmcp
+ * auto-derives exactly one entry from the Agent Skill (type
+ * application/ai-skill+md). Publisher half only - no registry API, no signing.
+ * See docs/ai-catalog.md. Default OFF: ARD is a v0.9 draft.
+ *
+ * Modes:
+ *   - synthesize (default): emit the catalog from config, ignore origin
+ *   - merge: splice our skill entry into an origin-published ai-catalog.json
+ *   - passthrough: route not registered; origin owns the path
+ */
+const AiCatalogBlock = z.object({
+  path: PathString.default("/.well-known/ai-catalog.json"),
+  mode: z.enum(["synthesize", "merge", "passthrough"]).default("synthesize"),
+  /** Override host.identifier (defaults to did:web:<domain> when empty). */
+  host_identifier: z.string().default(""),
+  /** Optional 0-5 natural-language sample queries (ARD SHOULD). Omitted from output when empty. */
+  representative_queries: z.array(z.string().min(1)).max(5).default([]),
+  /** Optional entry tags. Omitted from output when empty. */
+  tags: z.array(z.string().min(1)).default([]),
+});
+
 const AgentSkillsBlock = z.object({
   path: PathString.default("/.well-known/agent-skills/site/SKILL.md"),
   mode: z.enum(["merge", "replace", "passthrough", "synthesize"]).default("synthesize"),
@@ -355,6 +379,10 @@ const CacheBlock = z.object({
   api_catalog_s_maxage: z.number().int().nonnegative().default(21_600),
   api_catalog_swr: z.number().int().nonnegative().default(86_400),
   api_catalog_sie: z.number().int().nonnegative().default(86_400),
+  ai_catalog_max_age: z.number().int().nonnegative().default(300),
+  ai_catalog_s_maxage: z.number().int().nonnegative().default(21_600),
+  ai_catalog_swr: z.number().int().nonnegative().default(86_400),
+  ai_catalog_sie: z.number().int().nonnegative().default(86_400),
   agent_skills_max_age: z.number().int().nonnegative().default(300),
   agent_skills_s_maxage: z.number().int().nonnegative().default(21_600),
   agent_skills_swr: z.number().int().nonnegative().default(86_400),
@@ -441,6 +469,7 @@ export const ConfigSchema = z.object({
   robots_txt: RobotsTxtBlock.default({}),
   agents_md: AgentsMdBlock.default({}),
   api_catalog: ApiCatalogBlock.default({}),
+  ai_catalog: AiCatalogBlock.default({}),
   agent_skills: AgentSkillsBlock.default({}),
   agent_skills_index: AgentSkillsIndexBlock.default({}),
   paths: PathsBlock.default({}),
