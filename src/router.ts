@@ -20,6 +20,7 @@ export interface RouteMatch {
     | "agents_md"
     | "agents_md_redirect"
     | "api_catalog"
+    | "ards_catalog"
     | "agent_skills"
     | "agent_skills_redirect"
     | "agent_skills_index"
@@ -100,6 +101,11 @@ export function matchRoute(config: Config, url: URL, bootstrapAsset: string, wid
     pathname === config.api_catalog.path
   ) {
     return { kind: "api_catalog" };
+  }
+
+  // ARD Publisher Catalog (ai-catalog.json)
+  if (config.features.ai_catalog && config.ai_catalog.mode !== "passthrough") {
+    if (pathname === config.ai_catalog.path) return { kind: "ards_catalog" };
   }
 
   // Anthropic-format Agent Skill (canonical SKILL.md plus 301 aliases)
