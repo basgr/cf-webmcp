@@ -13,7 +13,8 @@
           "properties": {
             "domain": {
               "type": "string",
-              "minLength": 1
+              "minLength": 1,
+              "pattern": "^[a-z0-9.-]+(:\\d+)?$"
             },
             "name": {
               "type": "string",

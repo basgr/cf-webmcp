@@ -15,6 +15,32 @@ const minimal = {
   ],
 };
 
+describe("site.domain validation", () => {
+  it("accepts a bare hostname and a hostname:port", () => {
+    expect(ConfigSchema.parse({ ...minimal, site: { domain: "example.com", name: "x" } }).site.domain).toBe(
+      "example.com",
+    );
+    expect(ConfigSchema.parse({ ...minimal, site: { domain: "localhost:8787", name: "x" } }).site.domain).toBe(
+      "localhost:8787",
+    );
+  });
+
+  it("rejects a domain containing CRLF (header/text injection vector)", () => {
+    expect(() =>
+      ConfigSchema.parse({ ...minimal, site: { domain: "example.com\r\nSet-Cookie: x=1", name: "x" } }),
+    ).toThrow();
+  });
+
+  it("rejects a domain containing a double-quote", () => {
+    expect(() => ConfigSchema.parse({ ...minimal, site: { domain: 'example.com"', name: "x" } })).toThrow();
+  });
+
+  it("rejects a domain carrying a scheme or path", () => {
+    expect(() => ConfigSchema.parse({ ...minimal, site: { domain: "https://example.com", name: "x" } })).toThrow();
+    expect(() => ConfigSchema.parse({ ...minimal, site: { domain: "example.com/foo", name: "x" } })).toThrow();
+  });
+});
+
 describe("ai_catalog config", () => {
   it("defaults: feature off, canonical path, synthesize mode, empty optionals", () => {
     const c = ConfigSchema.parse(minimal);

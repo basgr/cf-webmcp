@@ -169,7 +169,16 @@ const Tool = z.object({
 // ---------- Top-level ----------
 
 const Site = z.object({
-  domain: z.string().min(1),
+  // A bare hostname (optionally with a port), e.g. `example.com` or
+  // `localhost:8787`. Interpolated build-time into `https://${domain}` base
+  // URLs (Link header, robots.txt, llms.txt, HTML <link> tag) and into
+  // `did:web:${domain}` / `urn:air:${domain}` identifiers in the ai-catalog.
+  // The hostname charset forbids CR/LF, double-quotes, whitespace, schemes and
+  // paths, so a malicious build-time TOML cannot inject into those headers/text.
+  domain: z
+    .string()
+    .min(1)
+    .regex(/^[a-z0-9.-]+(:\d+)?$/i, "domain must be a bare hostname (optionally with port), no scheme or path"),
   name: z.string().min(1),
   description: z.string().default(""),
   locale: z.string().default("en"),
