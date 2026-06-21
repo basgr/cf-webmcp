@@ -92,6 +92,16 @@ describe("robotsTxtResponse", () => {
     expect(text).not.toContain("Agentmap:");
   });
 
+  it("omits Agentmap directive when ai_catalog is in passthrough mode", async () => {
+    const proxy = async () => new Response("", { status: 404 });
+    const config = makeConfig();
+    config.features.ai_catalog = true;
+    config.ai_catalog.mode = "passthrough";
+    const res = await robotsTxtResponse(new Request("https://example.com/robots.txt"), config, proxy);
+    const text = await res.text();
+    expect(text).not.toContain("Agentmap:");
+  });
+
   it("Agentmap directive is idempotent on re-merge", async () => {
     const proxy = async () => new Response("", { status: 404 });
     const config = makeConfig();

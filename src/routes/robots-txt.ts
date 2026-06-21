@@ -58,7 +58,7 @@ export function mergeBlock(original: string, block: string): string {
 function buildBlock(config: Config): string {
   const ns = config.paths.namespace;
   const lines = [`User-agent: *`, `Disallow: ${ns}/`];
-  if (config.features.ai_catalog && config.features.robots_txt) {
+  if (config.features.ai_catalog && config.ai_catalog.mode !== "passthrough") {
     const base = config.site.public_url ?? `https://${config.site.domain}`;
     lines.push(`Agentmap: ${base}${config.ai_catalog.path}`);
   }
