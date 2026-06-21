@@ -149,3 +149,48 @@ describe("aiCatalogResponse (synthesize)", () => {
     expect(await res.text()).toBe(body);
   });
 });
+
+const SYNTH_ONE = JSON.stringify(
+  { specVersion: "1.0", host: { displayName: "Example", identifier: "did:web:example.com" },
+    entries: [{ identifier: "urn:air:example.com:skill:example", displayName: "Example", type: "application/ai-skill+md", url: "https://example.com/.well-known/agent-skills/site/SKILL.md" }] },
+  null, 2) + "\n";
+
+const originDoc = (entries: unknown[]) =>
+  new Response(JSON.stringify({ specVersion: "1.0", host: { displayName: "O", identifier: "did:web:example.com" }, entries }), { status: 200, headers: { "content-type": "application/json" } });
+
+const req = new Request("https://example.com/.well-known/ai-catalog.json");
+
+describe("aiCatalogResponse (merge)", () => {
+  const cfgMerge = { ...cfg, ai_catalog: { ...cfg.ai_catalog, mode: "merge" as const } };
+
+  it("splices our entry into an origin catalog and is idempotent", async () => {
+    const res1 = await aiCatalogResponse(req, cfgMerge, SYNTH_ONE, async () =>
+      originDoc([{ identifier: "urn:air:example.com:agent:other", displayName: "Other", type: "application/a2a-agent-card+json", url: "https://example.com/a.json" }]));
+    const body1 = await res1.text();
+    const ids = JSON.parse(body1).entries.map((e: any) => e.identifier);
+    expect(ids).toContain("urn:air:example.com:skill:example");
+    expect(JSON.parse(body1).entries).toHaveLength(2);
+    // Idempotent: feed our own output back as the origin -> byte identical.
+    const res2 = await aiCatalogResponse(req, cfgMerge, SYNTH_ONE, async () =>
+      new Response(body1, { status: 200, headers: { "content-type": "application/json" } }));
+    expect(await res2.text()).toBe(body1);
+  });
+
+  it("falls back to synthesized on 404, unparseable, or invalid entry member", async () => {
+    const cases = [
+      async () => new Response(null, { status: 404 }),
+      async () => new Response("not json", { status: 200, headers: { "content-type": "application/json" } }),
+      async () => new Response(JSON.stringify({ entries: [{ noId: true }] }), { status: 200, headers: { "content-type": "application/json" } }),
+    ];
+    for (const proxy of cases) {
+      const res = await aiCatalogResponse(req, cfgMerge, SYNTH_ONE, proxy);
+      expect(JSON.parse(await res.text()).entries).toHaveLength(1);
+    }
+  });
+
+  it("relays a non-JSON origin response with noindex added", async () => {
+    const res = await aiCatalogResponse(req, cfgMerge, SYNTH_ONE, async () =>
+      new Response("<html></html>", { status: 200, headers: { "content-type": "text/html" } }));
+    expect(res.headers.get("x-robots-tag")).toBe("noindex");
+  });
+});
