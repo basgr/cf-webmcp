@@ -26,7 +26,7 @@ description: "An example site exposing WebMCP tools."
 
 ## Tools available on this site
 
-Browser-native agents register these automatically via `navigator.modelContext` when the WebMCP runtime is present. Desktop MCP clients can pair at <https://example.com/mcp> and call the tools through the localhost bridge.
+Browser-native agents register these automatically via `document.modelContext` (or the deprecated `navigator.modelContext` alias) when the WebMCP runtime is present. Desktop MCP clients can pair at <https://example.com/mcp> and call the tools through the localhost bridge.
 
 - `search_pages(query: string)` - Search the site by keyword.
 - `list_posts()` - List recent posts.

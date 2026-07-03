@@ -13,7 +13,7 @@ For each `[[forms]]` block that matches the current request path, the Worker sta
 - **`toolautosubmit`** on the matched `<form>` element (only when `autosubmit = true`)
 - **`toolparamdescription`** on each matched input/select/textarea inside the form
 
-Browsers that implement the W3C draft (Chrome 146+ with the flag) parse these attributes during HTML parse and expose the form as an agent-callable tool via `navigator.modelContext` automatically. No JS work on the publisher side.
+Browsers that implement the W3C draft (Chromium with the flag) parse these attributes during HTML parse and expose the form as an agent-callable tool via the WebMCP runtime (`document.modelContext`) automatically. No JS work on the publisher side.
 
 ## Config
 
@@ -97,7 +97,7 @@ A WebMCP tool name may be registered only once per page. Registering the same na
 
 The W3C draft also defines two `SubmitEvent` extensions that fire when the form is submitted by an agent:
 
-- **`event.agentInvoked`** is `true` when the submission came from `navigator.modelContext.executeTool(...)`, `false` for human submissions.
+- **`event.agentInvoked`** is `true` when the submission came from the WebMCP runtime's `executeTool(...)`, `false` for human submissions.
 - **`event.respondWith(promise)`** lets the page return a structured response to the agent instead of (or alongside) the normal form submission flow.
 
 `cf-webmcp` does not generate or inject the submit-handler JS that uses these extensions. The publisher writes it on the origin side: an inline `<script>` (or external file) that calls `form.addEventListener("submit", ...)`, checks `event.agentInvoked`, and calls `event.respondWith(Promise.resolve({...}))` with a structured JSON envelope describing the result.

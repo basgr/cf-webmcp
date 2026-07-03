@@ -1,6 +1,6 @@
 {
   "name": "cf-webmcp",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "WebMCP at the edge: a Cloudflare Worker that equips any website with WebMCP from a single TOML config.",
   "license": "MIT",
   "private": false,

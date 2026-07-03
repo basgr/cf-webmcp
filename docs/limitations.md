@@ -39,9 +39,15 @@ In route-only mode, browser-native agents must discover tools via the manifest. 
 
 ## Native API surface is still a draft
 
-The W3C WebMCP draft (`webmachinelearning/webmcp`) is moving. The bootstrapper calls `navigator.modelContext.registerTool` per the current draft. If the draft changes shape, the bootstrapper is one file to update.
+The W3C WebMCP draft (`webmachinelearning/webmcp`) is moving. The bootstrapper calls `registerTool` on `document.modelContext` (current draft), falling back to the deprecated `navigator.modelContext` alias for 146-149 builds. If the draft changes shape again, the bootstrapper is one file to update.
 
 Cloudflare Browser Run lab sessions expose `navigator.modelContextTesting` for the **consumer** side (the headless agent calling `listTools` / `executeTool`). That is a separate surface from the producer API we register against. We do not target it.
+
+## Zone-level AI bot blocking runs in front of the Worker
+
+Cloudflare's AI traffic controls (bot classification into Search / Agent / Training categories, WAF rules, managed challenges) execute **before** the Worker. If the zone blocks the Agent category, user-directed agents - exactly the audience cf-webmcp publishes tools for - are stopped at the edge and the Worker never sees the request. cf-webmcp cannot detect or override this from inside the Worker; it is a zone security setting only the publisher can change.
+
+Since September 15, 2026, **new** Cloudflare zones block Agent and Training bots by default on ad-monetized pages. Existing zones keep their settings. See the "Cloudflare AI crawler defaults" section in [`docs/deployment.md`](deployment.md) for what to configure.
 
 ## Tool catalogue is static at deploy
 

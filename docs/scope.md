@@ -47,7 +47,7 @@ The following are real, useful things, but they are not WebMCP and would dilute 
 ### Bot policy
 
 - **AI-bot UA rules in robots.txt** (`User-agent: GPTBot`, `ClaudeBot`, etc.). Publisher policy. cf-webmcp only augments robots.txt to disallow its own private namespace; it does not opine on whether GPTBot is allowed to crawl your homepage.
-- **Content Signals.** Publisher content policy. Belongs in the CMS or origin.
+- **Content Signals.** Publisher content policy, including the `use=immediate|reference|full` extension that Cloudflare's managed robots.txt writes (`Content-signal: search=yes, ai-train=no, use=reference`). Belongs in the CMS, the origin, or Cloudflare's zone settings. cf-webmcp's robots.txt merge mode preserves any Content-Signal lines already present; it does not emit its own. See the "Cloudflare AI crawler defaults" section in [`docs/deployment.md`](deployment.md) for how those zone defaults interact with a cf-webmcp deployment.
 - **Web Bot Auth.** Bot signs requests; server verifies. Server-side verification is a security policy concern, not a WebMCP discovery concern.
 
 ### Origin

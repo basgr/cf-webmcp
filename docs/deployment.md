@@ -129,6 +129,27 @@ Some Cloudflare products (Bot Management, custom WAF rules, rate-limiting) will 
 
 Configure your WAF / Bot Management to allow requests with these headers. Otherwise tool calls will return `origin_4xx` or `rate_limited` envelope errors.
 
+## Cloudflare AI crawler defaults (September 2026)
+
+Cloudflare classifies bots into three categories - **Search** (crawling for search results), **Agent** (user-directed agents visiting a page on behalf of a human), and **Training** (crawling to train or fine-tune models). Since **September 15, 2026, new zones block Agent and Training bots by default on ad-monetized pages**; Search stays allowed. Existing zones keep their settings.
+
+This matters for cf-webmcp deployments because the **Agent category is exactly the audience cf-webmcp serves** (ChatGPT-style live fetchers, browser-use agents), and the blocking happens at the WAF layer **before the Worker runs**. On a new zone with defaults, agents can be 403'd on the HTML pages where the injected bootstrap and form attributes live - the WebMCP surface looks dead even though the Worker is deployed correctly. Discovery endpoints under `/.well-known/*` and `/_webmcp/*` are typically unaffected (they are not ad-monetized pages), but the pages agents act on are.
+
+What to do:
+
+- **Review Security -> AI traffic in the Cloudflare dashboard** after creating a new zone. If you deploy cf-webmcp, allow the Agent category (at least for the paths agents need). All plan tiers have these controls.
+- **Beware the multi-purpose crawler trap.** Crawlers that serve several functions (Googlebot, Bingbot, Applebot do both Search and Training) are blocked according to *all* of their behaviors: blocking Training blocks Googlebot entirely, which de-indexes you from search. Read the category descriptions carefully before blocking.
+- **Verified-bot status no longer grants blanket access.** Verification only admits a bot within the categories you allow.
+
+### Managed robots.txt and Content Signals
+
+Cloudflare's managed robots.txt feature **prepends** its block to whatever your zone serves at `/robots.txt` ("combining both into a single response"), so it composes with cf-webmcp's merged robots.txt rather than replacing it. Two things to know before enabling it:
+
+- Its default rule adds a preference signal (`Content-signal: search=yes, ai-train=no, use=reference`) for all user agents. That is a preference, not a block, and does not conflict with cf-webmcp.
+- Its per-bot rules add **`Disallow: /` for GPTBot, ClaudeBot, CCBot, Google-Extended, and other AI crawlers**. That tells those crawlers to skip *every* path - including `/llms.txt`, the WebMCP manifest, and the other discovery surfaces cf-webmcp publishes for them. If your goal is agent discoverability, enabling managed robots.txt works against it; prefer cf-webmcp's robots.txt merge mode and set your own policy.
+
+Content-use signals themselves (`Content-Signal:`, the `use=` parameter) remain publisher policy and out of cf-webmcp's scope; the merge mode preserves any such lines your origin or Cloudflare adds. See [`docs/scope.md`](scope.md).
+
 ## Caching and the deploy/cache-bust cycle
 
 The Worker uses three cache tiers:

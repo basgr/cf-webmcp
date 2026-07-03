@@ -17,7 +17,7 @@ Direct link: [`chrome://flags/#enable-webmcp-testing`](chrome://flags/#enable-we
 Description in the flag UI: *"Enables the WebMCP API and its associated testing interfaces."*
 
 Verified behaviour on Chrome 148:
-- Exposes `navigator.modelContext` (producer API). Pages can call `navigator.modelContext.registerTool({ ... })` to register tools.
+- Exposes the producer API at `navigator.modelContext`. Pages can call `registerTool({ ... })` on it to register tools. **Chrome 150+ moved the producer API to `document.modelContext`** and kept `navigator.modelContext` as a deprecated alias whose accessor logs a console warning; the cf-webmcp bootstrap probes `document` first and falls back to the alias, so both generations work.
 - Exposes `navigator.modelContextTesting` (consumer API). Headless agents like Cloudflare Browser Run, devtools-driven testing, and similar contexts call `listTools()` / `executeTool(name, jsonArgs)` on this.
 
 This is the **load-bearing flag**. Without it, the `cf-webmcp` bootstrapper finds no `registerTool` method and the `/mcp` page falls back to the pair or disabled state.
@@ -37,7 +37,7 @@ Adds a WebMCP panel to Chrome DevTools so you can inspect registered tools and e
 3. Optionally enable **WebMCP support in DevTools** for inspection tools.
 4. Click **Relaunch** to restart the browser.
 
-After relaunch, your `cf-webmcp` `/mcp` page should show the green **Connected** callout in its diagnostic, and your registered tools are available via `navigator.modelContext` and `navigator.modelContextTesting`.
+After relaunch, your `cf-webmcp` `/mcp` page should show the green **Connected** callout in its diagnostic, and your registered tools are available via the producer API (`document.modelContext`, or the deprecated `navigator.modelContext` alias on 146-149) and `navigator.modelContextTesting`.
 
 ![Chrome flag panel with WebMCP for testing and WebMCP support in DevTools both set to Enabled](images/chrome-flags-webmcp.png)
 
@@ -47,25 +47,17 @@ Open devtools console on any page and run:
 
 ```js
 ({
-  modelContext: 'modelContext' in navigator,
-  registerTool_is_function: typeof navigator.modelContext?.registerTool === 'function',
+  document_modelContext: 'modelContext' in document,
+  navigator_modelContext_deprecated: 'modelContext' in navigator,
+  registerTool_is_function: typeof (document.modelContext ?? navigator.modelContext)?.registerTool === 'function',
   modelContextTesting: 'modelContextTesting' in navigator,
   listTools_is_function: typeof navigator.modelContextTesting?.listTools === 'function',
 })
 ```
 
-With both flags enabled in Chrome 148+:
+With both flags enabled you should see `registerTool_is_function: true` and `listTools_is_function: true`. On Chrome 150+ `document_modelContext` is `true` (and the navigator alias usually also present); on 146-149 only `navigator_modelContext_deprecated` is `true`.
 
-```js
-{
-  modelContext: true,
-  registerTool_is_function: true,
-  modelContextTesting: true,
-  listTools_is_function: true,
-}
-```
-
-Any `false` or `undefined` value means the flag is not enabled in the current browser session (or has been reverted by a Chrome update / profile reset).
+`registerTool_is_function: false` or `undefined` means the flag is not enabled in the current browser session (or has been reverted by a Chrome update / profile reset).
 
 The same probe runs automatically on `/mcp` and prints its results in the **"Diagnostic: what this page detected"** disclosure at the bottom.
 
@@ -81,13 +73,13 @@ That is the entire reason `fallback_widget = true` exists. With the widget enabl
 - A non-flag visitor with a desktop MCP client (Claude Desktop, Cursor, Claude Code, Windsurf) → blue Pairing required. They install the localhost bridge, paste a token, and connect through the widget.
 - A non-flag visitor without a desktop MCP client → red Not connected. No path to use the tools from this browser. They are not the audience.
 
-In short: most real visitors should be on the pair path until browser-native lands in stable. Keep `fallback_widget = true` until at least Chrome stable ships `navigator.modelContext.registerTool`.
+In short: most real visitors should be on the pair path until browser-native lands in stable. Keep `fallback_widget = true` until at least Chrome stable ships the WebMCP producer API (`document.modelContext.registerTool`).
 
 ## Other browsers
 
 - **Firefox.** No public flag yet. Mozilla's position on WebMCP is still pending as of mid-2026.
 - **Safari.** No public flag yet. WebKit has not announced an implementation timeline.
-- **Cloudflare Browser Run** lab sessions. WebMCP is on by default in lab sessions per [Cloudflare's WebMCP docs](https://developers.cloudflare.com/browser-run/features/webmcp/). Both `navigator.modelContext` and `navigator.modelContextTesting` are exposed without any flag flip.
+- **Cloudflare Browser Run** lab sessions. WebMCP is on by default in lab sessions per [Cloudflare's WebMCP docs](https://developers.cloudflare.com/browser-run/features/webmcp/). Both the producer API and `navigator.modelContextTesting` are exposed without any flag flip.
 
 ## Why the flag and not just ship it
 

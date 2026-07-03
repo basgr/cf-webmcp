@@ -74,7 +74,8 @@ If you want **none** of the runtime branching (e.g. you are building a static "t
 
 <script>
 (function () {
-  var hasNative = 'modelContext' in navigator && typeof navigator.modelContext.registerTool === 'function';
+  var mc = ('modelContext' in document) ? document.modelContext : navigator.modelContext;
+  var hasNative = !!mc && typeof mc.registerTool === 'function';
   var widgetEnabled = {{widget_enabled_js}};
   var id = hasNative ? 'state-native' : (widgetEnabled ? 'state-pair' : 'state-disabled');
   document.querySelectorAll('.state').forEach(function(el){ el.style.display = 'none'; });

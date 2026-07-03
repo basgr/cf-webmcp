@@ -56,7 +56,7 @@ hr{border:none;border-top:1px solid #e5e7eb;margin:2.5rem 0}
 <div id="state-native" class="state">
   <div class="callout callout-success">
     <h2>Connected</h2>
-    <p>This page detected WebMCP support in your browser (<code>navigator.modelContext</code>). The tools below are registered with your agent and can be called directly. No pairing needed.</p>
+    <p>This page detected WebMCP support in your browser (<code>document.modelContext</code>). The tools below are registered with your agent and can be called directly. No pairing needed.</p>
   </div>
 </div>
 
@@ -96,7 +96,7 @@ hr{border:none;border-top:1px solid #e5e7eb;margin:2.5rem 0}
 <h2>About WebMCP</h2>
 <p>WebMCP is a way for websites to expose structured tools that AI agents can call. There are two runtimes behind the same name, and they reach different agents.</p>
 <ul>
-  <li><strong>The W3C draft</strong> (<a href="https://github.com/webmachinelearning/webmcp"><code>webmachinelearning/webmcp</code></a>): a browser API at <code>navigator.modelContext</code>. Used by browser-native agents (Chromium 146+ with the flag, Cloudflare Browser Run lab sessions). No pairing needed; tools register automatically when the page loads. <strong>As of mid-2026 this is behind <code>chrome://flags/#enable-webmcp-testing</code></strong> in Chrome and Edge.</li>
+  <li><strong>The W3C draft</strong> (<a href="https://github.com/webmachinelearning/webmcp"><code>webmachinelearning/webmcp</code></a>): a browser API at <code>document.modelContext</code> (older builds expose the deprecated <code>navigator.modelContext</code> alias). Used by browser-native agents (Chromium with the flag, Cloudflare Browser Run lab sessions). No pairing needed; tools register automatically when the page loads. <strong>As of mid-2026 this is behind <code>chrome://flags/#enable-webmcp-testing</code></strong> in Chrome and Edge.</li>
   <li><strong>The jasonjmcghee library</strong> (<a href="https://github.com/jasonjmcghee/WebMCP"><code>jasonjmcghee/WebMCP</code></a>): a localhost websocket bridge for desktop MCP clients (Claude Desktop, Cursor, Claude Code, Windsurf). Requires the one-time pairing flow above.</li>
 </ul>
 <p class="muted">This site uses <a href="https://github.com/basgr/cf-webmcp">cf-webmcp</a> to expose both surfaces from a single config.</p>
@@ -109,17 +109,24 @@ hr{border:none;border-top:1px solid #e5e7eb;margin:2.5rem 0}
 
 <script>
 (function () {
-  var mc = navigator.modelContext;
+  // Producer host: document.modelContext is current (Chrome 150+); the
+  // navigator binding is the deprecated 146-149 alias whose accessor logs a
+  // console warning, so only read it when document lacks the API. The `in`
+  // checks are safe (they do not invoke the accessor).
+  var hasDoc = 'modelContext' in document;
+  var hasNav = 'modelContext' in navigator;
+  var mc = hasDoc ? document.modelContext : (hasNav ? navigator.modelContext : null);
   var mct = navigator.modelContextTesting;
   var probes = {
-    'navigator.modelContext': 'modelContext' in navigator,
-    'typeof navigator.modelContext.registerTool': mc ? typeof mc.registerTool : 'undefined (modelContext absent)',
+    'document.modelContext': hasDoc,
+    'navigator.modelContext (deprecated alias)': hasNav,
+    'typeof modelContext.registerTool': mc ? typeof mc.registerTool : 'undefined (modelContext absent)',
     'navigator.modelContextTesting': 'modelContextTesting' in navigator,
     'typeof navigator.modelContextTesting.listTools': mct ? typeof mct.listTools : 'undefined (modelContextTesting absent)',
     'typeof navigator.modelContextTesting.executeTool': mct ? typeof mct.executeTool : 'undefined (modelContextTesting absent)',
     'fallback widget configured': {{widget_enabled_js}}
   };
-  var hasProducer = probes['navigator.modelContext'] && probes['typeof navigator.modelContext.registerTool'] === 'function';
+  var hasProducer = !!mc && probes['typeof modelContext.registerTool'] === 'function';
   var widgetEnabled = {{widget_enabled_js}};
   var id = hasProducer ? 'state-native' : (widgetEnabled ? 'state-pair' : 'state-disabled');
   var el = document.getElementById(id);
