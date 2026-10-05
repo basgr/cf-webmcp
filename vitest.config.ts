@@ -16,7 +16,7 @@ export default defineConfig({
     cloudflareTest({
       wrangler: { configPath: "./wrangler.test.toml" },
       miniflare: {
-        compatibilityDate: "2024-09-23",
+        compatibilityDate: "2026-06-25",
         compatibilityFlags: ["nodejs_compat"],
       },
     }),

@@ -7,7 +7,7 @@ Patch release, no config changes required.
 - **Landing page probes `document.modelContext` first.** The `/mcp` runtime branching (and its diagnostic) previously probed only the deprecated `navigator.modelContext` alias; it now mirrors the bootstrap's document-first detection, so the Connected state survives the alias's eventual removal and the diagnostic reports both hosts. Custom landing templates should adopt the same probe (see `docs/customisation.md`).
 - **Docs overhaul.** All references to the producer API now read `document.modelContext` (with the deprecated `navigator` alias noted); new guidance in `docs/deployment.md` on Cloudflare's September 2026 AI crawler defaults (Agent-category blocking runs before the Worker on new zones; managed robots.txt per-bot `Disallow: /` rules work against agent discoverability) and a matching `docs/limitations.md` entry.
 - **`site.domain` validation tightened** to a bare-hostname pattern so a malicious build-time TOML cannot inject CR/LF or quotes into the Link header, robots.txt, or llms.txt.
-- **Dev-dependency advisories cleared** (undici, vite, esbuild). `npm audit`: 0 vulnerabilities.
+- **Dev-dependency advisories cleared** (undici, vite, esbuild). `npm audit` reported 0 vulnerabilities at release time.
 - **Templates** gained a commented `[ai_catalog]` (ARD) example.
 
 ## v0.5.0: ARD ai-catalog (opt-in)

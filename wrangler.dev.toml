@@ -4,7 +4,7 @@
 
 name               = "cf-webmcp-dev"
 main               = "src/worker.ts"
-compatibility_date = "2024-09-23"
+compatibility_date = "2026-06-25"
 compatibility_flags = ["nodejs_compat"]
 
 [dev]

@@ -9,7 +9,7 @@ Visit `http://localhost:8787` and you are hitting the Worker, which proxies to t
 
 ## Prerequisites
 
-- Node.js 20 or higher.
+- Node.js 22 or higher.
 - A fresh clone of the repo.
 
 ## One-time setup
