@@ -38,6 +38,7 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     ai_catalog: { path: "/.well-known/ai-catalog.json", mode: "synthesize", host_identifier: "", representative_queries: [], tags: [] },
     agent_skills: { path: "/.well-known/agent-skills/site/SKILL.md", mode: "synthesize", name: "", description: "", aliases: ["/.well-known/agent-skills/site/SKILLS.md", "/.well-known/agent-skills/site/skill.md", "/.well-known/agent-skills/site/skills.md"], hints: [] },
     agent_skills_index: { path: "/.well-known/agent-skills/index.json", mode: "synthesize" },
+    origin_trial: { tokens: [] },
     paths: { namespace: "/_webmcp" },
     injection: { exclude_paths: [] },
     cache: {

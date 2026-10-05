@@ -42,6 +42,7 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
       path: "/.well-known/agent-skills/index.json",
       mode: "synthesize",
     },
+    origin_trial: { tokens: [] },
     paths: { namespace: "/_webmcp" },
     injection: { exclude_paths: [] },
     cache: {

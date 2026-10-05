@@ -1,12 +1,13 @@
 import type { Config } from "../config-types";
 import { buildCacheControl } from "../cache";
+import { appendOriginTrialHeaders } from "../origin-trial";
 
 export function landingResponse(
   landingHtml: string,
   config: Config,
   configHash: string,
 ): Response {
-  return new Response(landingHtml, {
+  const response = new Response(landingHtml, {
     status: 200,
     headers: {
       "content-type": "text/html; charset=utf-8",
@@ -28,6 +29,10 @@ export function landingResponse(
       "referrer-policy": "strict-origin-when-cross-origin",
     },
   });
+  // The landing is a top-level HTML document too, so it carries the origin-trial tokens
+  // (its 308 redirect below does not).
+  appendOriginTrialHeaders(response.headers, config.origin_trial.tokens);
+  return response;
 }
 
 /**

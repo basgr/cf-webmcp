@@ -6,6 +6,7 @@ import os from "node:os";
 import { fileURLToPath } from "node:url";
 import { buildConfig } from "./build-config";
 import { LICENSE_PREAMBLE } from "../src/widget-preamble";
+import { expiryInDays, makeOriginTrialToken, type TokenPayload } from "../src/test-support/origin-trial";
 
 /**
  * Build-config tests work in a sandbox temp dir per test:
@@ -60,7 +61,7 @@ async function writeToml(name: string, contents: string): Promise<string> {
 
 async function runBuild(
   tomlPath: string,
-  opts: { widgetPinPath?: string } = {},
+  opts: { widgetPinPath?: string; now?: Date } = {},
 ): Promise<{ outDir: string; files: Record<string, string> }> {
   const outDir = path.join(tmpDir, "out");
   await buildConfig({ tomlPath, outDir, ...opts });
@@ -822,5 +823,244 @@ describe("content-addressed widget", () => {
       widgetPinPath: await writePin("pin.json", fakePin("widget A")),
     });
     expect(warn.mock.calls.map((c) => String(c[0])).filter((m) => /widget|preamble/i.test(m))).toEqual([]);
+  });
+});
+
+describe("buildConfig: [origin_trial]", () => {
+  const DAY_MS = 86_400_000;
+
+  /** MINIMAL with `[site].public_url` set, and the given [origin_trial] tokens. */
+  function otToml(tokens: string[], publicUrl?: string): string {
+    const site = publicUrl
+      ? MINIMAL.replace('name   = "Example Co."', `name   = "Example Co."\npublic_url = ${JSON.stringify(publicUrl)}`)
+      : MINIMAL;
+    return `${site}\n\n[origin_trial]\ntokens = ${JSON.stringify(tokens)}\n`;
+  }
+
+  function tokenFor(payload: TokenPayload = {}): string {
+    return makeOriginTrialToken(payload);
+  }
+
+  function originTrialWarnings(warn: { mock: { calls: unknown[][] } }): string[] {
+    return warn.mock.calls.map((c) => String(c[0])).filter((m) => /origin_trial/.test(m));
+  }
+
+  it("builds with no [origin_trial] block, silently, and emits no token export", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { files } = await runBuild(await writeToml("ot-none.toml", MINIMAL));
+    expect(originTrialWarnings(warn)).toEqual([]);
+    expect(files["config.ts"]).not.toMatch(/export const \w*(ORIGIN_TRIAL|TOKENS)\w*/i);
+  });
+
+  it("accepts a token issued for the site origin, with its explicit :443", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const token = tokenFor({ origin: "https://example.com:443" });
+    const { files } = await runBuild(await writeToml("ot-ok.toml", otToml([token])));
+    expect(files["config.ts"]).toContain(token);
+    expect(originTrialWarnings(warn)).toEqual([]);
+  });
+
+  it("accepts a token for a site on a non-default port, and rejects another port", async () => {
+    const ok = tokenFor({ origin: "http://localhost:8787" });
+    await expect(runBuild(await writeToml("ot-port-ok.toml", otToml([ok], "http://localhost:8787")))).resolves.toBeDefined();
+
+    const other = tokenFor({ origin: "http://localhost:8788" });
+    await expect(runBuild(await writeToml("ot-port-bad.toml", otToml([other], "http://localhost:8787")))).rejects.toThrow(
+      /origin_trial\.tokens\[0\].*http:\/\/localhost:8788.*http:\/\/localhost:8787/s,
+    );
+  });
+
+  it("rejects a token issued for another origin and names the token, its origin, the feature and the expiry", async () => {
+    const expiry = expiryInDays(200);
+    const token = tokenFor({ origin: "https://other.example:443", feature: "SomeFeature", expiry });
+    const err = await runBuild(await writeToml("ot-mismatch.toml", otToml([token]))).catch((e: Error) => e);
+    expect(err).toBeInstanceOf(Error);
+    const message = (err as Error).message;
+    expect(message).toMatch(/origin_trial\.tokens\[0\]/);
+    expect(message).toContain("https://other.example:443");
+    expect(message).toContain("https://example.com");
+    expect(message).toContain("SomeFeature");
+    expect(message).toContain(new Date(expiry * 1000).toISOString());
+    expect(message).not.toContain(token);
+  });
+
+  it("numbers the offending token by its index", async () => {
+    const good = tokenFor();
+    const bad = tokenFor({ origin: "https://other.example:443" });
+    await expect(runBuild(await writeToml("ot-index.toml", otToml([good, bad])))).rejects.toThrow(/origin_trial\.tokens\[1\]/);
+  });
+
+  it("rejects a token for http:// when the site is https://", async () => {
+    const token = tokenFor({ origin: "http://example.com:80" });
+    await expect(runBuild(await writeToml("ot-scheme.toml", otToml([token])))).rejects.toThrow(/origin_trial\.tokens\[0\]/);
+  });
+
+  describe("isSubdomain", () => {
+    it("lets a token for example.com cover www.example.com", async () => {
+      const token = tokenFor({ origin: "https://example.com:443", isSubdomain: true });
+      await expect(
+        runBuild(await writeToml("ot-sub-ok.toml", otToml([token], "https://www.example.com"))),
+      ).resolves.toBeDefined();
+    });
+
+    it("lets a token for example.com cover the apex itself", async () => {
+      const token = tokenFor({ origin: "https://example.com:443", isSubdomain: true });
+      await expect(runBuild(await writeToml("ot-sub-apex.toml", otToml([token])))).resolves.toBeDefined();
+    });
+
+    it("does not cover www.example.com without isSubdomain", async () => {
+      const token = tokenFor({ origin: "https://example.com:443" });
+      await expect(runBuild(await writeToml("ot-sub-off.toml", otToml([token], "https://www.example.com")))).rejects.toThrow(
+        /origin_trial\.tokens\[0\]/,
+      );
+    });
+
+    it("does not cover badexample.com", async () => {
+      const token = tokenFor({ origin: "https://example.com:443", isSubdomain: true });
+      await expect(runBuild(await writeToml("ot-sub-bad.toml", otToml([token], "https://badexample.com")))).rejects.toThrow(
+        /origin_trial\.tokens\[0\]/,
+      );
+    });
+
+    it("does not cover a different scheme or port", async () => {
+      const token = tokenFor({ origin: "https://example.com:443", isSubdomain: true });
+      await expect(runBuild(await writeToml("ot-sub-scheme.toml", otToml([token], "http://www.example.com")))).rejects.toThrow(
+        /origin_trial\.tokens\[0\]/,
+      );
+      await expect(
+        runBuild(await writeToml("ot-sub-port.toml", otToml([token], "https://www.example.com:8443"))),
+      ).rejects.toThrow(/origin_trial\.tokens\[0\]/);
+    });
+  });
+
+  it("rejects an expired token and says when it expired", async () => {
+    const expiry = expiryInDays(-3);
+    const token = tokenFor({ expiry });
+    const err = await runBuild(await writeToml("ot-expired.toml", otToml([token]))).catch((e: Error) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toMatch(/origin_trial\.tokens\[0\].*expired/s);
+    expect((err as Error).message).toContain(new Date(expiry * 1000).toISOString());
+    expect((err as Error).message).toContain("WebMCP");
+  });
+
+  it("treats a token as expired at the very second of its expiry", async () => {
+    const expiry = 1_900_000_000;
+    const token = tokenFor({ expiry });
+    const toml = await writeToml("ot-boundary.toml", otToml([token]));
+    await expect(runBuild(toml, { now: new Date(expiry * 1000) })).rejects.toThrow(/expired/);
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    await expect(runBuild(toml, { now: new Date(expiry * 1000 - 1) })).resolves.toBeDefined();
+  });
+
+  it("warns, and still builds, when a token expires within 30 days", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const expiry = expiryInDays(10);
+    const token = tokenFor({ expiry });
+    await runBuild(await writeToml("ot-near.toml", otToml([token])));
+    const messages = originTrialWarnings(warn);
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toMatch(/origin_trial\.tokens\[0\]/);
+    expect(messages[0]).toContain("WebMCP");
+    expect(messages[0]).toContain(new Date(expiry * 1000).toISOString());
+    expect(messages[0]).not.toContain(token);
+  });
+
+  it("warns at exactly 30 days and not a second later", async () => {
+    const now = new Date("2026-10-05T12:00:00.000Z");
+    const nowSeconds = now.getTime() / 1000;
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const edge = tokenFor({ expiry: nowSeconds + 30 * 86_400 });
+    await runBuild(await writeToml("ot-30.toml", otToml([edge])), { now });
+    expect(originTrialWarnings(warn)).toHaveLength(1);
+
+    warn.mockClear();
+    const beyond = tokenFor({ expiry: nowSeconds + 30 * 86_400 + 1 });
+    await runBuild(await writeToml("ot-30b.toml", otToml([beyond])), { now });
+    expect(originTrialWarnings(warn)).toEqual([]);
+  });
+
+  it("does not warn about a token with a long validity", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    await runBuild(await writeToml("ot-far.toml", otToml([tokenFor({ expiry: expiryInDays(120) })])));
+    expect(originTrialWarnings(warn)).toEqual([]);
+  });
+
+  it("rejects a third-party token", async () => {
+    const token = tokenFor({ isThirdParty: true });
+    await expect(runBuild(await writeToml("ot-third.toml", otToml([token])))).rejects.toThrow(
+      /origin_trial\.tokens\[0\].*third-party/is,
+    );
+  });
+
+  it("rejects a token that cannot be decoded, without echoing it", async () => {
+    const garbage = "QUJDREVGR0hJSktMTU5PUA==";
+    const err = await runBuild(await writeToml("ot-garbage.toml", otToml([garbage]))).catch((e: Error) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toMatch(/origin_trial\.tokens\[0\]/);
+    expect((err as Error).message).not.toContain(garbage);
+  });
+
+  it("rejects a token outside the base64 alphabet at schema validation", async () => {
+    await expect(runBuild(await writeToml("ot-charset.toml", otToml(["not base64!"])))).rejects.toThrow(
+      /validation failed[\s\S]*origin_trial\.tokens\.0/,
+    );
+  });
+
+  it("rejects the same token listed twice", async () => {
+    const token = tokenFor();
+    await expect(runBuild(await writeToml("ot-dup.toml", otToml([token, tokenFor({ feature: "Other" }), token])))).rejects.toThrow(
+      /origin_trial\.tokens\[2\].*origin_trial\.tokens\[0\]/s,
+    );
+  });
+
+  it("reports every bad token in one error", async () => {
+    const wrongOrigin = tokenFor({ origin: "https://other.example:443" });
+    const expired = tokenFor({ expiry: expiryInDays(-1) });
+    const err = await runBuild(await writeToml("ot-many.toml", otToml([wrongOrigin, tokenFor(), expired]))).catch(
+      (e: Error) => e,
+    );
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toMatch(/origin_trial\.tokens\[0\]/);
+    expect((err as Error).message).toMatch(/origin_trial\.tokens\[2\]/);
+    expect((err as Error).message).not.toMatch(/origin_trial\.tokens\[1\]/);
+  });
+
+  it("does not warn about expiry for a token it already rejects", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const token = tokenFor({ origin: "https://other.example:443", expiry: expiryInDays(5) });
+    await expect(runBuild(await writeToml("ot-reject-nowarn.toml", otToml([token])))).rejects.toThrow();
+    expect(originTrialWarnings(warn)).toEqual([]);
+  });
+
+  it("names the site URL when [site].public_url is not a URL and tokens are present", async () => {
+    await expect(runBuild(await writeToml("ot-badurl.toml", otToml([tokenFor()], "not a url")))).rejects.toThrow(/public_url/);
+  });
+
+  it("leaves a malformed [site].public_url alone when there are no tokens", async () => {
+    const toml = MINIMAL.replace('name   = "Example Co."', 'name   = "Example Co."\npublic_url = "not a url"');
+    await expect(runBuild(await writeToml("ot-badurl-none.toml", toml))).resolves.toBeDefined();
+  });
+
+  it("never prints a token in a warning", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const token = tokenFor({ expiry: expiryInDays(3) });
+    await runBuild(await writeToml("ot-noecho.toml", otToml([token])));
+    expect(warn.mock.calls.flat().map(String).join("\n")).not.toContain(token);
+  });
+
+  it("changes the config hash when a token is added", async () => {
+    const without = await runBuild(await writeToml("ot-h1.toml", MINIMAL));
+    const withToken = await runBuild(await writeToml("ot-h2.toml", otToml([tokenFor()])));
+    expect(JSON.parse(withToken.files["manifest.json"]!).config_hash).not.toBe(
+      JSON.parse(without.files["manifest.json"]!).config_hash,
+    );
+  });
+
+  it("uses the injected clock, not the wall clock", async () => {
+    // Valid for a year from now: fine today, expired 400 days from now.
+    const token = tokenFor({ expiry: expiryInDays(365) });
+    const toml = await writeToml("ot-clock.toml", otToml([token]));
+    await expect(runBuild(toml, { now: new Date(Date.now() + 400 * DAY_MS) })).rejects.toThrow(/expired/);
   });
 });

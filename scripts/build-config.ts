@@ -26,6 +26,7 @@ import { fileURLToPath } from "node:url";
 import TOML from "@iarna/toml";
 import { ConfigSchema, type Config, type ToolConfig, type ExecutorConfig } from "../src/config-types.js";
 import { compileTemplate } from "../src/mini-language.js";
+import { decodeOriginTrialToken, type OriginTrialPayload } from "../src/origin-trial.js";
 import { buildFrontmatter, buildSkillBody } from "../src/routes/agent-skills.js";
 import { LICENSE_PREAMBLE } from "../src/widget-preamble.js";
 import { sha256Hex, widgetAssetName } from "./widget-pin.js";
@@ -39,6 +40,8 @@ interface BuildOptions {
   outDir: string;
   /** Widget pin to read (default vendor/webmcp/current.json). Overridable for tests. */
   widgetPinPath?: string;
+  /** The clock the [origin_trial] expiry checks read (default: now). Overridable for tests. */
+  now?: Date;
 }
 
 async function readToml(filePath: string): Promise<Record<string, unknown>> {
@@ -868,6 +871,112 @@ async function resolveWidget(config: Config, pinPath: string): Promise<WidgetBui
   };
 }
 
+/** A token that expires within this long of the build gets a warning. */
+const ORIGIN_TRIAL_WARN_WITHIN_MS = 30 * 24 * 60 * 60 * 1000;
+
+/**
+ * Whether a token's origin covers the site: the same origin (scheme, host, port), or, for a
+ * token with isSubdomain, the same scheme and port on the token's host or any subdomain of
+ * it. URL.origin drops a default port, so a token's explicit `https://example.com:443`
+ * equals a site `https://example.com`.
+ */
+function originTrialCoversSite(payload: OriginTrialPayload, site: URL): boolean {
+  const tokenOrigin = new URL(payload.origin);
+  if (tokenOrigin.origin === site.origin) return true;
+  return (
+    payload.isSubdomain === true &&
+    tokenOrigin.protocol === site.protocol &&
+    tokenOrigin.port === site.port &&
+    site.hostname.endsWith(`.${tokenOrigin.hostname}`)
+  );
+}
+
+/**
+ * Checks [origin_trial].tokens, which the Worker sends as `Origin-Trial` headers unchanged.
+ * Chrome ignores a token without saying so, so every way a token silently does nothing is a
+ * build error: it cannot be decoded, it is listed twice, it is a third-party token (not
+ * accepted as a header on a first-party document), it was issued for another origin than the
+ * site's, or it has expired. A token that expires within 30 days is a warning. Every problem
+ * is reported at once, by index; no message carries a token beyond decodeOriginTrialToken's
+ * short prefix. The signature is not checked: that is Chrome's job.
+ */
+function checkOriginTrial(config: Config, now: Date): void {
+  const tokens = config.origin_trial.tokens;
+  if (tokens.length === 0) return;
+
+  const siteUrl = siteBase(config);
+  let site: URL;
+  try {
+    site = new URL(siteUrl);
+  } catch {
+    throw new Error(
+      `[build-config] origin_trial: cannot check the tokens against the site origin, because the site URL ` +
+        `${JSON.stringify(siteUrl)} ([site].public_url, else https://<[site].domain>) is not a URL.`,
+    );
+  }
+
+  const nowMs = now.getTime();
+  const problems: string[] = [];
+  const warnings: string[] = [];
+  const firstIndex = new Map<string, number>();
+
+  tokens.forEach((token, i) => {
+    const name = `origin_trial.tokens[${i}]`;
+    const earlier = firstIndex.get(token);
+    if (earlier !== undefined) {
+      problems.push(`${name} repeats origin_trial.tokens[${earlier}]; list each token once.`);
+      return;
+    }
+    firstIndex.set(token, i);
+
+    let payload: OriginTrialPayload;
+    try {
+      payload = decodeOriginTrialToken(token).payload;
+    } catch (e) {
+      problems.push(`${name} cannot be used: ${(e as Error).message}`);
+      return;
+    }
+
+    const expiryMs = payload.expiry * 1000;
+    const expiresAt = new Date(expiryMs).toISOString();
+    const label = `${name} (feature ${JSON.stringify(payload.feature)}, expires ${expiresAt})`;
+    const own: string[] = [];
+    if (payload.isThirdParty) {
+      own.push(
+        `is a third-party token. Chrome does not accept a third-party token delivered as an Origin-Trial HTTP header on a ` +
+          `first-party document. Register the trial as a first-party one for ${site.origin} and use that token.`,
+      );
+    }
+    if (!originTrialCoversSite(payload, site)) {
+      own.push(
+        `was issued for ${payload.origin}${payload.isSubdomain ? " and its subdomains" : ""}, but this site's origin is ` +
+          `${site.origin} ([site].public_url, else https://<[site].domain>). Chrome ignores a token for another origin. ` +
+          `Register the trial for ${site.origin}.`,
+      );
+    }
+    if (expiryMs <= nowMs) {
+      own.push(`has expired. Chrome ignores an expired token. Renew the trial registration and replace the token.`);
+    }
+    for (const text of own) problems.push(`${label} ${text}`);
+
+    if (own.length === 0 && expiryMs - nowMs <= ORIGIN_TRIAL_WARN_WITHIN_MS) {
+      const days = Math.ceil((expiryMs - nowMs) / 86_400_000);
+      warnings.push(
+        `[build-config] ${label} expires in ${days} day${days === 1 ? "" : "s"}. ` +
+          `Renew it and redeploy before then: after that Chrome ignores it.`,
+      );
+    }
+  });
+
+  if (problems.length > 0) {
+    throw new Error(`[build-config] origin_trial check failed:\n${problems.map((p) => `  - ${p}`).join("\n")}`);
+  }
+  for (const w of warnings) {
+    // eslint-disable-next-line no-console
+    console.warn(w);
+  }
+}
+
 export async function buildConfig(opts: BuildOptions): Promise<void> {
   const baseDir = path.dirname(opts.tomlPath);
   const rawIn = await readToml(opts.tomlPath);
@@ -896,6 +1005,7 @@ export async function buildConfig(opts: BuildOptions): Promise<void> {
   checkAllowList(config);
   checkPathCollisions(config);
   checkToolNameCollisions(config);
+  checkOriginTrial(config, opts.now ?? new Date());
 
   // CONFIG_HASH covers the config alone (preflight recomputes it from the TOML,
   // through the same resolveInherits and configHashOf) and stamps ETags. It does

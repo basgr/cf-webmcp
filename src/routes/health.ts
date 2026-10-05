@@ -1,4 +1,5 @@
 import type { Config } from "../config-types";
+import { decodeOriginTrialToken } from "../origin-trial";
 
 export interface HealthOptions {
   configHash: string;
@@ -30,6 +31,28 @@ async function widgetAssetPresent(config: Config, opts: HealthOptions): Promise<
   } catch {
     return null;
   }
+}
+
+/** One configured origin-trial token as health reports it. Never the token itself. */
+type OriginTrialStatus = { feature: string; expires_at: string; expired: boolean } | { error: "undecodable" };
+
+/**
+ * What each [origin_trial].tokens entry says, read from the token at request time:
+ * expiry is a fact about the clock now, and a token can lapse after the deploy. The build
+ * already refused a token that does not decode, so "undecodable" is a should-not-happen
+ * marker; it never takes the health check down and never echoes the token.
+ */
+function originTrials(config: Config): OriginTrialStatus[] {
+  const now = Date.now();
+  return config.origin_trial.tokens.map((token): OriginTrialStatus => {
+    try {
+      const { payload } = decodeOriginTrialToken(token);
+      const expiresMs = payload.expiry * 1000;
+      return { feature: payload.feature, expires_at: new Date(expiresMs).toISOString(), expired: expiresMs <= now };
+    } catch {
+      return { error: "undecodable" };
+    }
+  });
 }
 
 /**
@@ -83,6 +106,7 @@ export async function healthResponse(request: Request, config: Config, opts: Hea
     deployed_at: opts.deployedAt,
     preflight: opts.preflight ?? { ran_at: null, collisions: [], warnings: [] },
     widget_asset_present: await widgetAssetPresent(config, opts),
+    origin_trials: originTrials(config),
     executors: config.tools.map((t) => ({ name: t.name, ok_24h: null, err_24h: null, p95_ms_24h: null })),
   };
   return new Response(JSON.stringify(body, null, 2), {

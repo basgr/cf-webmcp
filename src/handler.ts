@@ -28,6 +28,7 @@ import { aiCatalogResponse } from "./routes/ai-catalog";
 import { agentSkillsResponse, agentSkillsRedirect } from "./routes/agent-skills";
 import { agentSkillsIndexResponse } from "./routes/agent-skills-index";
 import { buildLinkHeader, mergeLinkHeader } from "./link-header";
+import { appendOriginTrialHeaders } from "./origin-trial";
 import { formsForPath, safeInject, shouldInject } from "./injection/html-rewriter";
 import { fetchWithManualRedirects, isAbortError, logRedirectFailure, type RedirectFailure } from "./safe-fetch";
 
@@ -268,10 +269,16 @@ export function createHandler(deps: HandlerDeps): Required<Pick<ExportedHandler<
     // relay them.
     const upstream = await fetch(target.toString(), new Request(request, { redirect: "manual" }));
 
+    // Origin-Trial tokens go on the top-level HTML document, so they follow the status and
+    // content type of what origin sent, not whether this response is injected below:
+    // inject_html off, an excluded path, a non-UTF-8 charset or a bare fragment all still
+    // get them.
+    const trial = isHtmlDocument(upstream);
+
     // The Link header is discovery data, independent of body injection: it goes
     // on every proxied response, including when inject_html is off.
     if (!config.features.inject_html || !shouldInject(request, upstream, config)) {
-      return withLinkHeader(upstream);
+      return withProxyHeaders(upstream, trial);
     }
 
     const base = config.site.public_url ?? `https://${config.site.domain}`;
@@ -310,18 +317,34 @@ export function createHandler(deps: HandlerDeps): Required<Pick<ExportedHandler<
       bootstrapIntegrity,
       forms,
     });
-    return withLinkHeader(injected);
+    return withProxyHeaders(injected, trial);
   }
 
-  function withLinkHeader(response: Response): Response {
-    if (!config.features.link_header) return response;
+  /**
+   * The headers cf-webmcp adds to a proxied response: the Link header (unless
+   * [features].link_header is off) and, when `trial` is set, one Origin-Trial header
+   * per [origin_trial].tokens entry.
+   */
+  function withProxyHeaders(response: Response, trial: boolean): Response {
+    const addLink = config.features.link_header;
+    const addTrial = trial && config.origin_trial.tokens.length > 0;
+    if (!addLink && !addTrial) return response;
     // A WebSocket upgrade must be returned as the very object origin gave us:
     // its `webSocket` cannot be carried into a new Response, and rewrapping a 101
     // throws ("Responses may only be constructed with status codes in the range
     // 200 to 599"). Same for any status outside the constructible range.
     if (response.webSocket || response.status < 200 || response.status > 599) return response;
     const headers = new Headers(response.headers);
-    headers.set("link", mergeLinkHeader(headers.get("link"), buildLinkHeader(config)));
+    if (addLink) headers.set("link", mergeLinkHeader(headers.get("link"), buildLinkHeader(config)));
+    if (addTrial) appendOriginTrialHeaders(headers, config.origin_trial.tokens);
     return new Response(response.body, { status: response.status, headers });
   }
+}
+
+/**
+ * A 200 whose content type is text/html, parameters allowed. Stricter than the injection
+ * check on purpose: no 3xx, 304, 4xx or 5xx, and not text/html-something.
+ */
+function isHtmlDocument(response: Response): boolean {
+  return response.status === 200 && /^text\/html\s*(;|$)/i.test(response.headers.get("content-type") ?? "");
 }

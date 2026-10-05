@@ -8,6 +8,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createHandler, PROXY_ORIGIN_TIMEOUT_MS, type Env } from "./handler";
 import { makeDeps, type ConfigOverrides } from "./test-support/config";
+import { expiryInDays, makeOriginTrialToken } from "./test-support/origin-trial";
 
 const HTML = "<html><head></head><body>hi</body></html>";
 
@@ -1456,5 +1457,223 @@ describe("the /.well-known/ merge routes keep noindex on every relay and failure
     expect(res.headers.get("content-type")).toBe("text/html");
     expect(await res.text()).toBe("<html></html>");
     expect(res.headers.get("x-robots-tag")).toBe("noindex");
+  });
+});
+
+describe("Origin-Trial headers", () => {
+  // Chrome ships WebMCP as an origin trial. The token goes in an Origin-Trial response header on the
+  // top-level HTML document: proxied 200 text/html responses and the landing page, nothing else.
+  const T1 = makeOriginTrialToken({ feature: "WebMCP" });
+  const T2 = makeOriginTrialToken({ feature: "WebMCP", expiry: expiryInDays(200) });
+  const withTokens = (extra: ConfigOverrides = {}) => makeDeps({ origin_trial: { tokens: [T1, T2] }, ...extra });
+
+  /** The Origin-Trial values on a response, however the runtime joined them. */
+  const trialTokens = (res: Response) =>
+    (res.headers.get("origin-trial") ?? "")
+      .split(",")
+      .map((v) => v.trim())
+      .filter((v) => v !== "");
+
+  const page = "https://example.com/page";
+
+  function htmlWith(contentType: string, body = HTML, status = 200): Response {
+    return new Response(body, { status, headers: { "content-type": contentType } });
+  }
+
+  describe("on proxied HTML", () => {
+    it("sends one header per token on a 200 text/html page, and still injects", async () => {
+      stubOrigin({ [page]: () => htmlResponse() });
+      const res = await call(createHandler(withTokens()), page);
+
+      expect(res.status).toBe(200);
+      expect(trialTokens(res)).toEqual([T1, T2]);
+      expect(res.headers.get("origin-trial")).toBe(`${T1}, ${T2}`);
+      expect(res.headers.get("link")).toContain('rel="webmcp"');
+      expect(await res.text()).toContain("/_webmcp/bootstrap.test.js");
+    });
+
+    it("sends nothing when no token is configured", async () => {
+      stubOrigin({ [page]: () => htmlResponse() });
+      const res = await call(createHandler(makeDeps()), page);
+
+      expect(res.headers.has("origin-trial")).toBe(false);
+    });
+
+    it.each(["text/html", "TEXT/HTML; Charset=UTF-8", "text/html;charset=utf-8", "text/html ; charset=utf-8"])(
+      "recognises the content type %j",
+      async (contentType) => {
+        stubOrigin({ [page]: () => htmlWith(contentType) });
+        const res = await call(createHandler(withTokens()), page);
+
+        expect(trialTokens(res)).toEqual([T1, T2]);
+      },
+    );
+
+    it("sends the headers on a HEAD request to an HTML page", async () => {
+      stubOrigin({ [page]: () => new Response(null, { status: 200, headers: { "content-type": "text/html; charset=utf-8" } }) });
+      const res = await call(createHandler(withTokens()), page, { method: "HEAD" });
+
+      expect(res.status).toBe(200);
+      expect(trialTokens(res)).toEqual([T1, T2]);
+    });
+
+    it("sends the headers when inject_html is off, and leaves the body alone", async () => {
+      stubOrigin({ [page]: () => htmlResponse() });
+      const res = await call(createHandler(withTokens({ features: { inject_html: false } })), page);
+
+      expect(trialTokens(res)).toEqual([T1, T2]);
+      expect(await res.text()).toBe(HTML);
+    });
+
+    it("sends the headers when the page is not UTF-8 and so is not injected", async () => {
+      stubOrigin({ [page]: () => htmlWith("text/html; charset=iso-8859-1") });
+      const res = await call(createHandler(withTokens()), page);
+
+      expect(trialTokens(res)).toEqual([T1, T2]);
+      expect(await res.text()).toBe(HTML);
+    });
+
+    it("sends the headers on a path in [injection].exclude_paths", async () => {
+      stubOrigin({ [page]: () => htmlResponse() });
+      const res = await call(createHandler(withTokens({ injection: { exclude_paths: ["/page"] } })), page);
+
+      expect(trialTokens(res)).toEqual([T1, T2]);
+      expect(await res.text()).toBe(HTML);
+    });
+
+    it("sends the headers on an HTML fragment that gets no injection", async () => {
+      stubOrigin({ [page]: () => htmlWith("text/html; charset=utf-8", "<p>just a fragment</p>") });
+      const res = await call(createHandler(withTokens()), page);
+
+      expect(trialTokens(res)).toEqual([T1, T2]);
+      expect(await res.text()).toBe("<p>just a fragment</p>");
+    });
+
+    it("sends the headers independently of [features].link_header", async () => {
+      stubOrigin({ [page]: () => htmlResponse() });
+      const res = await call(createHandler(withTokens({ features: { link_header: false } })), page);
+
+      expect(trialTokens(res)).toEqual([T1, T2]);
+      expect(res.headers.has("link")).toBe(false);
+    });
+
+    it("keeps an Origin-Trial header the origin sent and appends ours", async () => {
+      stubOrigin({
+        [page]: () =>
+          new Response(HTML, { status: 200, headers: { "content-type": "text/html; charset=utf-8", "origin-trial": "originToken" } }),
+      });
+      const res = await call(createHandler(withTokens()), page);
+
+      expect(trialTokens(res)).toEqual(["originToken", T1, T2]);
+    });
+
+    it("does not repeat a token the origin already sent", async () => {
+      stubOrigin({
+        [page]: () =>
+          new Response(HTML, { status: 200, headers: { "content-type": "text/html; charset=utf-8", "origin-trial": T1 } }),
+      });
+      const res = await call(createHandler(withTokens()), page);
+
+      expect(trialTokens(res)).toEqual([T1, T2]);
+    });
+
+    it.each(["application/json", "image/png", "text/plain", "application/xhtml+xml", "text/html-fragment"])(
+      "sends nothing on a 200 with content type %j",
+      async (contentType) => {
+        stubOrigin({ [page]: () => new Response("x", { status: 200, headers: { "content-type": contentType } }) });
+        const res = await call(createHandler(withTokens()), page);
+
+        expect(res.headers.has("origin-trial")).toBe(false);
+      },
+    );
+
+    it.each([201, 203, 204, 206, 301, 302, 304, 308, 400, 403, 404, 410, 500, 502, 503])(
+      "sends nothing on a text/html response with status %i",
+      async (status) => {
+        const headers: Record<string, string> = { "content-type": "text/html; charset=utf-8" };
+        if (status >= 300 && status < 400) headers["location"] = "https://example.com/elsewhere";
+        const hasBody = status !== 204 && status !== 304 && !(status >= 300 && status < 400);
+        stubOrigin({ [page]: () => new Response(hasBody ? HTML : null, { status, headers }) });
+        const res = await call(createHandler(withTokens()), page);
+
+        expect(res.status).toBe(status);
+        expect(res.headers.has("origin-trial")).toBe(false);
+      },
+    );
+
+    it("sends the headers on an HTML 200 that answers a POST, as the injection does", async () => {
+      // The rule is about the response, not the method: the answer to a form POST is a top-level document too.
+      stubOrigin({ [page]: () => htmlResponse() });
+      const res = await call(createHandler(withTokens()), page, { method: "POST", body: "a=b" });
+
+      expect(trialTokens(res)).toEqual([T1, T2]);
+    });
+  });
+
+  describe("on the landing page", () => {
+    it("sends the headers on GET and HEAD", async () => {
+      const fetchMock = stubOrigin({});
+      const handler = createHandler(withTokens());
+
+      const get = await call(handler, "https://example.com/mcp");
+      const head = await call(handler, "https://example.com/mcp", { method: "HEAD" });
+
+      expect(get.status).toBe(200);
+      expect(trialTokens(get)).toEqual([T1, T2]);
+      expect(head.status).toBe(200);
+      expect(trialTokens(head)).toEqual([T1, T2]);
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it("sends nothing without tokens", async () => {
+      stubOrigin({});
+      const res = await call(createHandler(makeDeps()), "https://example.com/mcp");
+
+      expect(res.headers.has("origin-trial")).toBe(false);
+    });
+
+    it("sends nothing on the 308 from /mcp to /mcp/", async () => {
+      stubOrigin({});
+      const handler = createHandler(withTokens({ webmcp_landing: { path: "/mcp/" } }));
+
+      for (const method of ["GET", "HEAD"]) {
+        const redirect = await call(handler, "https://example.com/mcp", { method });
+        expect(redirect.status).toBe(308);
+        expect(redirect.headers.has("origin-trial"), method).toBe(false);
+      }
+      const landing = await call(handler, "https://example.com/mcp/");
+      expect(trialTokens(landing)).toEqual([T1, T2]);
+    });
+  });
+
+  describe("never on the routes cf-webmcp answers itself", () => {
+    it("sends nothing on the manifest, the bootstrap, a missing asset or the health check", async () => {
+      stubOrigin({});
+      const handler = createHandler(withTokens());
+
+      for (const path of [
+        "/.well-known/webmcp",
+        "/_webmcp/bootstrap.test.js",
+        "/_webmcp/bootstrap.nope.js",
+        "/_webmcp/health",
+      ]) {
+        const res = await call(handler, `https://example.com${path}`);
+        expect(res.headers.has("origin-trial"), path).toBe(false);
+      }
+    });
+  });
+
+  describe("/_webmcp/health", () => {
+    it("lists the trials, computed from the configured tokens", async () => {
+      stubOrigin({});
+      const expiry = expiryInDays(200);
+      const token = makeOriginTrialToken({ feature: "WebMCP", expiry });
+      const res = await call(createHandler(makeDeps({ origin_trial: { tokens: [token] } })), "https://example.com/_webmcp/health");
+
+      const body = (await res.json()) as { origin_trials: unknown };
+      expect(body.origin_trials).toEqual([
+        { feature: "WebMCP", expires_at: new Date(expiry * 1000).toISOString(), expired: false },
+      ]);
+    });
   });
 });

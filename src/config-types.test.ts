@@ -285,3 +285,40 @@ describe("path validation (PathString)", () => {
     expect(all.every((p) => p.startsWith("/") && !p.startsWith("//"))).toBe(true);
   });
 });
+
+describe("[origin_trial] block", () => {
+  it("defaults to no tokens when the block is absent", () => {
+    expect(ConfigSchema.parse(minimal).origin_trial).toEqual({ tokens: [] });
+  });
+
+  it("defaults tokens to an empty list for an empty block", () => {
+    expect(ConfigSchema.parse({ ...minimal, origin_trial: {} }).origin_trial.tokens).toEqual([]);
+  });
+
+  it("accepts standard base64 tokens, with and without padding", () => {
+    const tokens = ["AAAA", "Ab0+/xyz", "Ab0+/xy=", "Ab0+/x==", "A".repeat(400)];
+    expect(ConfigSchema.parse({ ...minimal, origin_trial: { tokens } }).origin_trial.tokens).toEqual(tokens);
+  });
+
+  it("rejects tokens outside the base64 alphabet or with bad padding", () => {
+    const bad = ["", "abc def", "abc\r\nOrigin-Trial: x", "abc-def_", "ab=cd", "ab===", "=abc", "abc!", "tok\u00e9n"];
+    for (const token of bad) {
+      expect(
+        ConfigSchema.safeParse({ ...minimal, origin_trial: { tokens: [token] } }).success,
+        JSON.stringify(token),
+      ).toBe(false);
+    }
+  });
+
+  it("does not echo a rejected token in the validation message", () => {
+    const secret = "not a token ZZZ-secret";
+    const result = ConfigSchema.safeParse({ ...minimal, origin_trial: { tokens: [secret] } });
+    expect(result.success).toBe(false);
+    if (!result.success) expect(JSON.stringify(result.error.issues)).not.toContain("secret");
+  });
+
+  it("rejects tokens that are not an array of strings", () => {
+    expect(ConfigSchema.safeParse({ ...minimal, origin_trial: { tokens: "AAAA" } }).success).toBe(false);
+    expect(ConfigSchema.safeParse({ ...minimal, origin_trial: { tokens: [42] } }).success).toBe(false);
+  });
+});

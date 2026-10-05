@@ -4,6 +4,7 @@
  */
 
 import { z } from "zod";
+import { ORIGIN_TRIAL_TOKEN_RE } from "./origin-trial";
 import { checkSelector, type SelectorCheckOptions } from "./selector-grammar";
 
 // ---------- Reusable shapes ----------
@@ -375,6 +376,19 @@ const AgentSkillsBlock = z.object({
   hints: z.array(AgentSkillHint).default([]),
 });
 
+/**
+ * Chrome origin-trial tokens. Chrome ships WebMCP as an origin trial; a site opts in with
+ * its token in an `Origin-Trial` response header on the top-level HTML document. Tokens
+ * are issued by Chrome for one origin (see the build checks in scripts/build-config.ts),
+ * are emitted as given (one header each), and are never generated or verified here.
+ * Public by design: the header is visible to every visitor.
+ */
+const OriginTrialBlock = z.object({
+  tokens: z
+    .array(z.string().regex(ORIGIN_TRIAL_TOKEN_RE, "origin-trial token must be standard base64 (A-Z a-z 0-9 + / and up to two = padding)"))
+    .default([]),
+});
+
 const PathsBlock = z.object({
   namespace: PathString.default("/_webmcp"),
 });
@@ -507,6 +521,7 @@ export const ConfigSchema = z.object({
   ai_catalog: AiCatalogBlock.default({}),
   agent_skills: AgentSkillsBlock.default({}),
   agent_skills_index: AgentSkillsIndexBlock.default({}),
+  origin_trial: OriginTrialBlock.default({}),
   paths: PathsBlock.default({}),
   injection: InjectionBlock.default({}),
   cache: CacheBlock.default({}),

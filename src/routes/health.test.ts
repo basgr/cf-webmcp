@@ -1,6 +1,7 @@
-import { describe, it, expect, vi } from "vitest";
+import { afterEach, describe, it, expect, vi } from "vitest";
 import { healthResponse } from "./health";
 import type { Config } from "../config-types";
+import { expiryInDays, makeOriginTrialToken } from "../test-support/origin-trial";
 
 function makeConfig(overrides: Partial<Config> = {}): Config {
   return {
@@ -25,6 +26,7 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     robots_txt: { path: "/robots.txt", mode: "merge" },
     agents_md: { path: "/.well-known/agents.md", mode: "merge", aliases: ["/AGENTS.md", "/agents.md"] },
     api_catalog: { path: "/.well-known/api-catalog", mode: "merge" }, ai_catalog: { path: "/.well-known/ai-catalog.json", mode: "synthesize", host_identifier: "", representative_queries: [], tags: [] }, agent_skills: { path: "/.well-known/agent-skills/site/SKILL.md", mode: "synthesize", name: "", description: "", aliases: ["/.well-known/agent-skills/site/SKILLS.md", "/.well-known/agent-skills/site/skill.md", "/.well-known/agent-skills/site/skills.md"], hints: [] }, agent_skills_index: { path: "/.well-known/agent-skills/index.json", mode: "synthesize" },
+    origin_trial: { tokens: [] },
     paths: { namespace: "/_webmcp" },
     injection: { exclude_paths: [] },
     cache: {
@@ -274,5 +276,82 @@ describe("healthResponse bearer comparison", () => {
     expect(long.status).toBe(401);
     expect(digest).toHaveBeenCalledTimes(4);
     expect(equal).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("origin_trials", () => {
+  const opts = { configHash: "abc12345", schemaVersion: 1, deployedAt: "2026-05-13T20:00:00.000Z" };
+  const get = (tokens: string[], init?: RequestInit) =>
+    healthResponse(
+      new Request("https://example.com/_webmcp/health", init),
+      makeConfig({ origin_trial: { tokens } }),
+      opts,
+    );
+  type Trial = { feature?: string; expires_at?: string; expired?: boolean; error?: string };
+  const trialsOf = async (res: Response) => ((await res.json()) as { origin_trials: Trial[] }).origin_trials;
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("is an empty array when no token is configured", async () => {
+    expect(await trialsOf(await get([]))).toEqual([]);
+  });
+
+  it("lists feature, expiry as an ISO string and expired for each token, in order", async () => {
+    const soon = expiryInDays(20);
+    const later = expiryInDays(300);
+    const res = await get([
+      makeOriginTrialToken({ feature: "WebMCP", expiry: soon }),
+      makeOriginTrialToken({ feature: "OtherTrial", expiry: later }),
+    ]);
+
+    expect(await trialsOf(res)).toEqual([
+      { feature: "WebMCP", expires_at: new Date(soon * 1000).toISOString(), expired: false },
+      { feature: "OtherTrial", expires_at: new Date(later * 1000).toISOString(), expired: false },
+    ]);
+  });
+
+  it("marks a token whose expiry has passed as expired", async () => {
+    const past = expiryInDays(-2);
+    const trials = await trialsOf(await get([makeOriginTrialToken({ expiry: past })]));
+    expect(trials).toEqual([{ feature: "WebMCP", expires_at: new Date(past * 1000).toISOString(), expired: true }]);
+  });
+
+  it("computes expired when the request arrives, not when the config was built", async () => {
+    const token = makeOriginTrialToken({ expiry: expiryInDays(1) });
+    expect((await trialsOf(await get([token])))[0]!.expired).toBe(false);
+
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(Date.now() + 3 * 86_400_000);
+
+    expect((await trialsOf(await get([token])))[0]!.expired).toBe(true);
+  });
+
+  it("reports a token that does not decode as undecodable, without echoing it", async () => {
+    const garbage = "QUJDREVGR0hJSktMTU5PUA==";
+    const good = makeOriginTrialToken({ expiry: expiryInDays(100) });
+    const res = await get([garbage, good]);
+    const text = await res.text();
+
+    expect(text).not.toContain(garbage);
+    expect(text).not.toContain(good);
+    const trials = (JSON.parse(text) as { origin_trials: Trial[] }).origin_trials;
+    expect(trials[0]).toEqual({ error: "undecodable" });
+    expect(trials[1]!.feature).toBe("WebMCP");
+  });
+
+  it("stays behind the health token", async () => {
+    const config = makeConfig({ health: { public: true, token: "s3cret" }, origin_trial: { tokens: [makeOriginTrialToken()] } });
+    const denied = await healthResponse(new Request("https://example.com/_webmcp/health"), config, opts);
+    expect(denied.status).toBe(401);
+    expect(await denied.text()).not.toContain("origin_trials");
+
+    const allowed = await healthResponse(
+      new Request("https://example.com/_webmcp/health", { headers: { authorization: "Bearer s3cret" } }),
+      config,
+      opts,
+    );
+    expect((await trialsOf(allowed))).toHaveLength(1);
   });
 });
