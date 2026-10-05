@@ -41,7 +41,7 @@ Unknown placeholders cause a build error so typos surface early.
 
 The Worker injects the bootstrap into pages it proxies from your origin. It does not inject it into the landing page, which the Worker serves itself. `{{bootstrap_block}}` is how the landing page loads it: the page then registers this site's tools on `document.modelContext`, so the "Connected" state is true of the page the visitor is looking at, and its diagnostic can list the names `getTools()` returns.
 
-The default template includes it. A custom template without the placeholder builds as before and loads no bootstrap: the page can still tell a visitor whether their browser exposes WebMCP, but registers no tools itself. Put `{{bootstrap_block}}` anywhere in the `<body>`; the script is `defer`red, so it runs after the page has been parsed whatever its position.
+The default template includes it. A custom template without the placeholder builds as before and loads no bootstrap: the page can still tell a visitor whether their browser exposes WebMCP, but registers no tools itself. Put `{{bootstrap_block}}` once anywhere in the `<body>`; the script is `defer`red, so it runs after the page has been parsed whatever its position. The build refuses a template that contains it more than once: each placeholder becomes a `<script>` tag that loads and runs the bootstrap again.
 
 The diagnostic in the default template probes `document.modelContext` (`registerTool`, `getTools`, `executeTool` and `'ontoolchange' in document.modelContext`), the deprecated `navigator.modelContext` alias and `navigator.modelContextTesting`, and lists the tool names `getTools()` reports once the page has loaded. A custom template that wants the same list should insert the names with `textContent`, never as HTML.
 
@@ -69,14 +69,15 @@ If you want **none** of the runtime branching (e.g. you are building a static "t
 <meta charset="utf-8">
 <title>Connect - {{site_name}}</title>
 <meta name="robots" content="noindex">
+<style>.state{display:none}</style>
 </head>
 <body>
 <h1>{{site_name}}</h1>
 <p>{{site_description}}</p>
 
-<div id="state-native"><p>Connected.</p></div>
-<div id="state-pair"><p>Pair your MCP client.</p>{{widget_block}}</div>
-<div id="state-disabled"><p>Widget disabled.</p></div>
+<div id="state-native" class="state"><p>Connected.</p></div>
+<div id="state-pair" class="state"><p>Pair your MCP client.</p>{{widget_block}}</div>
+<div id="state-disabled" class="state"><p>Widget disabled.</p></div>
 
 <h2>Tools available</h2>
 <ul>{{tool_list}}</ul>
@@ -84,7 +85,10 @@ If you want **none** of the runtime branching (e.g. you are building a static "t
 {{bootstrap_block}}
 <script>
 (function () {
-  var mc = ('modelContext' in document) ? document.modelContext : navigator.modelContext;
+  // The host the bootstrap registers on: document.modelContext when it can
+  // register tools, else the deprecated navigator.modelContext alias (Chrome 146-149).
+  var dmc = ('modelContext' in document) ? document.modelContext : null;
+  var mc = (dmc && typeof dmc.registerTool === 'function') ? dmc : (('modelContext' in navigator) ? navigator.modelContext : null);
   var hasNative = !!mc && typeof mc.registerTool === 'function';
   var widgetEnabled = {{widget_enabled_js}};
   var id = hasNative ? 'state-native' : (widgetEnabled ? 'state-pair' : 'state-disabled');
@@ -96,6 +100,8 @@ If you want **none** of the runtime branching (e.g. you are building a static "t
 </body>
 </html>
 ```
+
+Keep `class="state"` on all three state divs: the CSS hides every `.state` div and the script shows the one that matches. The script picks its host the way the bootstrap does (`document.modelContext` when it can register tools, else the deprecated `navigator.modelContext` alias). A template that picks differently can say "Connected" while the bootstrap registers nothing, or the reverse.
 
 ## What to consider when customising
 

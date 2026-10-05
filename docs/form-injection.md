@@ -96,7 +96,7 @@ This applies attribute-by-attribute: if the form has `toolname="foo"` but no `to
 A WebMCP tool name may be registered only once per page. Registering the same name twice - for example a `[[tools]]` entry and a `[[forms]]` block that share a name, both landing on the same page - kills the Chrome renderer (`bad_message` 345, `RFHI_WEBMCP_REGISTER_DUPLICATE_TOOL_NAME`), a Mojo IPC validation kill that no `try/catch` can trap. cf-webmcp guards this on both ends:
 
 - **Build refuses collisions.** The build fails if a name is duplicated within `[[tools]]`, duplicated within `[[forms]]`, or shared between the two. Pick distinct names.
-- **Bootstrap de-dupes hand-stamps.** The injected script skips registering any tool whose name is already on the page as a `<form toolname>` (including names you hand-stamped in origin HTML, which the build cannot see). The declarative form wins; the bootstrap stands down for that name.
+- **Bootstrap de-dupes hand-stamps.** The injected script skips registering any tool whose name is already on the page as a `<form toolname>` (including names you hand-stamped in origin HTML, which the build cannot see). The declarative form wins; the bootstrap stands down for that name. It also skips a name that `getTools()` lists, when the browser has it (if `getTools()` has not answered after 1500 ms it goes by the `<form toolname>` elements alone), and a name that an earlier run of the script on the same page registered. A name another script registers after these checks is not seen.
 
 ## Side effects: `SubmitEvent.agentInvoked` and `SubmitEvent.respondWith`
 

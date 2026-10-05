@@ -315,6 +315,39 @@ describe("path validation (PathString)", () => {
   });
 });
 
+describe("paths.namespace", () => {
+  const withNamespace = (namespace: string) => ({ ...minimal, paths: { namespace } });
+
+  it("defaults to /_webmcp", () => {
+    expect(ConfigSchema.parse(minimal).paths.namespace).toBe("/_webmcp");
+    expect(ConfigSchema.parse({ ...minimal, paths: {} }).paths.namespace).toBe("/_webmcp");
+  });
+
+  it.each(["/_webmcp", "/_agents", "/api/webmcp", "/a/b/c", "/.webmcp", "/x"])("accepts %s", (ns) => {
+    expect(ConfigSchema.parse(withNamespace(ns)).paths.namespace).toBe(ns);
+  });
+
+  it("rejects the bare root, which would make every URL under it protocol-relative", () => {
+    const result = ConfigSchema.safeParse(withNamespace("/"));
+    expect(result.success).toBe(false);
+    if (!result.success) expect(result.error.issues.map((i) => i.message).join("\n")).toMatch(/namespace/);
+  });
+
+  it.each(["/_webmcp/", "/api/webmcp/", "//", "/a//"])("rejects %s, which ends in a slash", (ns) => {
+    expect(ConfigSchema.safeParse(withNamespace(ns)).success).toBe(false);
+  });
+
+  it("keeps the PathString rules: it must start with a single slash", () => {
+    expect(ConfigSchema.safeParse(withNamespace("_webmcp")).success).toBe(false);
+    expect(ConfigSchema.safeParse(withNamespace("//evil.example/x")).success).toBe(false);
+  });
+
+  it("does not turn the same rule on the other path fields, where a trailing slash is the directory form", () => {
+    expect(ConfigSchema.safeParse({ ...minimal, webmcp_landing: { path: "/mcp/" } }).success).toBe(true);
+    expect(ConfigSchema.safeParse({ ...minimal, webmcp_landing: { path: "/" } }).success).toBe(true);
+  });
+});
+
 describe("[origin_trial] block", () => {
   it("defaults to no tokens when the block is absent", () => {
     expect(ConfigSchema.parse(minimal).origin_trial).toEqual({ tokens: [] });

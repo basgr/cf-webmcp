@@ -286,11 +286,13 @@ export function defaultAnnotationsFor(executorType: string): {
 /**
  * The script body served at /<namespace>/bootstrap.<hash>.js.
  *
- * The exec endpoints it calls are root-relative (`<namespace>/exec/<tool>`), not absolute to
- * [site].domain: the script must work on whichever host served the page (www, workers.dev,
- * preview and staging hosts), where an absolute URL to the canonical host is cross-origin and
- * the exec endpoint sends no CORS headers. The discovery documents (manifest, Link header,
- * llms.txt, agents.md, SKILL.md) stay absolute: they are read from outside the page.
+ * The exec endpoints it calls are built at run time from the origin of the page it runs on
+ * (`location.protocol + '//' + location.host`, else root-relative under an opaque origin) plus
+ * `<namespace>/exec/<tool>`, never from [site].domain: the script must work on whichever host
+ * served the page (www, workers.dev, preview and staging hosts), where an absolute URL to the
+ * canonical host is cross-origin and the exec endpoint sends no CORS headers. The discovery
+ * documents (manifest, Link header, llms.txt, agents.md, SKILL.md) stay absolute on the site
+ * URL: they are read from outside the page.
  */
 function buildBootstrap(config: Config, configHash: string): string {
   const ns = config.paths.namespace;
@@ -312,6 +314,17 @@ function buildBootstrap(config: Config, configHash: string): string {
     };
   });
 
+  // U+2028 and U+2029 are legal raw in a JSON string but end a line in a JavaScript string
+  // literal before ES2019, so a tool description that holds one would be a syntax error on an
+  // older engine. Both go out as escapes. (Built from char codes: the escapes themselves must
+  // not appear as raw characters in this source.)
+  const backslash = String.fromCharCode(92);
+  const toolsJson = JSON.stringify(toolPayload)
+    .split(String.fromCharCode(0x2028))
+    .join(backslash + "u2028")
+    .split(String.fromCharCode(0x2029))
+    .join(backslash + "u2029");
+
   // Worker serves this file with content-type application/javascript; charset=utf-8.
   // ES5 style for maximum browser reach (no arrow fns / spread).
   return `// cf-webmcp bootstrap, config_hash=${configHash}
@@ -327,14 +340,19 @@ function buildBootstrap(config: Config, configHash: string): string {
     ctx = navigator.modelContext;
   }
   if (!ctx) return;
-  var TOOLS = ${JSON.stringify(toolPayload)};
+  var TOOLS = ${toolsJson};
+  // How long to wait for getTools() before registering without it.
+  var GETTOOLS_TIMEOUT_MS = 1500;
+  // Where the page-wide record of the names this script has registered lives.
+  var REGISTRY_KEY = '__cfWebmcpRegistered';
   // Cloudflare WebMCP Labs (a dashboard preview feature) injects
   // /.webmcp/bridge.js, which registers its own tools on this same host object.
   // The build refuses the tool and form names Labs reserves; the names of tools
   // it proxies from the site's MCP server are not known at build time, so say so
-  // in the console when the bridge is on the page.
+  // in the console when the bridge is on the page. *= and not $=: the script is
+  // often cache-busted (bridge.js?v=1).
   try {
-    if (document.querySelector('script[src$="/.webmcp/bridge.js"]') && typeof console !== 'undefined' && console.info) {
+    if (document.querySelector('script[src*="/.webmcp/bridge.js"]') && typeof console !== 'undefined' && console.info) {
       console.info('cf-webmcp: Cloudflare WebMCP Labs bridge detected; keep tool names distinct from its tools');
     }
   } catch (e) {}
@@ -356,12 +374,23 @@ function buildBootstrap(config: Config, configHash: string): string {
       if (nm) declared[nm] = true;
     }
   } catch (e) {}
+  // The exec endpoints are paths. They are called on the origin of the page this
+  // script runs on, which is the host the visitor used (www, workers.dev, a
+  // preview host) and is not changed by a <base href>. Under an opaque origin
+  // (location.origin is the string 'null') or without a location, the path stays
+  // root-relative.
+  var ORIGIN = '';
+  try {
+    if (typeof location !== 'undefined' && location && location.origin !== 'null' && location.host && /^https?:$/.test(location.protocol)) {
+      ORIGIN = location.protocol + '//' + location.host;
+    }
+  } catch (e) {}
   // Returns the WebMCP/MCP tool-result shape: a content array. The cf-webmcp
   // executor envelope ({ ok, data | error }) is carried as the text payload so
   // the agent retains structured success/error, and isError is set unless the
   // envelope is an explicit ok:true.
   function run(endpoint, input) {
-    return fetch(endpoint, {
+    return fetch(ORIGIN + endpoint, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(input || {}),
@@ -387,7 +416,40 @@ function buildBootstrap(config: Config, configHash: string): string {
   // aborts these controllers and nothing is exposed globally; they are held here
   // so a later SPA-navigation hook can unregister a tool.
   var controllers = [];
-  var registered = Object.create(null);
+  // The names this script has registered, kept for the whole page and not only
+  // for this run: the script can run more than once on a page (a second tag,
+  // Turbo / htmx / pjax re-running body scripts, a build from before an upgrade
+  // next to one after it), and a second registration of a name kills the
+  // renderer. A non-enumerable property under a constant key, first on the host
+  // object, else on document; only if neither can hold one is it local to this
+  // run. Looked up at the moment of registering, so it also covers a getTools()
+  // answer that was taken before another run registered.
+  function existingRegistry(holder) {
+    try {
+      if (holder && Object.prototype.hasOwnProperty.call(holder, REGISTRY_KEY)) {
+        var found = holder[REGISTRY_KEY];
+        if (found && typeof found === 'object') return found;
+      }
+    } catch (e) {}
+    return null;
+  }
+  function newRegistry(holder) {
+    try {
+      if (!holder || !Object.isExtensible(holder)) return null;
+      var created = Object.create(null);
+      Object.defineProperty(holder, REGISTRY_KEY, { value: created });
+      return created;
+    } catch (e) {
+      return null;
+    }
+  }
+  var holders = [ctx];
+  if (typeof document !== 'undefined') holders.push(document);
+  var registered = null;
+  var h;
+  for (h = 0; h < holders.length && !registered; h++) registered = existingRegistry(holders[h]);
+  for (h = 0; h < holders.length && !registered; h++) registered = newRegistry(holders[h]);
+  if (!registered) registered = Object.create(null);
   var done = false;
   function warnFailed(name, e) {
     if (typeof console !== 'undefined' && console.warn) {
@@ -430,32 +492,54 @@ function buildBootstrap(config: Config, configHash: string): string {
       }
     });
   }
+  // Everything about getTools() is read inside the try: it may be missing, a
+  // getter that throws, or throw when called.
   var pending = null;
-  if (typeof ctx.getTools === 'function' && typeof Promise === 'function') {
-    try {
+  try {
+    if (typeof ctx.getTools === 'function' && typeof Promise === 'function') {
       pending = Promise.resolve(ctx.getTools());
-    } catch (e) {
-      pending = null;
     }
+  } catch (e) {
+    pending = null;
+  }
+  function registerFromDeclared() {
+    registerAll(declared);
   }
   if (!pending) {
-    registerAll(declared);
+    registerFromDeclared();
   } else {
+    // A getTools() that never settles must not leave the page without its tools:
+    // after the timeout, register against the [toolname] set alone. The done flag
+    // makes a getTools() answer that comes later a no-op.
+    var timer = null;
+    if (typeof setTimeout === 'function') timer = setTimeout(registerFromDeclared, GETTOOLS_TIMEOUT_MS);
+    var stopTimer = function () {
+      if (timer !== null && typeof clearTimeout === 'function') clearTimeout(timer);
+      timer = null;
+    };
     pending.then(function (list) {
+      stopTimer();
       var known = Object.create(null);
       var k;
       for (k in declared) known[k] = true;
       if (list && typeof list.length === 'number') {
         for (var j = 0; j < list.length; j++) {
-          var entry = list[j];
-          if (entry && typeof entry.name === 'string' && entry.name) known[entry.name] = true;
+          // One entry that cannot be read must not discard the rest. An entry is a
+          // tool object with a name, or the name itself.
+          try {
+            var entry = list[j];
+            var entryName = typeof entry === 'string' ? entry : (entry && entry.name);
+            if (typeof entryName === 'string' && entryName) known[entryName] = true;
+          } catch (e) {}
         }
       }
       registerAll(known);
     }, function () {
-      registerAll(declared);
+      stopTimer();
+      registerFromDeclared();
     }).catch(function () {
-      registerAll(declared);
+      stopTimer();
+      registerFromDeclared();
     });
   }
 })();
@@ -482,10 +566,12 @@ function buildWidgetBlock(widgetUrl: string, sri: string | null): string {
 }
 
 /**
- * The bootstrap's <script> for the landing page, in the form the Worker injects it into proxied
- * pages: root-relative, deferred, with `integrity` and `crossorigin="anonymous"` when SRI is on.
- * The landing is served by the Worker itself, so the injection never reaches it; without this tag
- * the page would say its tools are registered with your agent while registering none.
+ * The bootstrap's <script> for the landing page: deferred, with `integrity` and
+ * `crossorigin="anonymous"` when SRI is on, as the Worker injects it into proxied pages, but with
+ * a root-relative src. (The injected one names the request's origin, so a <base href> in an
+ * origin page cannot move it; the Worker generates this page and it has no <base>.) The landing
+ * is served by the Worker itself, so the injection never reaches it; without this tag the page
+ * would say its tools are registered with your agent while registering none.
  */
 function buildBootstrapBlock(bootstrapUrl: string, sri: string | null): string {
   const sriAttrs = sri ? ` integrity="${escapeHtml(sri)}" crossorigin="anonymous"` : "";
@@ -514,7 +600,8 @@ function buildBootstrapBlock(bootstrapUrl: string, sri: string | null): string {
  *                           [features].subresource_integrity is on. It registers this
  *                           site's tools on the landing page itself, because the
  *                           Worker's HTML injection does not reach the landing.
- *                           A template without the placeholder loads nothing.
+ *                           A template without the placeholder loads nothing; one with it
+ *                           more than once fails the build (include it once).
  *
  * The runtime state-branching JS in the template is what selects which
  * state-* div becomes visible. As long as the override template keeps the
@@ -549,6 +636,17 @@ async function buildLanding(
   } catch (e) {
     throw new Error(
       `[build-config] landing template not found at ${templatePath}: ${(e as Error).message}`,
+    );
+  }
+
+  // Each tag loads and runs the bootstrap again; a page needs it once. (The bootstrap keeps a
+  // page-wide record of what it registered, so a second run cannot register a name twice, but a
+  // second tag is still a mistake, and one the build can see.)
+  const bootstrapBlocks = (templateSrc.match(/\{\{\s*bootstrap_block\s*\}\}/g) ?? []).length;
+  if (bootstrapBlocks > 1) {
+    throw new Error(
+      `[build-config] landing template ${templatePath} contains {{bootstrap_block}} ${bootstrapBlocks} times. ` +
+        `Include it once: each placeholder becomes a <script> tag that loads and runs the bootstrap again.`,
     );
   }
 

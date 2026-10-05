@@ -397,7 +397,12 @@ const OriginTrialBlock = z.object({
 });
 
 const PathsBlock = z.object({
-  namespace: PathString.default("/_webmcp"),
+  // The prefix of every URL cf-webmcp serves under it: `<namespace>/exec/<tool>`,
+  // `<namespace>/bootstrap.<hash>.js`. A trailing slash (and so the bare "/") would turn
+  // those into `//exec/<tool>`, a protocol-relative URL that names another host.
+  namespace: PathString.refine((s) => !s.endsWith("/"), {
+    message: "namespace must not be / and must not end with / (it is the prefix of <namespace>/exec/<tool>)",
+  }).default("/_webmcp"),
 });
 
 const InjectionBlock = z.object({

@@ -286,12 +286,14 @@ export function createHandler(deps: HandlerDeps): Required<Pick<ExportedHandler<
 
     const base = config.site.public_url ?? `https://${config.site.domain}`;
     const manifestUrl = `${base}${config.manifest.path}`;
-    // Root-relative, unlike the discovery URLs around it: the script must load from whichever
-    // host served the page (www, workers.dev, preview and staging hosts). An absolute URL to
-    // the canonical host is cross-origin there, and crossorigin="anonymous" (SRI) needs a CORS
-    // header the bootstrap route does not send. Discovery documents are read from outside the
+    // On the origin of this request, unlike the discovery URLs around it, which name the
+    // configured site URL. The script must load from whichever host the visitor used (www,
+    // workers.dev, preview and staging hosts): an absolute URL to the canonical host is
+    // cross-origin there, and crossorigin="anonymous" (SRI) needs a CORS header the bootstrap
+    // route does not send. A root-relative URL would follow a <base href> in the page to
+    // another host; naming the host does not. Discovery documents are read from outside the
     // page and stay absolute.
-    const bootstrapUrl = `${config.paths.namespace}/${meta.BOOTSTRAP_ASSET}`;
+    const bootstrapUrl = `${reqUrl.origin}${config.paths.namespace}/${meta.BOOTSTRAP_ASSET}`;
     const apiCatalogUrl =
       config.features.api_catalog && config.api_catalog.mode !== "passthrough"
         ? `${base}${config.api_catalog.path}`

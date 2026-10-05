@@ -395,23 +395,30 @@ describe("content-addressed bootstrap", () => {
     expect(body).not.toContain("integrity=");
   });
 
-  it("injects a root-relative script src, so the script loads from whichever host served the page", async () => {
+  it.each([
+    "https://example.com",
+    "https://www.example.com",
+    "https://my-site.example.workers.dev",
+    "https://preview-123.example.pages.dev",
+    "http://localhost:8787",
+  ])("injects a script src on the origin of the request (%s), so it loads from the host that served the page", async (origin) => {
     stubOrigin({ "https://example.com/page": () => htmlResponse() });
     const handler = createHandler(makeDeps({}, { meta: { BOOTSTRAP_ASSET, BOOTSTRAP_SRI: SRI } }));
 
-    const body = await (await call(handler, "https://example.com/page")).text();
+    const body = await (await call(handler, `${origin}/page`)).text();
 
     const tag = body.match(/<script[^>]*src="([^"]+)"[^>]*>/);
     expect(tag).not.toBeNull();
-    // Exactly the path: no scheme, no host. An absolute URL to site.domain is cross-origin on
-    // www, workers.dev, preview and staging hosts, where crossorigin="anonymous" with no CORS
-    // header blocks the script.
-    expect(tag![1]).toBe(`/_webmcp/${BOOTSTRAP_ASSET}`);
+    // The visitor's own scheme, host and port, then the namespaced asset. An absolute URL to
+    // [site].domain is cross-origin on www, workers.dev and preview hosts, where
+    // crossorigin="anonymous" with no CORS header blocks the script; a root-relative one would
+    // follow a <base href> to another host. The origin of the request does neither.
+    expect(tag![1]).toBe(`${origin}/_webmcp/${BOOTSTRAP_ASSET}`);
     expect(tag![0]).toContain(`integrity="${SRI}"`);
     expect(tag![0]).toContain('crossorigin="anonymous"');
   });
 
-  it("keeps the script src root-relative when [site].public_url names another host, and the <link> absolute", async () => {
+  it("uses the request's origin even when [site].public_url names another host, and keeps the <link> on public_url", async () => {
     stubOrigin({ "https://example.com/page": () => htmlResponse() });
     const handler = createHandler(
       makeDeps(
@@ -420,11 +427,21 @@ describe("content-addressed bootstrap", () => {
       ),
     );
 
-    const body = await (await call(handler, "https://example.com/page")).text();
+    const body = await (await call(handler, "https://staging.example.net/page")).text();
 
-    expect(body.match(/<script[^>]*src="([^"]+)"/)![1]).toBe(`/_agents/${BOOTSTRAP_ASSET}`);
-    // Discovery documents stay absolute.
+    expect(body.match(/<script[^>]*src="([^"]+)"/)![1]).toBe(`https://staging.example.net/_agents/${BOOTSTRAP_ASSET}`);
+    // Discovery documents stay absolute, on the configured site URL.
     expect(body).toContain('<link rel="webmcp" href="https://www.example.com/.well-known/webmcp">');
+  });
+
+  it("is not moved by a <base href> in the page, because the src names its host", async () => {
+    const page = '<!doctype html><html><head><base href="https://cdn.other.example/"></head><body><p>hi</p></body></html>';
+    stubOrigin({ "https://example.com/page": () => htmlResponse(page) });
+    const handler = createHandler(makeDeps({}, { meta: { BOOTSTRAP_ASSET, BOOTSTRAP_SRI: null } }));
+
+    const body = await (await call(handler, "https://www.example.com/page")).text();
+
+    expect(body.match(/<script[^>]*src="([^"]+)"/)![1]).toBe(`https://www.example.com/_webmcp/${BOOTSTRAP_ASSET}`);
   });
 });
 

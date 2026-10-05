@@ -1253,7 +1253,8 @@ describe("bootstrap.js: getTools() de-dupe, abort signals, rejections", () => {
   it("looks for the Cloudflare WebMCP Labs bridge script", async () => {
     const { files } = await runBuild(await writeToml("bs-labs.toml", MINIMAL));
     const js = files["bootstrap.js"]!;
-    expect(js).toContain(`document.querySelector('script[src$="/.webmcp/bridge.js"]')`);
+    // *= and not $=: the script is often cache-busted (/.webmcp/bridge.js?v=1).
+    expect(js).toContain(`document.querySelector('script[src*="/.webmcp/bridge.js"]')`);
     expect(js).toContain("Cloudflare WebMCP Labs");
   });
 
@@ -1461,12 +1462,34 @@ describe("landing: {{bootstrap_block}}", () => {
     expect(files["landing.html"]).toBe("<html><body>Example Co.</body></html>");
   });
 
-  it("fills the placeholder in a custom template", async () => {
-    await writeToml("custom-block.html", "<body>{{bootstrap_block}}|{{ bootstrap_block }}</body>");
-    const toml = `${MINIMAL}\n[webmcp_landing]\ntemplate = "custom-block.html"\n`;
-    const { files } = await runBuild(await writeToml("lb-custom2.toml", toml));
-    expect(files["landing.html"]!.split("<script src=")).toHaveLength(3);
-    expect(files["landing.html"]).not.toContain("{{");
+  it("fills the placeholder, written with or without inner spaces, in a custom template", async () => {
+    for (const [i, spelling] of ["{{bootstrap_block}}", "{{ bootstrap_block }}"].entries()) {
+      await writeToml(`custom-block-${i}.html`, `<body>${spelling}</body>`);
+      const toml = `${MINIMAL}\n[webmcp_landing]\ntemplate = "custom-block-${i}.html"\n`;
+      const { files } = await runBuild(await writeToml(`lb-custom2-${i}.toml`, toml));
+      expect(files["landing.html"]!.split("<script src=")).toHaveLength(2);
+      expect(files["landing.html"]).not.toContain("{{");
+    }
+  });
+
+  it.each([
+    ["twice, spelled the same", "{{bootstrap_block}}|{{bootstrap_block}}"],
+    ["twice, spelled differently", "{{bootstrap_block}}|{{ bootstrap_block }}"],
+    ["three times", "{{bootstrap_block}}{{bootstrap_block}}{{bootstrap_block}}"],
+  ])("refuses a landing template that has {{bootstrap_block}} %s", async (_label, body) => {
+    // A second tag would run the bootstrap twice on one page.
+    await writeToml("custom-twice.html", `<body>${body}</body>`);
+    const toml = `${MINIMAL}\n[webmcp_landing]\ntemplate = "custom-twice.html"\n`;
+    const err = await runBuild(await writeToml("lb-twice.toml", toml)).catch((e: Error) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toContain("{{bootstrap_block}}");
+    expect((err as Error).message).toMatch(/once/);
+  });
+
+  it("is documented as a placeholder to include once", async () => {
+    const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+    const md = await fs.readFile(path.join(repoRoot, "docs", "customisation.md"), "utf8");
+    expect(md).toMatch(/\{\{bootstrap_block\}\}[^\n]*once|once[^\n]*\{\{bootstrap_block\}\}/);
   });
 
   it("still refuses an unknown placeholder", async () => {
@@ -1506,5 +1529,22 @@ describe("landing: diagnostic and copy", () => {
     // The old claim that WebMCP is flags-only must be gone.
     expect(text).not.toContain("As of mid-2026");
     expect(text).not.toMatch(/flags only|only behind|behind a flag in Chrome and Edge/i);
+  });
+
+  it("words the origin trial as shipping on sites that send a trial token", async () => {
+    const { files } = await runBuild(await writeToml("ld-copy2.toml", MINIMAL));
+    const text = files["landing.html"]!.replace(/<[^>]+>/g, "");
+    expect(text).toContain(
+      "Chrome ships WebMCP to users through an origin trial (from Chrome 149) on sites that send a trial token.",
+    );
+  });
+
+  it("tells the Connected visitor that Chrome 149 exposes the deprecated navigator.modelContext alias", async () => {
+    const { files } = await runBuild(await writeToml("ld-connected.toml", MINIMAL));
+    const html = files["landing.html"]!;
+    const callout = html.slice(html.indexOf('id="state-native"'), html.indexOf('id="state-pair"')).replace(/<[^>]+>/g, "");
+    expect(callout).toContain("document.modelContext");
+    expect(callout).toContain("navigator.modelContext");
+    expect(callout).toContain("Chrome 149");
   });
 });

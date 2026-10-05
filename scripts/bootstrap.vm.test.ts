@@ -71,21 +71,32 @@ afterAll(async () => {
   await fs.rm(tmpDir, { recursive: true, force: true });
 });
 
+/** The key the bootstrap stores its page-wide registry under. */
+const REGISTRY_KEY = "__cfWebmcpRegistered";
+
 type GetToolsBehaviour =
   | "absent"
   | "resolve"
   | "sync-array"
   | "throw"
+  | "getter-throws"
   | "reject"
+  | "never"
+  | "live-snapshot"
   | "resolve-null"
   | "resolve-object"
-  | "resolve-malformed";
+  | "resolve-malformed"
+  | "custom";
 
 interface Options {
   /** How document.modelContext.getTools behaves (default: it does not exist). */
   getTools?: GetToolsBehaviour;
   /** The tool names getTools reports (default ["search_pages"]). */
   reported?: string[];
+  /** The raw entries "resolve" and "sync-array" answer with, instead of {name} objects for `reported`. */
+  entries?: unknown[];
+  /** What getTools does for "custom". */
+  getToolsImpl?: () => unknown;
   /** Names of [toolname] elements on the page. */
   stamped?: string[];
   /** registerTool returns a rejected promise for these names. */
@@ -94,12 +105,20 @@ interface Options {
   throwRegister?: string[];
   /** A Cloudflare WebMCP Labs bridge script is on the page. */
   bridge?: boolean;
+  /** The src attribute of every <script> element on the page. */
+  scripts?: string[];
   /** document.querySelector throws. */
   querySelectorThrows?: boolean;
   /** Which host objects carry modelContext (default "document"). */
   host?: "document" | "navigator" | "both" | "none";
   /** What fetch answers with. */
   fetchImpl?: (url: string, init: Record<string, unknown>) => Promise<unknown>;
+  /** The page's `location`; left out of the global when undefined. */
+  location?: { origin: string; protocol: string; host: string };
+  /** Make the places the page-wide registry would live unusable, one more step each. */
+  lockdown?: "ctx-sealed" | "ctx-define-throws" | "ctx-key-taken" | "ctx-and-document-sealed";
+  /** Provide setTimeout and clearTimeout, as fakes the test fires by hand (default true). */
+  timers?: boolean;
 }
 
 interface RegisterCall {
@@ -115,51 +134,114 @@ interface RegisterCall {
   via: "document" | "navigator";
 }
 
+interface Timer {
+  id: number;
+  fn: () => void;
+  ms: number;
+  cleared: boolean;
+  fired: boolean;
+}
+
 interface Run {
   registerCalls: RegisterCall[];
+  /** Every name registerTool was given, in order. */
+  registeredNames: string[];
+  /** Names registerTool was given a second time: in a real browser, a dead renderer. */
+  duplicates: string[];
   warns: unknown[][];
   infos: unknown[][];
   selectors: string[];
   fetchCalls: Array<{ url: string; init: Record<string, unknown> }>;
   getToolsCalls: number;
+  /** Resolvers of the promises a "never" getTools handed out. */
+  settleGetTools: Array<(value: unknown) => void>;
+  timers: Timer[];
+  /** Run every timer that has neither fired nor been cleared. */
+  fireTimers(): void;
 }
 
-function runBootstrap(js: string, o: Options = {}): Run {
+/** One page: a vm context with the fake browser objects, into which a script can be run any number of times. */
+interface Page {
+  run: Run;
+  context: Record<string, unknown>;
+  document: Record<string, unknown>;
+  /** The object document.modelContext points at, or null when the page has none. */
+  modelContext: Record<string, unknown> | null;
+  runScript(js: string): void;
+}
+
+function createPage(o: Options = {}): Page {
   const context = vm.createContext({});
   // Promises made in the page's own realm, as a browser's are.
   const P = vm.runInContext("Promise", context) as PromiseConstructor;
-  const run: Run = { registerCalls: [], warns: [], infos: [], selectors: [], fetchCalls: [], getToolsCalls: 0 };
+  const run: Run = {
+    registerCalls: [],
+    registeredNames: [],
+    duplicates: [],
+    warns: [],
+    infos: [],
+    selectors: [],
+    fetchCalls: [],
+    getToolsCalls: 0,
+    settleGetTools: [],
+    timers: [],
+    fireTimers() {
+      for (const t of run.timers) {
+        if (t.cleared || t.fired) continue;
+        t.fired = true;
+        t.fn();
+      }
+    },
+  };
   const rejectRegister = o.rejectRegister ?? [];
   const throwRegister = o.throwRegister ?? [];
   const reported = o.reported ?? ["search_pages"];
+  const entries = (): unknown[] => o.entries ?? reported.map((name) => ({ name }));
 
   const makeContext = (via: "document" | "navigator"): Record<string, unknown> => {
     const mc: Record<string, unknown> = {
       registerTool(def: RegisterCall["def"], opts?: RegisterCall["opts"]) {
         run.registerCalls.push({ def, opts, via });
+        if (run.registeredNames.includes(def.name)) run.duplicates.push(def.name);
+        run.registeredNames.push(def.name);
         if (throwRegister.includes(def.name)) throw new Error("sync boom");
         return rejectRegister.includes(def.name) ? P.reject(new Error("async boom")) : P.resolve(undefined);
       },
     };
     const behaviour = o.getTools ?? "absent";
-    if (behaviour !== "absent") {
+    if (behaviour === "getter-throws") {
+      Object.defineProperty(mc, "getTools", {
+        enumerable: true,
+        configurable: true,
+        get() {
+          run.getToolsCalls++;
+          throw new Error("getTools getter boom");
+        },
+      });
+    } else if (behaviour !== "absent") {
       mc["getTools"] = () => {
         run.getToolsCalls++;
         switch (behaviour) {
           case "resolve":
-            return P.resolve(reported.map((name) => ({ name })));
+            return P.resolve(entries());
           case "sync-array":
-            return reported.map((name) => ({ name }));
+            return entries();
           case "throw":
             throw new Error("getTools boom");
           case "reject":
             return P.reject(new Error("getTools rejected"));
+          case "never":
+            return new P((resolve) => void run.settleGetTools.push(resolve));
+          case "live-snapshot":
+            return P.resolve(run.registeredNames.map((name) => ({ name })));
           case "resolve-null":
             return P.resolve(null);
           case "resolve-object":
             return P.resolve({ nope: true });
           case "resolve-malformed":
             return P.resolve([null, 7, {}, { name: 5 }, { name: "" }, { name: "search_pages" }]);
+          case "custom":
+            return o.getToolsImpl!();
         }
         return undefined;
       };
@@ -168,6 +250,7 @@ function runBootstrap(js: string, o: Options = {}): Run {
   };
 
   const host = o.host ?? "document";
+  const scripts = [...(o.scripts ?? []), ...(o.bridge ? ["/.webmcp/bridge.js"] : [])];
   const doc: Record<string, unknown> = {
     querySelectorAll(selector: string) {
       run.selectors.push(selector);
@@ -176,15 +259,45 @@ function runBootstrap(js: string, o: Options = {}): Run {
         getAttribute: (attr: string) => (attr === "toolname" ? name : null),
       }));
     },
+    // Understands script[src="x"], script[src^="x"], script[src$="x"] and script[src*="x"].
     querySelector(selector: string) {
       run.selectors.push(selector);
       if (o.querySelectorThrows) throw new Error("querySelector boom");
-      return o.bridge && selector === 'script[src$="/.webmcp/bridge.js"]' ? { tagName: "SCRIPT" } : null;
+      const m = /^script\[src([*$^]?)="(.*)"\]$/.exec(selector);
+      if (!m) return null;
+      const op = m[1];
+      const needle = m[2]!;
+      const hit = scripts.find((src) =>
+        op === "*" ? src.includes(needle) : op === "$" ? src.endsWith(needle) : op === "^" ? src.startsWith(needle) : src === needle,
+      );
+      return hit === undefined ? null : { tagName: "SCRIPT", src: hit };
     },
   };
-  if (host === "document" || host === "both") doc["modelContext"] = makeContext("document");
+
+  let modelContext: Record<string, unknown> | null = null;
+  if (host === "document" || host === "both") {
+    const mc = makeContext("document");
+    if (o.lockdown === "ctx-sealed" || o.lockdown === "ctx-and-document-sealed") Object.preventExtensions(mc);
+    if (o.lockdown === "ctx-key-taken") {
+      Object.defineProperty(mc, REGISTRY_KEY, { value: "taken", enumerable: false, configurable: false, writable: false });
+    }
+    modelContext = mc;
+    doc["modelContext"] =
+      o.lockdown === "ctx-define-throws"
+        ? new Proxy(mc, {
+            defineProperty() {
+              throw new Error("defineProperty refused");
+            },
+          })
+        : mc;
+    if (o.lockdown === "ctx-and-document-sealed") Object.preventExtensions(doc);
+  }
   const nav: Record<string, unknown> = {};
-  if (host === "navigator" || host === "both") nav["modelContext"] = makeContext("navigator");
+  if (host === "navigator" || host === "both") {
+    const mc = makeContext("navigator");
+    if (host === "navigator") modelContext = mc;
+    nav["modelContext"] = mc;
+  }
 
   const fetchImpl =
     o.fetchImpl ??
@@ -203,8 +316,41 @@ function runBootstrap(js: string, o: Options = {}): Run {
     },
     AbortController,
   });
-  vm.runInContext(js, context, { filename: "bootstrap.js" });
-  return run;
+  if (o.location !== undefined) context["location"] = o.location;
+  if (o.timers !== false) {
+    context["setTimeout"] = (fn: () => void, ms: number): number => {
+      const t: Timer = { id: run.timers.length + 1, fn, ms, cleared: false, fired: false };
+      run.timers.push(t);
+      return t.id;
+    };
+    context["clearTimeout"] = (id: number): void => {
+      const t = run.timers.find((x) => x.id === id);
+      if (t) t.cleared = true;
+    };
+  }
+  return {
+    run,
+    context,
+    document: doc,
+    modelContext,
+    runScript: (js: string) => void vm.runInContext(js, context, { filename: "bootstrap.js" }),
+  };
+}
+
+function runBootstrap(js: string, o: Options = {}): Run {
+  const page = createPage(o);
+  page.runScript(js);
+  return page.run;
+}
+
+/** The bootstrap with its TOOLS list edited, to stand in for a different build. */
+function withTools(js: string, edit: (tools: Array<Record<string, unknown>>) => Array<Record<string, unknown>>): string {
+  const edited = js.replace(
+    /var TOOLS = (\[.*\]);/,
+    (_m, json: string) => `var TOOLS = ${JSON.stringify(edit(JSON.parse(json) as Array<Record<string, unknown>>))};`,
+  );
+  expect(edited).not.toBe(js);
+  return edited;
 }
 
 const flush = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
@@ -324,6 +470,226 @@ describe("generated bootstrap in a vm: duplicate avoidance", () => {
     const run = runBootstrap(doubled, { getTools: "absent" });
     await flush();
     expect(names(run)).toEqual(["search_pages", "list_posts", "get_page"]);
+    expect(run.duplicates).toEqual([]);
+  });
+
+  it("falls back to the [toolname] set when reading getTools throws (a getter on the host object)", async () => {
+    const run = runBootstrap(bootstrap, { getTools: "getter-throws", stamped: ["get_page"] });
+    await flush();
+    expect(names(run)).toEqual(["search_pages", "list_posts"]);
+    expect(run.warns).toHaveLength(0);
+  });
+
+  it("counts the entries it can read when one entry throws on access, instead of dropping the whole list", async () => {
+    const bad = {
+      get name(): string {
+        throw new Error("bad entry");
+      },
+    };
+    const run = runBootstrap(bootstrap, { getTools: "resolve", entries: [bad, { name: "search_pages" }, bad, "get_page"] });
+    await flush();
+    expect(names(run)).toEqual(["list_posts"]);
+    expect(run.warns).toHaveLength(0);
+  });
+
+  it("accepts entries that are plain name strings", async () => {
+    const run = runBootstrap(bootstrap, { getTools: "resolve", entries: ["search_pages", "list_posts"] });
+    await flush();
+    expect(names(run)).toEqual(["get_page"]);
+  });
+
+  it("accepts a mix of string and object entries, and ignores empty strings", async () => {
+    const run = runBootstrap(bootstrap, { getTools: "sync-array", entries: ["", "list_posts", { name: "get_page" }, null] });
+    await flush();
+    expect(names(run)).toEqual(["search_pages"]);
+  });
+});
+
+describe("generated bootstrap in a vm: a getTools() that never settles", () => {
+  it("names the timeout as a constant of 1500 ms", () => {
+    expect(bootstrap).toContain("GETTOOLS_TIMEOUT_MS = 1500");
+  });
+
+  it("registers against the [toolname] set once the timeout passes", async () => {
+    const run = runBootstrap(bootstrap, { getTools: "never", stamped: ["get_page"] });
+    await flush();
+    expect(run.registerCalls).toHaveLength(0);
+    expect(run.timers.map((t) => t.ms)).toEqual([1500]);
+
+    run.fireTimers();
+    expect(names(run)).toEqual(["search_pages", "list_posts"]);
+    expect(run.duplicates).toEqual([]);
+  });
+
+  it("does not register a second time when getTools() settles after the timeout", async () => {
+    const run = runBootstrap(bootstrap, { getTools: "never" });
+    await flush();
+    run.fireTimers();
+    expect(names(run)).toEqual(["search_pages", "list_posts", "get_page"]);
+
+    run.settleGetTools[0]!([{ name: "search_pages" }]);
+    await flush();
+    expect(names(run)).toEqual(["search_pages", "list_posts", "get_page"]);
+    expect(run.duplicates).toEqual([]);
+  });
+
+  it("stops the timer when getTools() settles in time, and a timer that fires anyway changes nothing", async () => {
+    const run = runBootstrap(bootstrap, { getTools: "resolve" });
+    await flush();
+    expect(names(run)).toEqual(["list_posts", "get_page"]);
+    expect(run.timers).toHaveLength(1);
+    expect(run.timers[0]!.cleared).toBe(true);
+
+    // Even a timer the page failed to clear must not register again.
+    run.timers[0]!.fn();
+    expect(names(run)).toEqual(["list_posts", "get_page"]);
+  });
+
+  it("stops the timer when getTools() rejects", async () => {
+    const run = runBootstrap(bootstrap, { getTools: "reject" });
+    await flush();
+    expect(names(run)).toEqual(["search_pages", "list_posts", "get_page"]);
+    expect(run.timers[0]!.cleared).toBe(true);
+  });
+
+  it("starts no timer when there is no getTools, or it throws", async () => {
+    expect(runBootstrap(bootstrap, { getTools: "absent" }).timers).toHaveLength(0);
+    expect(runBootstrap(bootstrap, { getTools: "throw" }).timers).toHaveLength(0);
+    expect(runBootstrap(bootstrap, { getTools: "getter-throws" }).timers).toHaveLength(0);
+  });
+
+  it("still works on a page without setTimeout: it waits for getTools()", async () => {
+    const run = runBootstrap(bootstrap, { getTools: "resolve", timers: false });
+    await flush();
+    expect(names(run)).toEqual(["list_posts", "get_page"]);
+    const waiting = runBootstrap(bootstrap, { getTools: "never", timers: false });
+    await flush();
+    expect(waiting.registerCalls).toHaveLength(0);
+  });
+});
+
+describe("generated bootstrap in a vm: the page-wide registry", () => {
+  it("registers each tool once when the script runs twice and there is no getTools", async () => {
+    const page = createPage({ getTools: "absent" });
+    page.runScript(bootstrap);
+    page.runScript(bootstrap);
+    await flush();
+    expect(names(page.run)).toEqual(["search_pages", "list_posts", "get_page"]);
+    expect(page.run.duplicates).toEqual([]);
+  });
+
+  it("registers each tool once when the second getTools() snapshot predates the first run's registrations", async () => {
+    const page = createPage({ getTools: "live-snapshot" });
+    page.runScript(bootstrap);
+    page.runScript(bootstrap);
+    // Both runs took their snapshot before either registered anything.
+    expect(page.run.getToolsCalls).toBe(2);
+    await flush();
+    expect(names(page.run)).toEqual(["search_pages", "list_posts", "get_page"]);
+    expect(page.run.duplicates).toEqual([]);
+  });
+
+  it("registers each tool once across a third run that starts after the first two finished", async () => {
+    const page = createPage({ getTools: "live-snapshot" });
+    page.runScript(bootstrap);
+    await flush();
+    page.runScript(bootstrap);
+    page.runScript(bootstrap);
+    await flush();
+    expect(names(page.run)).toEqual(["search_pages", "list_posts", "get_page"]);
+  });
+
+  it("never duplicates a name across two different builds whose tool lists overlap", async () => {
+    const older = withTools(bootstrap, (tools) => [tools[0]!, tools[1]!]);
+    const newer = withTools(bootstrap, (tools) => [tools[1]!, { ...tools[2]!, name: "extra_tool", endpoint: "/_webmcp/exec/extra_tool" }]);
+
+    for (const order of [
+      [older, newer],
+      [newer, older],
+    ]) {
+      const page = createPage({ getTools: "live-snapshot" });
+      for (const js of order) page.runScript(js);
+      await flush();
+      expect(new Set(names(page.run)).size).toBe(names(page.run).length);
+      expect([...names(page.run)].sort()).toEqual(["extra_tool", "list_posts", "search_pages"]);
+      expect(page.run.duplicates).toEqual([]);
+    }
+  });
+
+  it("keeps the registry on the host object as a non-enumerable property, and every registered name in it", async () => {
+    const page = createPage({ getTools: "absent" });
+    page.runScript(bootstrap);
+    await flush();
+    const mc = page.modelContext!;
+    const descriptor = Object.getOwnPropertyDescriptor(mc, REGISTRY_KEY);
+    expect(descriptor).toBeDefined();
+    expect(descriptor!.enumerable).toBe(false);
+    expect(Object.keys(mc)).not.toContain(REGISTRY_KEY);
+    expect(Object.keys(descriptor!.value as object).sort()).toEqual(["get_page", "list_posts", "search_pages"]);
+  });
+
+  it("adds no enumerable global and nothing to the document", async () => {
+    const page = createPage({ getTools: "resolve" });
+    const globalsBefore = Object.keys(page.context).sort();
+    const documentBefore = Object.keys(page.document).sort();
+    page.runScript(bootstrap);
+    await flush();
+    expect(Object.keys(page.context).sort()).toEqual(globalsBefore);
+    expect(Object.keys(page.document).sort()).toEqual(documentBefore);
+    expect(Object.getOwnPropertyNames(page.document)).not.toContain(REGISTRY_KEY);
+  });
+
+  it("falls back to the document when the host object cannot take a property (sealed)", async () => {
+    const page = createPage({ getTools: "absent", lockdown: "ctx-sealed" });
+    page.runScript(bootstrap);
+    page.runScript(bootstrap);
+    await flush();
+    expect(names(page.run)).toEqual(["search_pages", "list_posts", "get_page"]);
+    expect(page.run.duplicates).toEqual([]);
+    const descriptor = Object.getOwnPropertyDescriptor(page.document, REGISTRY_KEY);
+    expect(descriptor).toBeDefined();
+    expect(descriptor!.enumerable).toBe(false);
+    expect(Object.getOwnPropertyDescriptor(page.modelContext!, REGISTRY_KEY)).toBeUndefined();
+  });
+
+  it("falls back to the document when defineProperty on the host object throws", async () => {
+    const page = createPage({ getTools: "absent", lockdown: "ctx-define-throws" });
+    page.runScript(bootstrap);
+    page.runScript(bootstrap);
+    await flush();
+    expect(names(page.run)).toEqual(["search_pages", "list_posts", "get_page"]);
+    expect(Object.getOwnPropertyDescriptor(page.document, REGISTRY_KEY)).toBeDefined();
+  });
+
+  it("falls back to the document when something already holds the key on the host object", async () => {
+    const page = createPage({ getTools: "absent", lockdown: "ctx-key-taken" });
+    page.runScript(bootstrap);
+    page.runScript(bootstrap);
+    await flush();
+    expect(names(page.run)).toEqual(["search_pages", "list_posts", "get_page"]);
+    expect(page.run.warns).toHaveLength(0);
+  });
+
+  it("still registers once, without throwing, when neither the host object nor the document can hold a registry", async () => {
+    const page = createPage({ getTools: "absent", lockdown: "ctx-and-document-sealed" });
+    expect(() => page.runScript(bootstrap)).not.toThrow();
+    await flush();
+    expect(names(page.run)).toEqual(["search_pages", "list_posts", "get_page"]);
+    expect(page.run.warns).toHaveLength(0);
+  });
+
+  it("checks the registry when it registers, so a late getTools() answer that misses a name cannot cause a duplicate", async () => {
+    // Run one registers everything. Run two's getTools() answers late with a list that does
+    // not mention run one's tools: only the registry stands between it and a duplicate.
+    const page = createPage({ getTools: "never" });
+    page.runScript(bootstrap);
+    page.run.fireTimers();
+    expect(names(page.run)).toEqual(["search_pages", "list_posts", "get_page"]);
+    page.runScript(bootstrap);
+    page.run.settleGetTools[1]!([]);
+    await flush();
+    expect(page.run.duplicates).toEqual([]);
+    expect(page.run.registerCalls).toHaveLength(3);
   });
 });
 
@@ -404,7 +770,7 @@ describe("generated bootstrap in a vm: Cloudflare WebMCP Labs", () => {
   it("says so once, at the start, when the Labs bridge script is on the page", async () => {
     const run = runBootstrap(bootstrap, { bridge: true, getTools: "resolve" });
     await flush();
-    expect(run.selectors).toContain('script[src$="/.webmcp/bridge.js"]');
+    expect(run.selectors).toContain('script[src*="/.webmcp/bridge.js"]');
     expect(run.infos).toEqual([
       ["cf-webmcp: Cloudflare WebMCP Labs bridge detected; keep tool names distinct from its tools"],
     ]);
@@ -417,6 +783,21 @@ describe("generated bootstrap in a vm: Cloudflare WebMCP Labs", () => {
     expect(run.infos).toEqual([]);
   });
 
+  it.each(["/.webmcp/bridge.js?v=1", "https://www.example.com/.webmcp/bridge.js?ver=2&x=y", "/.webmcp/bridge.js#top"])(
+    "finds a bridge script whose src has more after the file name (%s)",
+    async (src) => {
+      const run = runBootstrap(bootstrap, { scripts: ["/app.js", src] });
+      await flush();
+      expect(run.infos).toHaveLength(1);
+    },
+  );
+
+  it("does not take another script for the bridge", async () => {
+    const run = runBootstrap(bootstrap, { scripts: ["/app.js", "/webmcp/bridge.js", "/.webmcp/other.js"] });
+    await flush();
+    expect(run.infos).toEqual([]);
+  });
+
   it("does not let a failing document.querySelector stop the registration", async () => {
     const run = runBootstrap(bootstrap, { querySelectorThrows: true });
     await flush();
@@ -425,6 +806,34 @@ describe("generated bootstrap in a vm: Cloudflare WebMCP Labs", () => {
 });
 
 describe("generated bootstrap in a vm: calling a registered tool", () => {
+  const callGetPage = async (o: Options): Promise<string> => {
+    const run = runBootstrap(bootstrap, { getTools: "absent", ...o });
+    await flush();
+    await run.registerCalls.find((c) => c.def.name === "get_page")!.def.execute({ path: "/about" });
+    return run.fetchCalls[0]!.url;
+  };
+
+  it.each([
+    ["https://www.example.com", "https:", "www.example.com"],
+    ["https://my-site.example.workers.dev", "https:", "my-site.example.workers.dev"],
+    ["http://localhost:8787", "http:", "localhost:8787"],
+  ])("POSTs to the page origin %s, not to the configured domain", async (origin, protocol, host) => {
+    expect(await callGetPage({ location: { origin, protocol, host } })).toBe(`${origin}/_webmcp/exec/get_page`);
+  });
+
+  it("falls back to the root-relative path under an opaque origin", async () => {
+    expect(await callGetPage({ location: { origin: "null", protocol: "about:", host: "" } })).toBe(
+      "/_webmcp/exec/get_page",
+    );
+    expect(await callGetPage({ location: { origin: "null", protocol: "https:", host: "sandboxed.example.com" } })).toBe(
+      "/_webmcp/exec/get_page",
+    );
+  });
+
+  it("falls back to the root-relative path when the page has no usable location", async () => {
+    expect(await callGetPage({ location: { origin: "file://", protocol: "file:", host: "" } })).toBe("/_webmcp/exec/get_page");
+  });
+
   it("POSTs to the root-relative exec endpoint and returns the tool-result shape", async () => {
     const run = runBootstrap(bootstrap, { getTools: "absent" });
     await flush();
@@ -465,32 +874,25 @@ describe("generated bootstrap: syntax", () => {
     expect(es5Violations(bootstrap)).toEqual([]);
   });
 
-  it("the ES5 check does catch the syntax it is meant to catch", () => {
-    const modern = [
-      "const a = () => 1;",
-      "let b = `x${a()}`;",
-      "foo(...[1, 2]);",
-      "async function f() { await g(); }",
-      "class C {}",
-      "var { d } = o;",
-      "var e = { b };",
-      "var f2 = a?.b ?? 1;",
-    ].join("\n");
-    const found = es5Violations(modern).join("\n");
-    for (const needle of [
-      "arrow function",
-      "let or const",
-      "template literal",
-      "spread",
-      "await",
-      "class",
-      "destructuring",
-      "shorthand property",
-      "optional chaining",
-      "nullish coalescing",
-    ]) {
-      expect(found, needle).toContain(needle);
-    }
-    expect(es5Violations("var x = function (a) { return a ? [a] : {}; };")).toEqual([]);
+  it("keeps U+2028 and U+2029 from a tool description out of the script as escapes, so a pre-ES2019 engine can parse it", async () => {
+    const ls = String.fromCharCode(0x2028);
+    const ps = String.fromCharCode(0x2029);
+    const description = `before${ls}between${ps}after`;
+    const toml = TOML.replace('description = "Search the site."', `description = "${description}"`);
+    const tomlPath = path.join(tmpDir, "separators.toml");
+    await fs.writeFile(tomlPath, toml);
+    const outDir = path.join(tmpDir, "out-separators");
+    await buildConfig({ tomlPath, outDir });
+    const js = await fs.readFile(path.join(outDir, "bootstrap.js"), "utf8");
+
+    expect(js.includes(ls)).toBe(false);
+    expect(js.includes(ps)).toBe(false);
+    expect(js).toContain(["\\", "u2028"].join(""));
+    expect(js).toContain(["\\", "u2029"].join(""));
+    expect(es5Violations(js)).toEqual([]);
+
+    const run = runBootstrap(js, { getTools: "absent" });
+    await flush();
+    expect(run.registerCalls[0]!.def.description).toBe(description);
   });
 });

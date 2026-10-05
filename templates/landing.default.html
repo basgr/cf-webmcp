@@ -56,7 +56,7 @@ hr{border:none;border-top:1px solid #e5e7eb;margin:2.5rem 0}
 <div id="state-native" class="state">
   <div class="callout callout-success">
     <h2>Connected</h2>
-    <p>This page detected WebMCP support in your browser (<code>document.modelContext</code>). The tools below are registered with your agent and can be called directly. No pairing needed.</p>
+    <p>This page detected WebMCP support in your browser (<code>document.modelContext</code>, or the deprecated <code>navigator.modelContext</code> alias that Chrome 149 exposes). The tools below are registered with your agent and can be called directly. No pairing needed.</p>
   </div>
 </div>
 
@@ -84,7 +84,7 @@ hr{border:none;border-top:1px solid #e5e7eb;margin:2.5rem 0}
   <div class="callout callout-warning">
     <h2>Not connected</h2>
     <p>Your browser does not expose WebMCP, and the fallback widget for desktop MCP clients is disabled on this site. You cannot pair from here right now.</p>
-    <p>Chrome reaches users with WebMCP through an origin trial (from Chrome 149) when the site sends a trial token. To test without a token, turn on <code>chrome://flags/#enable-webmcp-testing</code> and relaunch. Cloudflare's Kitesurf agent browser also supports WebMCP. If you are the site owner, set <code>fallback_widget = true</code> in <code>webmcp.toml</code> and redeploy to enable the desktop pairing flow.</p>
+    <p>Chrome ships WebMCP to users through an origin trial (from Chrome 149) on sites that send a trial token. To test without a token, turn on <code>chrome://flags/#enable-webmcp-testing</code> and relaunch. Cloudflare's Kitesurf agent browser also supports WebMCP. If you are the site owner, set <code>fallback_widget = true</code> in <code>webmcp.toml</code> and redeploy to enable the desktop pairing flow.</p>
   </div>
 </div>
 
@@ -96,7 +96,7 @@ hr{border:none;border-top:1px solid #e5e7eb;margin:2.5rem 0}
 <h2>About WebMCP</h2>
 <p>WebMCP is a way for websites to expose structured tools that AI agents can call. There are two runtimes behind the same name, and they reach different agents.</p>
 <ul>
-  <li><strong>The W3C draft</strong> (<a href="https://github.com/webmachinelearning/webmcp"><code>webmachinelearning/webmcp</code></a>): a browser API at <code>document.modelContext</code> (older builds expose the deprecated <code>navigator.modelContext</code> alias). Used by browser-native agents (Chrome, Cloudflare Kitesurf, Cloudflare Browser Run lab sessions). No pairing needed; tools register automatically when the page loads. <strong>Chrome reaches users through an origin trial from Chrome 149</strong>, when the site sends a trial token; without one, WebMCP is behind <code>chrome://flags/#enable-webmcp-testing</code>.</li>
+  <li><strong>The W3C draft</strong> (<a href="https://github.com/webmachinelearning/webmcp"><code>webmachinelearning/webmcp</code></a>): a browser API at <code>document.modelContext</code> (older builds expose the deprecated <code>navigator.modelContext</code> alias). Used by browser-native agents (Chrome, Cloudflare Kitesurf, Cloudflare Browser Run lab sessions). No pairing needed; tools register automatically when the page loads. <strong>Chrome ships WebMCP to users through an origin trial (from Chrome 149) on sites that send a trial token</strong>; without one, WebMCP is behind <code>chrome://flags/#enable-webmcp-testing</code>.</li>
   <li><strong>The jasonjmcghee library</strong> (<a href="https://github.com/jasonjmcghee/WebMCP"><code>jasonjmcghee/WebMCP</code></a>): a localhost websocket bridge for desktop MCP clients (Claude Desktop, Cursor, Claude Code, Windsurf). Requires the one-time pairing flow above.</li>
 </ul>
 <p class="muted">This site uses <a href="https://github.com/basgr/cf-webmcp">cf-webmcp</a> to expose both surfaces from a single config.</p>
@@ -118,13 +118,16 @@ hr{border:none;border-top:1px solid #e5e7eb;margin:2.5rem 0}
   var hasNav = 'modelContext' in navigator;
   var dmc = hasDoc ? document.modelContext : null;
   var mc = (dmc && typeof dmc.registerTool === 'function') ? dmc : (hasNav ? navigator.modelContext : null);
-  var shown = dmc || mc;
+  // The host the state below is chosen from, named so the diagnostic cannot say one
+  // thing about the page's host and the state another.
+  var hostName = mc ? (mc === dmc ? 'document.modelContext' : 'navigator.modelContext (deprecated alias)') : 'none';
   var mct = navigator.modelContextTesting;
   var absentDoc = 'undefined (document.modelContext absent)';
   var probes = {
     'document.modelContext': hasDoc,
     'navigator.modelContext (deprecated alias)': hasNav,
-    'typeof modelContext.registerTool': shown ? typeof shown.registerTool : 'undefined (modelContext absent)',
+    'selected host': hostName,
+    'typeof registerTool on the selected host': mc ? typeof mc.registerTool : 'undefined (no host selected)',
     'typeof document.modelContext.getTools': dmc ? typeof dmc.getTools : absentDoc,
     'typeof document.modelContext.executeTool': dmc ? typeof dmc.executeTool : absentDoc,
     "'ontoolchange' in document.modelContext": dmc ? ('ontoolchange' in dmc) : 'n/a (document.modelContext absent)',
@@ -173,7 +176,11 @@ hr{border:none;border-top:1px solid #e5e7eb;margin:2.5rem 0}
   function showNames(text) {
     namesText.textContent = ': ' + text;
   }
+  // Only the newest call may write: an earlier call that answers late must not
+  // replace the list a later call has already shown.
+  var latest = 0;
   function listNames() {
+    var mine = ++latest;
     var pending;
     try {
       pending = Promise.resolve(dmc.getTools());
@@ -182,6 +189,7 @@ hr{border:none;border-top:1px solid #e5e7eb;margin:2.5rem 0}
       return;
     }
     pending.then(function (list) {
+      if (mine !== latest) return;
       var names = [];
       if (list && typeof list.length === 'number') {
         for (var i = 0; i < list.length; i++) {
@@ -190,7 +198,12 @@ hr{border:none;border-top:1px solid #e5e7eb;margin:2.5rem 0}
       }
       showNames(names.length ? names.join(', ') : 'none registered');
     }, function (e) {
+      if (mine !== latest) return;
       showNames('getTools() rejected: ' + describeError(e));
+    }).then(null, function (e) {
+      // Reading the answer threw (a hostile or broken entry): still say something.
+      if (mine !== latest) return;
+      showNames('could not read getTools(): ' + describeError(e));
     });
   }
   if (namesText) {

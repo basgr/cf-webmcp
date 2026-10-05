@@ -39,7 +39,7 @@ That is it. No `Cookie`, no `Authorization`, no `Referer`, no `X-Forwarded-For`.
 
 ## Proxied HTML responses
 
-In full-proxy mode the Worker proxies non-Worker paths to origin. For HTML responses it injects two tags: a `<link rel="webmcp">` and a `<script src="/_webmcp/bootstrap.<hash>.js" defer>`. Both stay on your own site: the script `src` is root-relative, so it loads from whichever host served the page, and the link points at the manifest on your configured site URL. The bootstrapper registers tools with the WebMCP runtime (`document.modelContext`, falling back to the deprecated `navigator.modelContext`) if available. It does **not**:
+In full-proxy mode the Worker proxies non-Worker paths to origin. For HTML responses it injects two tags: a `<link rel="webmcp">` and a `<script src="https://<the host the visitor used>/_webmcp/bootstrap.<hash>.js" defer>`. Both stay on your own site: the script `src` is taken from the request, so it loads from `www`, `workers.dev` and preview hosts alike and a `<base href>` cannot move it, and the link points at the manifest on your configured site URL. The bootstrapper registers tools with the WebMCP runtime (`document.modelContext`, falling back to the deprecated `navigator.modelContext`) if available. It does **not**:
 
 - Set cookies.
 - Make network requests on page load.
