@@ -27,7 +27,7 @@ The `rel` value matches the one we already emit in the HTTP `Link` header and in
 Response headers:
 
 ```
-Content-Type: application/linkset+json
+Content-Type: application/linkset+json; profile="https://www.rfc-editor.org/info/rfc9727"
 Cache-Control: public, max-age=300, s-maxage=21600, stale-while-revalidate=86400, stale-if-error=86400
 X-Content-Type-Options: nosniff
 ```
@@ -73,15 +73,17 @@ When `mode = "merge"`:
 
 Output is canonicalised: 2-space indent, object keys sorted alphabetically, trailing newline. Byte-stable across re-runs.
 
-## The entry follows the manifest
+The `Content-Type` follows RFC 9727 section 4.2: `application/linkset+json` (a MUST) with the `profile` parameter naming the RFC (a SHOULD; the example in appendix A.1 shows the header above). Origin's own catalog is accepted with or without the parameter.
 
-The one entry cf-webmcp adds points at the WebMCP manifest (`rel="webmcp"`). With `[features].manifest = false` there is no manifest to point at: a synthesized catalog is an empty `{"linkset": []}`, and a merged one is origin's entries unchanged. The build warns when the catalog is on and the manifest is off; turn `api_catalog` off or set `[api_catalog].mode = "passthrough"` if you do not want an empty catalog.
+## The catalog is served only while the manifest is
+
+The one entry cf-webmcp adds points at the WebMCP manifest (`rel="webmcp"`), and RFC 9727 section 4.1 requires an API catalog to include hyperlinks to API endpoints. With `[features].manifest = false` there is nothing to publish, so the catalog is not served, in any mode (synthesize, replace or merge): the route is not claimed (the path stays with origin), and the `Link` header, the `<link rel="api-catalog">` tag, the llms.txt line, the manifest's `links.api_catalog` and the preflight probe all drop out. The build warns when the catalog is on and the manifest is off; set `[features].api_catalog = false` to say so.
 
 ## Advertised on every response
 
-When the catalog is enabled, cf-webmcp advertises it through two additional surfaces alongside the existing `rel="webmcp"`:
+When the catalog is served, cf-webmcp advertises it through two additional surfaces alongside the existing `rel="webmcp"`:
 
-- **HTTP `Link` header** on every Worker response (RFC 8288, comma-separated):
+- **HTTP `Link` header** on every Worker response (RFC 8288, comma-separated; the `rel="webmcp"` entry is there while `[features].manifest` is on):
 
   ```
   Link: <https://example.com/.well-known/webmcp>; rel="webmcp",

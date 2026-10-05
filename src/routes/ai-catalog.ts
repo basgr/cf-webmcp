@@ -33,15 +33,6 @@ import { buildCacheControl, sha256Hex } from "../cache";
 import { ARD_PREDECESSOR_PATH, isArdContentType, isArdDocument, type ArdEntryLike } from "../ard";
 import { MERGE_MAX_BYTES, ORIGIN_FAILURE_CACHE_CONTROL, declaredLength, readCapped, type CappedRead } from "./read-capped";
 
-/** Origin documents over this many bytes are relayed, not merged (the cap every merge route shares). */
-export const ARD_MERGE_MAX_BYTES = MERGE_MAX_BYTES;
-
-/**
- * Cache-Control of the generated document when it stands in for an origin that
- * failed, so origin's own document is back within a minute once origin is.
- */
-export const ARD_FAILURE_CACHE_CONTROL = ORIGIN_FAILURE_CACHE_CONTROL;
-
 /**
  * `synthesizedEtag` is the strong ETag of `synthesizedBody`, computed at build time
  * (ARD_ETAG). A merged document exists only at request time, so its ETag is hashed
@@ -62,7 +53,7 @@ export async function aiCatalogResponse(
     if (merged.kind === "body") return ardResponse(merged.text, ardCacheControl(config), await bodyEtag(merged.text));
     return ardResponse(
       synthesizedBody,
-      merged.originFailed ? ARD_FAILURE_CACHE_CONTROL : ardCacheControl(config),
+      merged.originFailed ? ORIGIN_FAILURE_CACHE_CONTROL : ardCacheControl(config),
       synthesizedEtag,
     );
   }
@@ -146,13 +137,13 @@ async function mergeWithOrigin(
     // HTML or text at the path - relay unchanged with noindex.
     return { kind: "relay", upstream };
   }
-  if (declaredLength(upstream) > ARD_MERGE_MAX_BYTES) {
+  if (declaredLength(upstream) > MERGE_MAX_BYTES) {
     // Too large to merge: relay the body unread.
     return { kind: "relay", upstream };
   }
   let read: CappedRead;
   try {
-    read = await readCapped(upstream.body, ARD_MERGE_MAX_BYTES);
+    read = await readCapped(upstream.body, MERGE_MAX_BYTES);
   } catch {
     // The body failed while it was read: origin failed.
     return { kind: "generated", originFailed: true };

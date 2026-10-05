@@ -795,7 +795,11 @@ describe("preflight: an origin file over the Worker's 1 MiB merge cap", () => {
     async (route, ct, head) => {
       stubGets({ [`https://example.com${route}`]: doc(streamed(padded(head, MIB + 5)), ct) });
 
-      const { code, result, lines } = await run(MINIMAL);
+      // SKILL.md is a merge only in merge mode (the default, synthesize, never fetches origin's file).
+      const { code, result, lines } = await run(`${MINIMAL}
+[agent_skills]
+mode = "merge"
+`);
 
       expect(code).toBe(0);
       expect(result.collisions).toEqual([]);
@@ -823,6 +827,238 @@ describe("preflight: an origin file over the Worker's 1 MiB merge cap", () => {
     expect(code).toBe(0);
     expect(lines.filter((l) => l.includes(TOO_LARGE))).toHaveLength(1);
     expect(rowOf(lines, "/robots.txt")).not.toContain("too large");
+  });
+});
+
+describe("preflight: a row is a merge only in a mode where the Worker merges, and judges content types as the Worker does", () => {
+  const MIB = 1024 * 1024;
+  const PROFILE = 'application/linkset+json; profile="https://www.rfc-editor.org/info/rfc9727"';
+  const bytes = (text: string, size = 0): Uint8Array => {
+    const out = new Uint8Array(Math.max(size, text.length)).fill(0x20);
+    out.set(new TextEncoder().encode(text));
+    return out;
+  };
+  /** A 200 with the bytes as given and a content type if one is named (a Uint8Array body sets none of its own). */
+  const answer = (body: Uint8Array, ct?: string) => () =>
+    new Response(body as BodyInit, { status: 200, headers: ct === undefined ? {} : { "content-type": ct } });
+  const rowOf = (lines: string[], label: string) => lines.find((l) => l.trimStart().startsWith(label));
+
+  function stubGets(answers: Record<string, () => Response>) {
+    const calls: FetchCall[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string | URL, init: RequestInit = {}) => {
+        calls.push({ url: String(input), init });
+        const a = init.method === "GET" ? answers[String(input)] : undefined;
+        return a ? a() : new Response("not found", { status: 404 });
+      }),
+    );
+    return calls;
+  }
+  const getUrls = (calls: FetchCall[]) => calls.filter((c) => c.init.method === "GET").map((c) => c.url);
+  const mode = (block: string, value: string) => `${MINIMAL}\n[${block}]\nmode = "${value}"\n`;
+
+  describe.each([
+    ["llms.txt", "/llms.txt", "llms_txt", "merge"],
+    ["agents.md", "/.well-known/agents.md", "agents_md", "merge"],
+    ["SKILL.md", "/.well-known/agent-skills/site/SKILL.md", "agent_skills", "synthesize"],
+  ])("%s", (_name, route, block) => {
+    const URL_ = `https://example.com${route}`;
+    const small = answer(bytes("# Origin\n"), "text/markdown");
+    const big = answer(bytes("# Origin\n", MIB + 10), "text/markdown");
+
+    it.each(["synthesize", "replace"])(
+      "in %s mode a file at origin is a claim: a COLLISION, never a merge row",
+      async (m) => {
+        stubGets({ [URL_]: small });
+        const { code, result, lines } = await run(mode(block, m));
+        expect(code).toBe(1);
+        expect(result.collisions).toEqual([`${route}: origin already serves content here`]);
+        expect(rowOf(lines, route)).toContain("COLLISION");
+        expect(rowOf(lines, route)).not.toMatch(/merge/);
+      },
+    );
+
+    it.each(["synthesize", "replace"])("in %s mode an oversize file at origin is a COLLISION too, not 'too large to merge'", async (m) => {
+      stubGets({ [URL_]: big });
+      const { result, lines } = await run(mode(block, m));
+      expect(result.collisions).toEqual([`${route}: origin already serves content here`]);
+      expect(result.warnings.filter((w) => w.includes("too large"))).toEqual([]);
+      expect(lines.filter((l) => l.includes("too large"))).toEqual([]);
+    });
+
+    it("in merge mode the file is a merge row, and an oversize one is too large to merge", async () => {
+      stubGets({ [URL_]: small });
+      const a = await run(mode(block, "merge"));
+      expect(a.result.collisions).toEqual([]);
+      expect(rowOf(a.lines, route)).toMatch(/merge \(marker absent/);
+
+      vi.unstubAllGlobals();
+      stubGets({ [URL_]: big });
+      const b = await run(mode(block, "merge"));
+      expect(rowOf(b.lines, route)).toContain("too large to merge, relayed unchanged");
+      expect(b.result.warnings.filter((w) => w.startsWith(`${route}:`))).toHaveLength(1);
+    });
+
+    it("with no 404 and no file at origin, every mode is clean", async () => {
+      stubGets({});
+      for (const m of ["synthesize", "replace", "merge"]) {
+        const r = await run(mode(block, m));
+        expect(r.code, m).toBe(0);
+      }
+    });
+  });
+
+  it("the defaults: llms.txt and agents.md merge, SKILL.md does not (synthesize is its default mode)", async () => {
+    stubGets({
+      "https://example.com/llms.txt": answer(bytes("# o\n"), "text/plain"),
+      "https://example.com/.well-known/agents.md": answer(bytes("# o\n"), "text/markdown"),
+      "https://example.com/.well-known/agent-skills/site/SKILL.md": answer(bytes("# o\n"), "text/markdown"),
+    });
+    const { result } = await run(MINIMAL);
+    expect(result.collisions).toEqual(["/.well-known/agent-skills/site/SKILL.md: origin already serves content here"]);
+  });
+
+  describe("content types are the Worker's", () => {
+    it.each([
+      ["/llms.txt", undefined],
+      ["/robots.txt", undefined],
+      ["/.well-known/agents.md", undefined],
+    ])("%s: a 200 without a Content-Type is mergeable, as in the Worker", async (route, ct) => {
+      stubGets({ [`https://example.com${route}`]: answer(bytes("hello\n"), ct) });
+      const { code, result, lines } = await run(MINIMAL);
+      expect(code).toBe(0);
+      expect(result.collisions).toEqual([]);
+      expect(rowOf(lines, route)).toMatch(/merge \(marker/);
+    });
+
+    it("SKILL.md in merge mode: no Content-Type and text/x-markdown merge", async () => {
+      for (const ct of [undefined, "text/x-markdown", "text/plain; charset=utf-8"]) {
+        vi.unstubAllGlobals();
+        stubGets({ "https://example.com/.well-known/agent-skills/site/SKILL.md": answer(bytes("# o\n"), ct) });
+        const { result, lines } = await run(mode("agent_skills", "merge"));
+        expect(result.collisions, String(ct)).toEqual([]);
+        expect(rowOf(lines, "/.well-known/agent-skills/site/SKILL.md"), String(ct)).toMatch(/merge \(marker/);
+      }
+    });
+
+    it("llms.txt and agents.md do not take text/x-markdown, nor robots.txt text/markdown: the Worker relays those, so they collide", async () => {
+      stubGets({ "https://example.com/llms.txt": answer(bytes("# o\n"), "text/x-markdown") });
+      expect((await run(MINIMAL)).result.collisions).toEqual([expect.stringMatching(/^\/llms\.txt: expected text\/plain or text\/markdown/)]);
+
+      vi.unstubAllGlobals();
+      stubGets({ "https://example.com/robots.txt": answer(bytes("# o\n"), "text/markdown") });
+      expect((await run(MINIMAL)).result.collisions).toEqual([expect.stringMatching(/^\/robots\.txt: expected text\/plain/)]);
+    });
+  });
+
+  describe("the API catalog (merge mode is the default) is a merge row, JSON-aware, with the cap", () => {
+    const API = "https://example.com/.well-known/api-catalog";
+    const LINKSET = JSON.stringify({ linkset: [{ anchor: "https://example.com/api", "service-doc": [{ href: "https://example.com/docs" }] }] });
+
+    it.each([PROFILE, "application/linkset+json", "application/json", undefined])(
+      "a valid linkset (Content-Type %s) is a merge, not a COLLISION",
+      async (ct) => {
+        stubGets({ [API]: answer(bytes(LINKSET), ct) });
+        const { code, result, lines } = await run(MINIMAL);
+        expect(code, String(ct)).toBe(0);
+        expect(result.collisions, String(ct)).toEqual([]);
+        expect(rowOf(lines, "/.well-known/api-catalog"), String(ct)).toMatch(/ merge \(linkset/);
+        expect(result.warnings.filter((w) => w.startsWith("/.well-known/api-catalog"))).toEqual([]);
+      },
+    );
+
+    it("a body that is not a linkset is a warning: the Worker serves its own catalog and drops origin's", async () => {
+      stubGets({ [API]: answer(bytes('{"hello":"world"}'), "application/json") });
+      const { code, result, lines } = await run(MINIMAL);
+      expect(code).toBe(0);
+      expect(result.collisions).toEqual([]);
+      expect(rowOf(lines, "/.well-known/api-catalog")).toContain("WARNING");
+      expect(result.warnings.filter((w) => w.startsWith("/.well-known/api-catalog"))).toEqual([
+        "/.well-known/api-catalog: origin's JSON is not an RFC 9264 linkset (an object with a linkset array of objects with a string anchor); the Worker serves its generated catalog instead of it",
+      ]);
+    });
+
+    it("a body that is not JSON is the same warning", async () => {
+      stubGets({ [API]: answer(bytes("<html>"), "application/json") });
+      const { code, result } = await run(MINIMAL);
+      expect(code).toBe(0);
+      expect(result.warnings.filter((w) => w.startsWith("/.well-known/api-catalog"))).toHaveLength(1);
+    });
+
+    it("HTML or another content type is a COLLISION (the Worker relays it, so its entry never appears)", async () => {
+      stubGets({ [API]: answer(bytes("<html></html>"), "text/html") });
+      const { code, result } = await run(MINIMAL);
+      expect(code).toBe(1);
+      expect(result.collisions).toEqual([expect.stringMatching(/^\/\.well-known\/api-catalog: expected a linkset/)]);
+    });
+
+    it("an oversize catalog is too large to merge, relayed unchanged, judged before its content", async () => {
+      stubGets({ [API]: answer(bytes("<not json>", MIB + 1), "application/linkset+json") });
+      const { code, result, lines } = await run(MINIMAL);
+      expect(code).toBe(0);
+      expect(result.collisions).toEqual([]);
+      expect(rowOf(lines, "/.well-known/api-catalog")).toContain("too large to merge, relayed unchanged");
+      expect(result.warnings.filter((w) => w.startsWith("/.well-known/api-catalog"))).toEqual([
+        "/.well-known/api-catalog: origin's document is over 1 MiB, too large to merge, relayed unchanged; the Worker adds no entry",
+      ]);
+    });
+
+    it("a catalog of exactly 1 MiB is still a merge", async () => {
+      stubGets({ [API]: answer(bytes(LINKSET, MIB), "application/linkset+json") });
+      const { result, lines } = await run(MINIMAL);
+      expect(result.collisions).toEqual([]);
+      expect(rowOf(lines, "/.well-known/api-catalog")).toMatch(/ merge \(linkset/);
+    });
+
+    it.each(["synthesize", "replace"])("in %s mode a catalog at origin is a COLLISION (the Worker answers there)", async (m) => {
+      stubGets({ [API]: answer(bytes(LINKSET), "application/linkset+json") });
+      const { code, result } = await run(mode("api_catalog", m));
+      expect(code).toBe(1);
+      expect(result.collisions).toEqual(["/.well-known/api-catalog: origin already serves content here"]);
+    });
+  });
+
+  describe("only documents the Worker serves are probed", () => {
+    const API = "https://example.com/.well-known/api-catalog";
+    const INDEX = "https://example.com/.well-known/agent-skills/index.json";
+
+    it("the API catalog is probed with the manifest on, and not with it off or the catalog in passthrough or off", async () => {
+      const served = stubGets({});
+      await run(MINIMAL);
+      expect(getUrls(served)).toContain(API);
+      for (const toml of [
+        `${MINIMAL}\n[features]\nmanifest = false\n`,
+        `${MINIMAL}\n[features]\napi_catalog = false\n`,
+        mode("api_catalog", "passthrough"),
+      ]) {
+        vi.unstubAllGlobals();
+        const calls = stubGets({ [API]: answer(bytes("{}"), "application/json") });
+        const { code, result } = await run(toml);
+        expect(getUrls(calls), toml).not.toContain(API);
+        expect(code).toBe(0);
+        expect(result.collisions).toEqual([]);
+      }
+    });
+
+    it("the skills index is probed when it is served, and not with agent_skills off, merge or passthrough", async () => {
+      const served = stubGets({});
+      await run(MINIMAL);
+      expect(getUrls(served)).toContain(INDEX);
+      for (const toml of [
+        `${MINIMAL}\n[features]\nagent_skills = false\n`,
+        mode("agent_skills", "merge"),
+        mode("agent_skills", "passthrough"),
+        `${MINIMAL}\n[features]\nagent_skills_index = false\n`,
+      ]) {
+        vi.unstubAllGlobals();
+        const calls = stubGets({ [INDEX]: answer(bytes("{}"), "application/json") });
+        const { code, result } = await run(toml);
+        expect(getUrls(calls), toml).not.toContain(INDEX);
+        expect(code).toBe(0);
+        expect(result.collisions).toEqual([]);
+      }
+    });
   });
 });
 
@@ -991,6 +1227,7 @@ describe("preflight: command-line arguments", () => {
     ["--config= with nothing after it", ["--config="], /--config needs a value/],
     ["--origin given twice", ["--origin=https://a.example", "--origin", "https://b.example"], /--origin was given more than once/],
     ["--config given twice", ["--config=a.toml", "--config=b.toml"], /--config was given more than once/],
+    ["--force given twice", ["--force", "--force"], /--force was given more than once/],
   ])("refuses %s", (_label, argv, message) => {
     expect(() => parseArgs(argv)).toThrow(message);
   });

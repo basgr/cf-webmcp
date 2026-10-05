@@ -6,8 +6,8 @@
  * `<link rel="webmcp">` injected into HTML) while [features].manifest is on. With
  * the manifest off there is no document to point at, so there is no entry.
  *
- * When the api_catalog feature is enabled and not in passthrough mode,
- * additionally advertises rel="api-catalog" (IANA-registered, RFC 9727)
+ * When the API catalog is served (feature on, not passthrough, manifest on: see
+ * src/served.ts), additionally advertises rel="api-catalog" (IANA-registered, RFC 9727)
  * so generic crawlers that scan for standard rels can find the catalog.
  *
  * Each entry carries an optional `title="..."` parameter (RFC 8288 sec 3.4.1),
@@ -19,6 +19,7 @@
 
 import type { Config } from "./config-types";
 import { ARD_REL } from "./ard";
+import { apiCatalogServed } from "./served";
 
 /**
  * The header value, or "" when no document is advertised at all (the manifest off and
@@ -30,7 +31,7 @@ export function buildLinkHeader(config: Config): string {
   if (config.features.manifest) {
     entries.push(`<${base}${config.manifest.path}>; rel="webmcp"; title="WebMCP tool catalogue"`);
   }
-  if (config.features.api_catalog && config.api_catalog.mode !== "passthrough") {
+  if (apiCatalogServed(config)) {
     entries.push(
       `<${base}${config.api_catalog.path}>; rel="api-catalog"; title="API catalogue (RFC 9727 Linkset)"`,
     );

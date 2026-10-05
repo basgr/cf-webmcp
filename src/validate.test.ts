@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { validateInput } from "./validate";
+import { declaredProperties, validateInput } from "./validate";
 import type { InputSchemaConfig } from "./config-types";
 
 const schema: InputSchemaConfig = {
@@ -170,5 +170,40 @@ describe("validateInput: names that exist on every object", () => {
     });
     expect(validateInput(declared, parse('{"constructor":3}')).ok).toBe(true);
     expect(validateInput(declared, parse("{}")).ok).toBe(true);
+  });
+});
+
+describe("declaredProperties", () => {
+  const declared = { properties: { q: { type: "string" }, limit: { type: "integer" } } };
+  const parse = (text: string) => JSON.parse(text) as Record<string, unknown>;
+
+  it("keeps the declared properties the input has, with their values, in a fresh object", () => {
+    const input = { q: "a", limit: 3 };
+    const out = declaredProperties(declared, input);
+    expect(out).toEqual({ q: "a", limit: 3 });
+    expect(out).not.toBe(input);
+  });
+
+  it("drops what the schema does not declare", () => {
+    expect(declaredProperties(declared, { q: "a", role: "admin", nested: { x: 1 } })).toEqual({ q: "a" });
+  });
+
+  it("drops __proto__, constructor and toString from the input, and never sets a prototype", () => {
+    const out = declaredProperties(declared, parse('{"q":"a","__proto__":{"isAdmin":true},"constructor":1,"toString":"t"}'));
+    expect(out).toEqual({ q: "a" });
+    expect(Object.keys(out)).toEqual(["q"]);
+    expect(Object.getPrototypeOf(out)).toBe(Object.prototype);
+    expect((out as { isAdmin?: boolean }).isAdmin).toBeUndefined();
+  });
+
+  it("does not take a declared name from the prototype chain: an input without it has no such entry", () => {
+    const schema = { properties: { constructor: { type: "string" }, toString: { type: "string" } } };
+    expect(declaredProperties(schema, {})).toEqual({});
+    expect(declaredProperties(schema, parse('{"constructor":"c"}'))).toEqual({ constructor: "c" });
+  });
+
+  it("does not treat a property named like an inherited one as declared when the schema merely inherits it", () => {
+    expect(declaredProperties({ properties: {} }, parse('{"constructor":"c","hasOwnProperty":1}'))).toEqual({});
+    expect(declaredProperties({}, { q: "a" })).toEqual({});
   });
 });

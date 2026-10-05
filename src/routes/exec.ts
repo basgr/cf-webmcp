@@ -244,7 +244,8 @@ function preflightCors(request: Request, config: Config): Response {
 
 /**
  * The response with the CORS headers of `request`: Access-Control-Allow-Origin echoes
- * the request's Origin when [cors].allowed_origins lists it, as the preflight does.
+ * the request's Origin when [cors].allowed_origins lists it, as the preflight does, with
+ * Access-Control-Expose-Headers: x-webmcp-cache next to it.
  * Whatever access-control-* headers the response carried are dropped first, so a
  * cached response can never answer with another caller's. Whenever any origin is
  * allowed, the answer depends on Origin (an echo or no header at all), so it carries
@@ -258,6 +259,9 @@ function withCors(response: Response, request: Request, config: Config): Respons
     const reqOrigin = request.headers.get("origin");
     if (reqOrigin !== null && allowed.includes(reqOrigin)) {
       headers.set("access-control-allow-origin", reqOrigin);
+      // Without this a cross-origin caller cannot read the one response header that is not
+      // CORS-safelisted and tells it what happened: HIT, MISS or BYPASS (see the cache above).
+      headers.set("access-control-expose-headers", "x-webmcp-cache");
     }
   }
   return new Response(response.body, { status: response.status, statusText: response.statusText, headers });

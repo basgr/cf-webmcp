@@ -101,16 +101,47 @@ const PublicUrl = z
 // JSON Schema subset we accept inside [tools.input_schema].
 // Limited on purpose: easier to validate at runtime, easier for agents to reason about.
 const InputSchemaProperty: z.ZodType<unknown> = z.lazy(() =>
-  z.object({
-    type: z.enum(["string", "integer", "number", "boolean", "array"]),
-    description: z.string().optional(),
-    minimum: z.number().optional(),
-    maximum: z.number().optional(),
-    pattern: z.string().optional(),
-    enum: z.array(z.union([z.string(), z.number(), z.boolean()])).optional(),
-    items: InputSchemaProperty.optional(),
-    default: z.union([z.string(), z.number(), z.boolean()]).optional(),
-  }),
+  z
+    .object({
+      type: z.enum(["string", "integer", "number", "boolean", "array"]),
+      description: z.string().optional(),
+      minimum: z.number().optional(),
+      maximum: z.number().optional(),
+      pattern: z.string().optional(),
+      enum: z.array(z.union([z.string(), z.number(), z.boolean()])).optional(),
+      items: InputSchemaProperty.optional(),
+      default: z.union([z.string(), z.number(), z.boolean()]).optional(),
+    })
+    .superRefine((property, ctx) => {
+      if (property.enum === undefined) return;
+      // The runtime check (src/validate.ts) compares a value with the listed ones by strict
+      // equality, so an enum that cannot match is a property no caller can satisfy, or one that
+      // silently allows nothing it should. Both are refused when the config is compiled.
+      if (property.type === "array") {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["enum"],
+          message:
+            'enum is not allowed on an array property: an array is not one of the listed scalars. Put the enum on the "items" of the array.',
+        });
+        return;
+      }
+      const fits: Record<string, (v: string | number | boolean) => boolean> = {
+        string: (v) => typeof v === "string",
+        integer: (v) => typeof v === "number" && Number.isInteger(v),
+        number: (v) => typeof v === "number" && Number.isFinite(v),
+        boolean: (v) => typeof v === "boolean",
+      };
+      const fit = fits[property.type]!;
+      property.enum.forEach((value, i) => {
+        if (fit(value)) return;
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["enum", i],
+          message: `enum value ${JSON.stringify(value)} does not fit type "${property.type}": every enum value must be of the declared type`,
+        });
+      });
+    }),
 );
 
 const InputSchema = z.object({

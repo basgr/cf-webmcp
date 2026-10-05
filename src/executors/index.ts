@@ -25,7 +25,7 @@ export async function runExecutor(
     case "dom_extract":
       return runDomExtract(ctx, tool.executor, input);
     case "http_json":
-      return runHttpJson(ctx, tool.executor, input);
+      return runHttpJson(ctx, tool.executor, input, tool.input_schema);
     case "http_get":
       return runHttpGet(ctx, tool.executor, input);
     default: {

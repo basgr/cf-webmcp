@@ -90,7 +90,13 @@ export function configLinkOptions(config: Config): ConfigLinkOptions {
   return {
     manifestUrl: config.features.manifest ? `${base}${config.manifest.path}` : undefined,
     emitLinkTag: config.features.link_tag,
-    apiCatalogUrl: served(config.features.api_catalog, config.api_catalog),
+    // The rule of apiCatalogServed (src/served.ts), written out: the imports of this file are
+    // hashed into INJECTION_HASH by value, which a function cannot be. served.test.ts checks
+    // that the two agree for every combination.
+    apiCatalogUrl:
+      config.features.api_catalog && config.api_catalog.mode !== "passthrough" && config.features.manifest
+        ? `${base}${config.api_catalog.path}`
+        : undefined,
     aiCatalogUrl: served(config.features.ai_catalog, config.ai_catalog),
     agentSkillsUrl: served(config.features.agent_skills, config.agent_skills),
     llmsTxtUrl: served(config.features.llms_txt, config.llms_txt),

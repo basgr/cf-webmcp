@@ -15,10 +15,13 @@
  *   - synthesize (default): emit the index
  *   - passthrough: route not registered (router/feature toggle handles it)
  *
- * If the underlying agent_skills.mode is "merge", the digest cannot be
- * computed deterministically at build time (origin content is part of the
- * served body), so AGENT_SKILLS_DIGEST is null and this handler returns
- * 404 with an explanatory body rather than publish a stale digest.
+ * The router serves this route only while skillsIndexServed (src/served.ts) holds:
+ * [features].agent_skills on, in a mode (synthesize, replace) whose body the build can
+ * hash. With agent_skills off, in merge mode (origin content is part of the served
+ * body) or in passthrough (the SKILL.md is origin's) there is no digest to list, the
+ * build warns, the manifest has no links.agent_skills_index and the path stays with
+ * origin. The 404 below is a defensive answer for a build whose digest and config
+ * disagree, never a stale digest.
  *
  * No HTTP Link rel is defined by the RFC; discovery is well-known-path only.
  * cf-webmcp does include `links.agent_skills_index` in the manifest as a
@@ -50,11 +53,8 @@ export function agentSkillsIndexResponse(
   config: Config,
   agentSkillsDigest: string | null,
 ): Response {
-  // The digest is null when:
-  //   - feature is disabled (route won't reach here in that case)
-  //   - mode is passthrough (route won't reach here either)
-  //   - agent_skills.mode is merge or passthrough (we don't own a stable body)
-  // The router filters the first two; only the third can land here at runtime.
+  // The digest is null exactly when skillsIndexServed is false, and the router does not send
+  // those requests here (src/served.ts); this answer is for a build where the two disagree.
   if (!agentSkillsDigest) {
     return new Response(
       JSON.stringify(

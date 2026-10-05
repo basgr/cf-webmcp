@@ -42,6 +42,7 @@ import {
 } from "../src/ard.js";
 import { LICENSE_PREAMBLE } from "../src/widget-preamble.js";
 import { widgetEnabled } from "../src/widget-state.js";
+import { apiCatalogServed, skillsIndexServed } from "../src/served.js";
 import { cachesResults } from "../src/tool-cache.js";
 import { configLinkOptions } from "../src/injection/html-rewriter.js";
 import { bridgeNpmVersion, sha256Hex, widgetAssetName } from "./widget-pin.js";
@@ -103,6 +104,52 @@ export async function resolveInherits(
     }
   }
   return merged;
+}
+
+/**
+ * Property names that every JavaScript object already has. An input property called one of these
+ * cannot be told from the inherited member (an input's `constructor` is the Object function), and
+ * `__proto__` is the prototype chain itself; the schema layer drops a `__proto__` key without a word.
+ */
+const RESERVED_PROPERTY_NAMES: readonly string[] = ["__proto__", "constructor", "prototype"];
+
+/**
+ * Refuse a tool whose input_schema declares (or requires) a reserved property name. It runs on the
+ * resolved TOML before the schema parse, because the schema drops a `__proto__` key silently and
+ * the refusal must name it. Every offender is reported at once.
+ */
+function checkReservedPropertyNames(raw: Record<string, unknown>): void {
+  const tools = raw["tools"];
+  if (!Array.isArray(tools)) return;
+  const problems: string[] = [];
+  tools.forEach((tool, i) => {
+    if (typeof tool !== "object" || tool === null) return;
+    const t = tool as Record<string, unknown>;
+    const label = typeof t["name"] === "string" ? `tool "${t["name"]}"` : `tools[${i}]`;
+    const schema = t["input_schema"];
+    if (typeof schema !== "object" || schema === null) return;
+    const s = schema as Record<string, unknown>;
+    const properties = s["properties"];
+    if (typeof properties === "object" && properties !== null) {
+      for (const name of Object.keys(properties)) {
+        if (RESERVED_PROPERTY_NAMES.includes(name)) problems.push(`${label} input_schema.properties declares "${name}"`);
+      }
+    }
+    const required = s["required"];
+    if (Array.isArray(required)) {
+      for (const name of required) {
+        if (typeof name === "string" && RESERVED_PROPERTY_NAMES.includes(name)) {
+          problems.push(`${label} input_schema.required lists "${name}"`);
+        }
+      }
+    }
+  });
+  if (problems.length === 0) return;
+  throw new Error(
+    `[build-config] reserved property name in input_schema: ${problems.join("; ")}. Every JavaScript object already has ` +
+      `${RESERVED_PROPERTY_NAMES.map((n) => `"${n}"`).join(", ")}, so an input property of that name cannot be told from the inherited member ` +
+      `and an input built from it could carry a polluted prototype to origin. Rename the property.`,
+  );
 }
 
 /**
@@ -360,15 +407,13 @@ function buildManifest(config: Config, configHash: string, bootstrapName: string
       ...(config.features.webmcp_landing ? { landing: `${base}${config.webmcp_landing.path}` } : {}),
       bootstrap: `${base}${ns}/${bootstrapName}`,
       health: `${base}${ns}/health`,
-      ...(config.features.api_catalog && config.api_catalog.mode !== "passthrough"
+      ...(apiCatalogServed(config)
         ? { api_catalog: `${base}${config.api_catalog.path}` }
         : {}),
       ...(config.features.agent_skills && config.agent_skills.mode !== "passthrough"
         ? { agent_skills: `${base}${config.agent_skills.path}` }
         : {}),
-      ...(config.features.agent_skills_index &&
-      config.agent_skills_index.mode !== "passthrough" &&
-      (config.agent_skills.mode === "synthesize" || config.agent_skills.mode === "replace")
+      ...(skillsIndexServed(config)
         ? { agent_skills_index: `${base}${config.agent_skills_index.path}` }
         : {}),
     },
@@ -1235,7 +1280,7 @@ function checkPathCollisions(config: Config): void {
     claimed.push({ name: "agents_md", path: config.agents_md.path });
     config.agents_md.aliases.forEach((a, i) => claimed.push({ name: `agents_md.aliases[${i}]`, path: a }));
   }
-  if (config.features.api_catalog && config.api_catalog.mode !== "passthrough") {
+  if (apiCatalogServed(config)) {
     claimed.push({ name: "api_catalog", path: config.api_catalog.path });
   }
   if (config.features.ai_catalog && config.ai_catalog.mode !== "passthrough") {
@@ -1248,7 +1293,7 @@ function checkPathCollisions(config: Config): void {
     claimed.push({ name: "agent_skills", path: config.agent_skills.path });
     config.agent_skills.aliases.forEach((a, i) => claimed.push({ name: `agent_skills.aliases[${i}]`, path: a }));
   }
-  if (config.features.agent_skills_index && config.agent_skills_index.mode !== "passthrough") {
+  if (skillsIndexServed(config)) {
     claimed.push({ name: "agent_skills_index", path: config.agent_skills_index.path });
   }
   const seen = new Map<string, string>();
@@ -1365,9 +1410,7 @@ function computeBootstrapSri(config: Config, bootstrap: string): string | null {
  * Worker serves, which it renders with the same value.
  */
 async function computeAgentSkillsDigest(config: Config, widget: boolean): Promise<string | null> {
-  if (!config.features.agent_skills_index) return null;
-  if (config.agent_skills_index.mode === "passthrough") return null;
-  if (config.agent_skills.mode === "merge" || config.agent_skills.mode === "passthrough") return null;
+  if (!skillsIndexServed(config)) return null;
   const body = buildFrontmatter(config) + buildSkillBody(config, widget);
   const hex = createHash("sha256").update(body).digest("hex");
   return `sha256:${hex}`;
@@ -1397,7 +1440,7 @@ export function stringifyCanonical(obj: unknown): string {
 function checkSkillName(config: Config): void {
   const used =
     (config.features.agent_skills && config.agent_skills.mode !== "passthrough") ||
-    (config.features.agent_skills_index && config.agent_skills_index.mode !== "passthrough") ||
+    skillsIndexServed(config) ||
     (config.features.ai_catalog && config.ai_catalog.mode !== "passthrough" && config.features.agent_skills);
   if (!used || skillName(config) !== "") return;
   throw new Error(
@@ -1494,33 +1537,53 @@ export function deadConfigWarnings(config: Config): string[] {
 
 /**
  * A `[tools.cache]` on a POST http_json tool that does not turn caching on: the tool is not
- * cached unless s_maxage is greater than 0 (src/tool-cache.ts), so a max_age, swr or sie
- * alone, or s_maxage = 0, is ignored. Say so once per tool.
+ * cached unless s_maxage is greater than 0 (src/tool-cache.ts), so a table with a max_age, swr or
+ * sie but no s_maxage is ignored. Say so once per tool. An explicit `s_maxage = 0` is not
+ * ignored but understood: it is how a publisher says "never cache", so it gets no warning.
  */
 export function toolCacheWarnings(config: Config): string[] {
   return config.tools
-    .filter((t) => t.cache !== undefined && !cachesResults(t))
+    .filter((t) => t.cache !== undefined && !cachesResults(t) && t.cache.s_maxage !== 0)
     .map(
       (t) =>
         `[build-config] tool "${t.name}" is an http_json POST tool with a [tools.cache] but no s_maxage greater than 0, so it is not cached: ` +
         `a POST tool is cached only when [tools.cache].s_maxage is set (max_age, swr and sie alone do not turn caching on). ` +
-        `Set s_maxage to cache it, or remove [tools.cache].`,
+        `Set s_maxage to cache it, or remove [tools.cache] (s_maxage = 0 says "never" on purpose and is not warned about).`,
     );
 }
 
 /**
- * The API catalog's only entry of ours points at the WebMCP manifest. With [features].manifest
- * off a served catalog (feature on, not passthrough) has nothing of ours in it: a synthesized
- * one is an empty linkset, a merged one is origin's unchanged. Say so, so that the choice to
- * keep an empty catalog is made on purpose.
+ * The API catalog's only entry of ours points at the WebMCP manifest, and RFC 9727 section 4.1
+ * requires an API catalog to link to API endpoints. With [features].manifest off the catalog is
+ * therefore not served, in any mode (src/served.ts): say so, so that the config says what runs.
  */
 export function apiCatalogWarnings(config: Config): string[] {
   if (config.features.manifest || !config.features.api_catalog || config.api_catalog.mode === "passthrough") return [];
   return [
     `[build-config] [features].api_catalog is on but [features].manifest is off: the only entry cf-webmcp puts in the API catalog ` +
-      `points at the manifest, so the catalog at ${config.api_catalog.path} is empty` +
-      `${config.api_catalog.mode === "merge" ? " apart from origin's own entries" : ""}. ` +
-      `Turn api_catalog off or set [api_catalog].mode = "passthrough" if you do not want an empty catalog.`,
+      `points at the manifest, and RFC 9727 section 4.1 requires an API catalog to link to API endpoints, so the catalog at ` +
+      `${config.api_catalog.path} is not served, in any mode: no route (the path is left to origin), no Link header or <link> ` +
+      `entry, no llms.txt line. Set [features].api_catalog = false to say so.`,
+  ];
+}
+
+/**
+ * The skills index lists the SKILL.md with a digest of the bytes the Worker serves, so it exists
+ * only with agent_skills on in synthesize or replace mode (src/served.ts). When it is on but one
+ * of those fails there is no digest to list: it is not served, its path is left to origin and the
+ * manifest has no link to it. Say which condition, so that the config says what runs.
+ */
+export function skillsIndexWarnings(config: Config): string[] {
+  if (!config.features.agent_skills_index || config.agent_skills_index.mode === "passthrough" || skillsIndexServed(config)) return [];
+  const reason = !config.features.agent_skills
+    ? "[features].agent_skills is off, so there is no SKILL.md for it to list"
+    : config.agent_skills.mode === "merge"
+      ? "agent_skills is in merge mode, so the SKILL.md holds origin's file and the build cannot compute its digest"
+      : "agent_skills is in passthrough mode, so the SKILL.md is origin's and the build cannot compute its digest";
+  return [
+    `[build-config] [features].agent_skills_index is on but ${reason}: the skills index at ${config.agent_skills_index.path} is not served ` +
+      `(the path is left to origin, and the manifest has no links.agent_skills_index). Set [features].agent_skills_index = false ` +
+      `or [agent_skills_index].mode = "passthrough" to say so, or serve a SKILL.md the build can hash (agent_skills in synthesize or replace mode).`,
   ];
 }
 
@@ -1823,6 +1886,7 @@ export async function buildConfig(opts: BuildOptions): Promise<void> {
   const rawIn = await readToml(opts.tomlPath);
   const merged = await resolveInherits(rawIn, baseDir);
 
+  checkReservedPropertyNames(merged);
   const parsed = ConfigSchema.safeParse(merged);
   if (!parsed.success) {
     const issues = parsed.error.issues
@@ -1883,6 +1947,7 @@ export async function buildConfig(opts: BuildOptions): Promise<void> {
   for (const warning of [
     ...ardWarnings(config),
     ...apiCatalogWarnings(config),
+    ...skillsIndexWarnings(config),
     ...toolCacheWarnings(config),
     ...deadConfigWarnings(config),
   ]) {

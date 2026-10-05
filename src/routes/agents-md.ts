@@ -181,7 +181,11 @@ function buildBlock(config: Config, widget: boolean): string {
   return lines.join("\n");
 }
 
-function isTextish(ct: string | null): boolean {
+/**
+ * The content types the agents.md route merges into: preflight judges origin's file with this
+ * very test (a 200 without a Content-Type counts).
+ */
+export function isTextish(ct: string | null): boolean {
   if (!ct) return true;
   return /^text\/(plain|markdown)/i.test(ct);
 }

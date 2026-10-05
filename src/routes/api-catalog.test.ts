@@ -96,9 +96,24 @@ describe("apiCatalogResponse", () => {
       proxy,
     );
     expect(res.status).toBe(200);
-    expect(res.headers.get("content-type")).toBe("application/linkset+json");
+    // RFC 9727 section 4.2 and appendix A.1: the Linkset media type with the profile of the RFC.
+    expect(res.headers.get("content-type")).toBe('application/linkset+json; profile="https://www.rfc-editor.org/info/rfc9727"');
     const body = JSON.parse(await res.text());
     expect(body).toEqual({ linkset: [OUR_ENTRY] });
+  });
+
+  it("serves the same Content-Type on a merged catalog, and accepts it back from origin on re-merge", async () => {
+    const PROFILE = 'application/linkset+json; profile="https://www.rfc-editor.org/info/rfc9727"';
+    const config = makeConfig();
+    const first = await apiCatalogResponse(new Request("https://example.com/.well-known/api-catalog"), config, async () =>
+      new Response("nope", { status: 404 }),
+    );
+    const text = await first.text();
+    const again = await apiCatalogResponse(new Request("https://example.com/.well-known/api-catalog"), config, async () =>
+      new Response(text, { status: 200, headers: { "content-type": PROFILE } }),
+    );
+    expect(again.headers.get("content-type")).toBe(PROFILE);
+    expect(await again.text()).toBe(text);
   });
 
   it("synthesize mode ignores origin entirely", async () => {

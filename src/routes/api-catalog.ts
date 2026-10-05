@@ -11,11 +11,11 @@
  *                 Kept for parity with the other discovery routes' mode enum.
  *   - passthrough: route not registered (handled at the router/feature toggle)
  *
- * Scope is one entry pointing at config.manifest.path, while [features].manifest is
- * on. With the manifest off there is nothing of ours to point at: the synthesized catalog
- * is an empty linkset and a merge leaves origin's entries as they are. cf-webmcp does
- * not generate OpenAPI, does not discover other APIs on the publisher's origin, and does
- * not impose any schema on the rest of the linkset.
+ * Scope is one entry pointing at config.manifest.path. RFC 9727 section 4.1 requires an API
+ * catalog to link to API endpoints, so with [features].manifest off there is nothing to publish
+ * and the router does not serve this route in any mode (src/served.ts); this handler is only
+ * reached with the manifest on. cf-webmcp does not generate OpenAPI, does not discover other
+ * APIs on the publisher's origin, and does not impose any schema on the rest of the linkset.
  *
  * Merge reads origin's catalog through a 1 MiB cap (src/routes/read-capped.ts): a larger one
  * is relayed as origin sent it, with noindex; one whose body fails mid-read is answered with
@@ -41,6 +41,12 @@ interface Linkset {
   linkset: LinksetEntry[];
 }
 
+/**
+ * RFC 9727 section 4.2: the catalog is a Linkset served as application/linkset+json, and it
+ * SHOULD carry the profile parameter with the RFC's profile URI (appendix A.1 shows the header).
+ */
+export const API_CATALOG_CONTENT_TYPE = 'application/linkset+json; profile="https://www.rfc-editor.org/info/rfc9727"';
+
 const WEBMCP_REL = "webmcp";
 const WEBMCP_LINK_TYPE = "application/json";
 
@@ -50,7 +56,6 @@ export async function apiCatalogResponse(
   proxyToOrigin: (url: URL) => Promise<Response>,
 ): Promise<Response> {
   const ourEntry = buildOurEntry(config);
-  const ours = ourEntry ? [ourEntry] : [];
   let body: string;
   let cacheControl = buildCacheControl({
     max_age: config.cache.api_catalog_max_age,
@@ -60,13 +65,13 @@ export async function apiCatalogResponse(
   });
 
   if (config.api_catalog.mode === "synthesize" || config.api_catalog.mode === "replace") {
-    body = stringify({ linkset: ours });
+    body = stringify({ linkset: [ourEntry] });
   } else {
     // merge
     const target = new URL(config.api_catalog.path, config.origin.base_url);
     const upstream = await proxyToOrigin(target);
     if (upstream.status === 404) {
-      body = stringify({ linkset: ours });
+      body = stringify({ linkset: [ourEntry] });
     } else if (upstream.status === 200 && isLinksetContentType(upstream.headers.get("content-type"))) {
       const read = await readTextCapped(upstream);
       if (read.kind === "relay") {
@@ -75,13 +80,13 @@ export async function apiCatalogResponse(
       }
       if (read.kind === "failed") {
         // The body failed mid-read: the catalog without origin's entries, for a minute.
-        body = stringify({ linkset: ours });
+        body = stringify({ linkset: [ourEntry] });
         cacheControl = ORIGIN_FAILURE_CACHE_CONTROL;
       } else {
         const merged = tryMerge(read.text, ourEntry);
         if (merged === null) {
           // Origin file unparseable or not a linkset; fall back to synthesize.
-          body = stringify({ linkset: ours });
+          body = stringify({ linkset: [ourEntry] });
         } else {
           body = merged;
         }
@@ -97,7 +102,7 @@ export async function apiCatalogResponse(
   return new Response(body, {
     status: 200,
     headers: {
-      "content-type": "application/linkset+json",
+      "content-type": API_CATALOG_CONTENT_TYPE,
       "cache-control": cacheControl,
       "x-content-type-options": "nosniff",
       // Agent-discovery surface served under /.well-known/, not search-engine
@@ -107,9 +112,7 @@ export async function apiCatalogResponse(
   });
 }
 
-/** Our entry, or null while the manifest it points at is not served. */
-function buildOurEntry(config: Config): LinksetEntry | null {
-  if (!config.features.manifest) return null;
+function buildOurEntry(config: Config): LinksetEntry {
   const base = config.site.public_url ?? `https://${config.site.domain}`;
   const anchor = `${base}/`;
   const manifestUrl = `${base}${config.manifest.path}`;
@@ -120,11 +123,11 @@ function buildOurEntry(config: Config): LinksetEntry | null {
 }
 
 /**
- * Parse origin's catalog and merge our entry in (none, when `ourEntry` is null: origin's
- * entries come back unchanged). Returns null when the origin document is unparseable or
- * does not look like an RFC 9264 linkset.
+ * The entries of origin's catalog, or null when the document is unparseable or does not look
+ * like an RFC 9264 linkset (an object with a `linkset` array of objects with a string `anchor`).
+ * Preflight judges origin's file with this test too.
  */
-export function tryMerge(originText: string, ourEntry: LinksetEntry | null): string | null {
+export function parseLinkset(originText: string): LinksetEntry[] | null {
   let parsed: unknown;
   try {
     parsed = JSON.parse(originText);
@@ -139,9 +142,17 @@ export function tryMerge(originText: string, ourEntry: LinksetEntry | null): str
       return null;
     }
   }
+  return linkset as LinksetEntry[];
+}
 
-  const entries = (linkset as LinksetEntry[]).slice();
-  if (ourEntry === null) return stringify({ linkset: entries });
+/**
+ * Parse origin's catalog and merge our entry in. Returns null when the origin
+ * document is unparseable or does not look like an RFC 9264 linkset.
+ */
+export function tryMerge(originText: string, ourEntry: LinksetEntry): string | null {
+  const parsedEntries = parseLinkset(originText);
+  if (parsedEntries === null) return null;
+  const entries = parsedEntries.slice();
   const ourAnchor = ourEntry.anchor;
   const ourLinks = (ourEntry[WEBMCP_REL] as LinkObject[]) ?? [];
   const ourLink = ourLinks[0];
@@ -184,7 +195,11 @@ function sortReplacer(_key: string, value: unknown): unknown {
   return value;
 }
 
-function isLinksetContentType(ct: string | null): boolean {
+/**
+ * The content types the API catalog route merges into: preflight judges origin's file with this
+ * very test (a 200 without a Content-Type counts).
+ */
+export function isLinksetContentType(ct: string | null): boolean {
   if (!ct) return true;
   return /^application\/(linkset\+)?json/i.test(ct);
 }

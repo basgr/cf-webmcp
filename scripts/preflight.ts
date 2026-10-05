@@ -47,6 +47,13 @@ import TOML from "@iarna/toml";
 import { ConfigSchema, type Config } from "../src/config-types.js";
 import { ARD_PREDECESSOR_PATH, isArdContentType, isArdDocument } from "../src/ard.js";
 import { MERGE_MAX_BYTES, declaredLength, readCapped } from "../src/routes/read-capped.js";
+import { isTextish as isLlmsContentType } from "../src/routes/llms-txt.js";
+import { isTextish as isAgentsContentType } from "../src/routes/agents-md.js";
+import { isTextish as isRobotsContentType } from "../src/routes/robots-txt.js";
+import { isMarkdownish as isSkillContentType } from "../src/routes/agent-skills.js";
+import { isLinksetContentType, parseLinkset } from "../src/routes/api-catalog.js";
+import { apiCatalogServed, skillsIndexServed } from "../src/served.js";
+import { preflightUserAgent } from "../src/user-agent.js";
 import { configHashOf, resolveInherits } from "./build-config.js";
 
 interface Args {
@@ -60,10 +67,18 @@ interface PathCheck {
   label: string;
   url: URL;
   /**
-   * claim: any 200 is a collision. merge: a 200 text file the Worker merges into.
-   * merge_json: a 200 ARD document the Worker merges into (the ARD manifest in merge mode).
+   * claim: any 200 is a collision (the Worker answers there, or redirects). merge: a 200 text
+   * file the Worker merges into, judged with `text`. merge_json: a 200 ARD document the Worker
+   * merges into (the ARD manifest in merge mode). merge_linkset: a 200 RFC 9264 linkset the
+   * Worker merges into (the API catalog in merge mode).
+   *
+   * A document is a merge row only in a mode where the Worker fetches origin's file to merge into
+   * it: merge mode, and always for robots.txt. In synthesize and replace mode the Worker answers
+   * without fetching, so a file at origin is shadowed: a claim.
    */
-  expect: "claim" | "merge" | "merge_json";
+  expect: "claim" | "merge" | "merge_json" | "merge_linkset";
+  /** For `merge`: the Worker's own content-type test for the route, what it names, and the marker of its block. */
+  text?: TextMerge;
   /**
    * The ARD manifest in merge mode: its canonical path, or the predecessor path
    * the merge reads only after a 404 at the canonical one (`redirected`: the
@@ -72,10 +87,31 @@ interface PathCheck {
   ard?: { role: "canonical" } | { role: "predecessor"; canonical: string; redirected: boolean };
 }
 
+/** How one text merge route reads origin's file: the Worker's own test, so preflight cannot judge differently. */
+interface TextMerge {
+  accepts: (contentType: string | null) => boolean;
+  /** The content types it merges into, for the collision message. */
+  accepted: string;
+  marker: string;
+}
+
+const MARKER_LLMS = "<!-- cf-webmcp:begin -->";
+const MARKER_ROBOTS = "# cf-webmcp:begin";
+
+const TEXT_LLMS: TextMerge = { accepts: isLlmsContentType, accepted: "text/plain or text/markdown", marker: MARKER_LLMS };
+const TEXT_AGENTS: TextMerge = { accepts: isAgentsContentType, accepted: "text/plain or text/markdown", marker: MARKER_LLMS };
+const TEXT_ROBOTS: TextMerge = { accepts: isRobotsContentType, accepted: "text/plain", marker: MARKER_ROBOTS };
+const TEXT_SKILL: TextMerge = {
+  accepts: isSkillContentType,
+  accepted: "text/plain, text/markdown or text/x-markdown",
+  marker: MARKER_LLMS,
+};
+
 type Outcome =
   | { kind: "ok"; status: number; contentType: string }
   | { kind: "merge"; status: number; contentType: string; hasMarker: boolean }
   | { kind: "merge_json"; status: number; contentType: string; valid: boolean }
+  | { kind: "merge_linkset"; status: number; contentType: string; valid: boolean }
   /** merge_json path answering neither 200, 404 nor 3xx: the Worker serves its generated document. */
   | { kind: "fallback"; status: number; contentType: string }
   /**
@@ -109,6 +145,7 @@ export function parseArgs(argv: string[]): Args {
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]!;
     if (arg === "--force") {
+      if (force) return fail("--force was given more than once");
       force = true;
       continue;
     }
@@ -198,13 +235,26 @@ function pathsToCheck(config: Config, base: URL): PathCheck[] {
     // Both forms: the Worker answers GET and HEAD on /mcp (a redirect) as well as on /mcp/.
     for (const p of landingPaths(config)) claim(p, "claim");
   }
-  if (config.features.llms_txt && config.llms_txt.mode !== "passthrough") claim(config.llms_txt.path, "merge");
-  if (config.features.robots_txt && config.robots_txt.mode !== "passthrough") claim(config.robots_txt.path, "merge");
+  // A text file is a merge row only in merge mode (robots.txt, which has no other served mode, always).
+  const text = (p: string, merge: boolean, how: TextMerge) =>
+    merge ? out.push({ label: p, url: probeUrl(base, p), expect: "merge", text: how }) : claim(p, "claim");
+
+  if (config.features.llms_txt && config.llms_txt.mode !== "passthrough") {
+    text(config.llms_txt.path, config.llms_txt.mode === "merge", TEXT_LLMS);
+  }
+  if (config.features.robots_txt && config.robots_txt.mode !== "passthrough") text(config.robots_txt.path, true, TEXT_ROBOTS);
   if (config.features.agents_md && config.agents_md.mode !== "passthrough") {
-    claim(config.agents_md.path, "merge");
+    text(config.agents_md.path, config.agents_md.mode === "merge", TEXT_AGENTS);
     for (const alias of config.agents_md.aliases) claim(alias, "claim");
   }
-  if (config.features.api_catalog && config.api_catalog.mode !== "passthrough") claim(config.api_catalog.path, "claim");
+  // Not served (so not probed) with the manifest off: src/served.ts.
+  if (apiCatalogServed(config)) {
+    if (config.api_catalog.mode === "merge") {
+      out.push({ label: config.api_catalog.path, url: probeUrl(base, config.api_catalog.path), expect: "merge_linkset" });
+    } else {
+      claim(config.api_catalog.path, "claim");
+    }
+  }
   if (config.features.ai_catalog && config.ai_catalog.mode !== "passthrough") {
     // In merge mode the Worker merges into origin's ARD document at the path, or
     // at the predecessor path when origin answers 404 at the path, so a JSON
@@ -231,26 +281,22 @@ function pathsToCheck(config: Config, base: URL): PathCheck[] {
     }
   }
   if (config.features.agent_skills && config.agent_skills.mode !== "passthrough") {
-    claim(config.agent_skills.path, "merge");
+    text(config.agent_skills.path, config.agent_skills.mode === "merge", TEXT_SKILL);
     for (const alias of config.agent_skills.aliases) claim(alias, "claim");
   }
-  if (config.features.agent_skills_index && config.agent_skills_index.mode !== "passthrough") {
-    claim(config.agent_skills_index.path, "claim");
-  }
+  // Not served (so not probed) without a digest to list: src/served.ts.
+  if (skillsIndexServed(config)) claim(config.agent_skills_index.path, "claim");
   // Namespace probe - verifies origin does not serve anything under /_webmcp/.
   claim(`${config.paths.namespace}/__probe`, "claim");
   return out;
 }
-
-const MARKER_LLMS = "<!-- cf-webmcp:begin -->";
-const MARKER_ROBOTS = "# cf-webmcp:begin";
 
 /**
  * Request headers for every preflight probe: a User-Agent naming cf-webmcp's package version
  * (the Worker's own is cf-webmcp/<version>), plus the token pair when a token is set.
  */
 function originHeaders(deployToken: string | undefined, version: string): Record<string, string> {
-  const headers: Record<string, string> = { "user-agent": `cf-webmcp-preflight/${version}` };
+  const headers: Record<string, string> = { "user-agent": preflightUserAgent(version) };
   if (deployToken) {
     headers["cf-webmcp-bypass"] = "1";
     headers["cf-webmcp-deploy-token"] = deployToken;
@@ -325,21 +371,35 @@ async function probe(check: PathCheck, deployToken: string | undefined, version:
         reason: `expected an application/json ARD document for merge, got ${ct || "(unknown)"}`,
       };
     }
-    if (check.expect === "merge") {
-      // For mergeable paths: 200 text is a merge, anything else is a collision.
-      if (res.status === 200 && /^text\/(plain|markdown)/i.test(ct)) {
+    if (check.expect === "merge_linkset") {
+      // The Worker's own rule (src/routes/api-catalog.ts): a 200 declared as a linkset (or as JSON, or
+      // with no content type) is merged into when it parses as one, and replaced by the generated
+      // catalog when it does not; any other answer is relayed, so our entry never appears.
+      if (res.status === 200 && isLinksetContentType(ct)) {
         const bytes = await readForMerge(res);
-        if (bytes === "too_large") return { kind: "too_large", status: 200, contentType: ct, what: "file" };
-        const body = new TextDecoder().decode(bytes);
-        // Markdown markers used by both llms.txt and agents.md; hash markers for robots.txt.
-        const marker = check.label.endsWith("robots.txt") ? MARKER_ROBOTS : MARKER_LLMS;
-        return { kind: "merge", status: 200, contentType: ct, hasMarker: body.includes(marker) };
+        if (bytes === "too_large") return { kind: "too_large", status: 200, contentType: ct, what: "document" };
+        return { kind: "merge_linkset", status: 200, contentType: ct, valid: parseLinkset(new TextDecoder().decode(bytes)) !== null };
       }
       return {
         kind: "collision",
         status: res.status,
         contentType: ct,
-        reason: `expected text/plain or text/markdown for merge, got ${ct || "(unknown)"}`,
+        reason: `expected a linkset (application/linkset+json or application/json) for merge, got ${ct || "(unknown)"}`,
+      };
+    }
+    if (check.expect === "merge" && check.text) {
+      // For mergeable paths: a 200 of a type the Worker merges into is a merge, anything else is a collision.
+      if (res.status === 200 && check.text.accepts(ct)) {
+        const bytes = await readForMerge(res);
+        if (bytes === "too_large") return { kind: "too_large", status: 200, contentType: ct, what: "file" };
+        const body = new TextDecoder().decode(bytes);
+        return { kind: "merge", status: 200, contentType: ct, hasMarker: body.includes(check.text.marker) };
+      }
+      return {
+        kind: "collision",
+        status: res.status,
+        contentType: ct,
+        reason: `expected ${check.text.accepted} for merge, got ${ct || "(unknown)"}`,
       };
     }
     // For claim paths: anything 200 is a collision.
@@ -470,6 +530,8 @@ function formatRow(check: PathCheck, outcome: Outcome): string {
       return `  ${label} 200 ${outcome.contentType.padEnd(28)} → merge (marker ${outcome.hasMarker ? "present, will replace" : "absent, will append"})`;
     case "merge_json":
       return `  ${label} 200 ${outcome.contentType.padEnd(28)} → ${outcome.valid ? "merge (ARD manifest, our entry is added unless origin lists its identifier or url)" : "merge refused (not an ARD manifest, relayed unchanged)"}`;
+    case "merge_linkset":
+      return `  ${label} 200 ${outcome.contentType.padEnd(28)} → ${outcome.valid ? "merge (linkset, our entry is added)" : "WARNING (not an RFC 9264 linkset, the Worker serves the generated catalog instead)"}`;
     case "fallback":
       return `  ${label} ${String(outcome.status).padEnd(3)} ${outcome.contentType.padEnd(28)} → WARNING (the Worker serves the generated document)`;
     case "too_large":
@@ -542,6 +604,11 @@ export async function runPreflight(configPath: string, force: boolean, opts: Pre
       warnings.push(
         `${check.label}: origin's JSON is not an ARD manifest (an object with an entries array of objects with a string identifier); ` +
           `the Worker relays it unchanged and adds no entry`,
+      );
+    } else if (outcome.kind === "merge_linkset" && !outcome.valid) {
+      warnings.push(
+        `${check.label}: origin's JSON is not an RFC 9264 linkset (an object with a linkset array of objects with a string anchor); ` +
+          `the Worker serves its generated catalog instead of it`,
       );
     } else if (outcome.kind === "too_large") {
       warnings.push(

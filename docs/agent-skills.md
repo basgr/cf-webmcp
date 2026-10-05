@@ -134,6 +134,8 @@ When the skill is enabled (`features.agent_skills = true` and mode not `passthro
 
 ## Discovery via `/.well-known/agent-skills/index.json`
 
+The index is served, and advertised in the manifest's `links.agent_skills_index`, only when it can be true: `[features].agent_skills_index` on, `[features].agent_skills` on, and `[agent_skills].mode` one whose body the build can hash, `synthesize` or `replace`. The digest it lists is a SHA-256 over the exact SKILL.md bytes the Worker serves. With `agent_skills` off the SKILL.md is not served, so an index would list a document that answers 404. In `merge` mode the served body holds origin's file, and in `passthrough` the SKILL.md is origin's: the build cannot compute a digest over either, so the index is treated like it is off. In each of those cases the build warns, the manifest has no `links.agent_skills_index`, the route is not claimed (an `index.json` at origin is served as origin's own) and preflight does not probe it. Set `[features].agent_skills_index = false` to silence the warning.
+
 cf-webmcp also publishes a [Cloudflare Agent Skills Discovery RFC](https://github.com/cloudflare/agent-skills-discovery-rfc) index file (v0.2.0 draft) listing the SKILL.md with a SHA-256 digest. Agent runtimes that scan well-known paths for an index find your skill there, verify its integrity, then fetch the SKILL.md.
 
 Default emitted shape:

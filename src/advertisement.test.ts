@@ -18,7 +18,6 @@ import { configLinkOptions, injectIntoHtml } from "./injection/html-rewriter";
 import { llmsTxtResponse } from "./routes/llms-txt";
 import { agentsMdResponse } from "./routes/agents-md";
 import { agentSkillsResponse, buildFrontmatter, buildSkillBody } from "./routes/agent-skills";
-import { apiCatalogResponse } from "./routes/api-catalog";
 import { makeConfig, makeDeps, type ConfigOverrides } from "./test-support/config";
 
 const notFound = async () => new Response("not found", { status: 404 });
@@ -72,7 +71,8 @@ describe("features.manifest = false removes every rel=webmcp advertisement", () 
 
     const off = buildLinkHeader(makeConfig(MANIFEST_OFF));
     expect(off).not.toContain("webmcp");
-    expect(off).toContain('rel="api-catalog"');
+    // The API catalog's only entry of ours is the link to the manifest, so it goes too (served.test.ts).
+    expect(off).not.toContain('rel="api-catalog"');
     expect(off).toContain('rel="agent-skills"');
     expect(off).toContain('rel="describedby"');
   });
@@ -108,7 +108,8 @@ describe("features.manifest = false removes every rel=webmcp advertisement", () 
       forms: [],
     }).text();
     expect(out).not.toContain('rel="webmcp"');
-    expect(out).toContain('<link rel="api-catalog"');
+    expect(out).not.toContain('rel="api-catalog"');
+    expect(out).toContain('<link rel="agent-skills"');
     expect(out).toContain("/_webmcp/bootstrap.x.js");
   });
 
@@ -156,43 +157,6 @@ describe("features.manifest = false removes every rel=webmcp advertisement", () 
     expect(off).not.toContain("Full machine-readable tool schema");
     expect(off).not.toContain(".well-known/webmcp");
     expect(off).toContain("search_pages");
-  });
-
-  it("the synthesized API catalog has no webmcp entry: an empty linkset", async () => {
-    const config = makeConfig({ ...MANIFEST_OFF, api_catalog: { mode: "synthesize" } });
-    const res = await apiCatalogResponse(new Request("https://example.com/.well-known/api-catalog"), config, notFound);
-    expect(res.status).toBe(200);
-    expect(res.headers.get("x-robots-tag")).toBe("noindex");
-    expect(JSON.parse(await res.text())).toEqual({ linkset: [] });
-
-    const on = await apiCatalogResponse(
-      new Request("https://example.com/.well-known/api-catalog"),
-      makeConfig({ api_catalog: { mode: "synthesize" } }),
-      notFound,
-    );
-    expect(JSON.parse(await on.text())).toEqual({
-      linkset: [{ anchor: "https://example.com/", webmcp: [{ href: MANIFEST_URL, type: "application/json" }] }],
-    });
-  });
-
-  it("the merged API catalog keeps origin's entries and adds no webmcp entry (404 and a linkset)", async () => {
-    const config = makeConfig({ ...MANIFEST_OFF, api_catalog: { mode: "merge" } });
-    const request = new Request("https://example.com/.well-known/api-catalog");
-
-    const fresh = await apiCatalogResponse(request, config, notFound);
-    expect(JSON.parse(await fresh.text())).toEqual({ linkset: [] });
-
-    const origin = {
-      linkset: [{ anchor: "https://example.com/api", "service-doc": [{ href: "https://example.com/docs" }] }],
-    };
-    const merged = await apiCatalogResponse(
-      request,
-      config,
-      async () => new Response(JSON.stringify(origin), { status: 200, headers: { "content-type": "application/linkset+json" } }),
-    );
-    const text = await merged.text();
-    expect(JSON.parse(text)).toEqual(origin);
-    expect(text).not.toContain("webmcp");
   });
 });
 
@@ -357,9 +321,11 @@ describe("through the handler", () => {
     const body = await res.text();
 
     expect(body).not.toContain('rel="webmcp"');
-    expect(body).toContain('<link rel="api-catalog"');
+    expect(body).not.toContain('rel="api-catalog"');
+    expect(body).toContain('<link rel="agent-skills"');
     expect(res.headers.get("link")).not.toContain("webmcp");
-    expect(res.headers.get("link")).toContain('rel="api-catalog"');
+    expect(res.headers.get("link")).not.toContain("api-catalog");
+    expect(res.headers.get("link")).toContain('rel="agent-skills"');
   });
 
   it("with nothing left to advertise there is no Link header, and origin's own is left exactly as it was", async () => {

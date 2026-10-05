@@ -17,6 +17,7 @@
 import type { Config } from "../config-types";
 import { buildCacheControl } from "../cache";
 import { applyRobotsTagRule } from "../robots-tag";
+import { apiCatalogServed } from "../served";
 import { ORIGIN_FAILURE_CACHE_CONTROL, readTextCapped } from "./read-capped";
 
 const BEGIN = "<!-- cf-webmcp:begin -->";
@@ -136,7 +137,7 @@ function buildBlock(config: Config, tokenHints: LlmsTxtTokenHints | undefined, w
   if (config.features.agents_md && config.agents_md.mode !== "passthrough") {
     lines.push(`- Agent instructions: [${agentsMd}](${agentsMd})`);
   }
-  if (config.features.api_catalog && config.api_catalog.mode !== "passthrough") {
+  if (apiCatalogServed(config)) {
     lines.push(`- API catalog (RFC 9727): [${apiCatalog}](${apiCatalog})`);
   }
   if (config.features.ai_catalog && config.ai_catalog.mode !== "passthrough") {
@@ -150,7 +151,11 @@ function buildBlock(config: Config, tokenHints: LlmsTxtTokenHints | undefined, w
   return lines.join("\n");
 }
 
-function isTextish(ct: string | null): boolean {
+/**
+ * The content types the llms.txt route merges into: preflight judges origin's file with this
+ * very test (a 200 without a Content-Type counts).
+ */
+export function isTextish(ct: string | null): boolean {
   if (!ct) return true;
   return /^text\/(plain|markdown)/i.test(ct);
 }

@@ -206,6 +206,8 @@ describe("runHttpJson", () => {
 
 describe("runHttpJson: POST", () => {
   const post = { url_template: "https://example.com/wp-json/contact/v1/send", method: "POST" as const };
+  /** What the tool declares: the body is built from these properties only. */
+  const declares = (...names: string[]) => ({ properties: Object.fromEntries(names.map((n) => [n, { type: "string" }])) });
 
   /** One stubbed fetch that records every request it receives. */
   function recordFetch(answer: () => Response = () => new Response('{"sent":true}', { status: 200, headers: { "content-type": "application/json" } })) {
@@ -225,10 +227,11 @@ describe("runHttpJson: POST", () => {
     return calls;
   }
 
-  it("sends the validated input as a JSON body with content-type application/json", async () => {
+  it("sends the declared properties of the input as a JSON body with content-type application/json, values intact", async () => {
     const calls = recordFetch();
+    const input = { email: "a@example.com", topics: ["x", "y"], count: 3, live: false };
 
-    const r = await runHttpJson(ctx, post, { email: "a@example.com", topics: ["x", "y"], count: 3 });
+    const r = await runHttpJson(ctx, post, input, declares("email", "topics", "count", "live"));
 
     if (!r.ok) throw new Error(JSON.stringify(r));
     expect(r.data).toEqual({ sent: true });
@@ -237,31 +240,73 @@ describe("runHttpJson: POST", () => {
     expect(calls[0]!.url).toBe("https://example.com/wp-json/contact/v1/send");
     expect(calls[0]!.headers["content-type"]).toBe("application/json");
     expect(calls[0]!.headers["accept"]).toBe("application/json, */*");
-    expect(JSON.parse(calls[0]!.body as string)).toEqual({ email: "a@example.com", topics: ["x", "y"], count: 3 });
+    expect(JSON.parse(calls[0]!.body as string)).toEqual(input);
   });
 
-  it("sends an empty object, not an empty body, when the input has no fields", async () => {
+  it("does not send a property the tool did not declare (no mass assignment against origin's API)", async () => {
     const calls = recordFetch();
 
-    await runHttpJson(ctx, post, {});
+    await runHttpJson(ctx, post, { q: "abc", role: "admin", is_admin: true, extra: { deep: 1 } }, declares("q"));
 
-    expect(calls[0]!.body).toBe("{}");
+    expect(calls[0]!.body).toBe('{"q":"abc"}');
+  });
+
+  it("does not send a __proto__ key, nor constructor or toString, whatever it holds", async () => {
+    const calls = recordFetch();
+    // The exec route parses the request body with JSON.parse, which makes "__proto__" an own property.
+    const input = JSON.parse('{"q":"abc","__proto__":{"isAdmin":true},"constructor":{"x":1},"toString":"t"}') as Record<string, unknown>;
+    expect(Object.keys(input)).toContain("__proto__");
+
+    await runHttpJson(ctx, post, input, declares("q"));
+
+    expect(calls[0]!.body).toBe('{"q":"abc"}');
+    expect(String(calls[0]!.body)).not.toMatch(/isAdmin|__proto__|constructor|toString/);
+  });
+
+  it("sends a declared property that shares its name with an inherited one, as an own value only", async () => {
+    const calls = recordFetch();
+    const input = JSON.parse('{"constructor":"c"}') as Record<string, unknown>;
+
+    await runHttpJson(ctx, post, input, declares("constructor"));
+    await runHttpJson(ctx, post, {}, declares("constructor"));
+
+    expect(calls[0]!.body).toBe('{"constructor":"c"}');
+    // Absent from the input: absent from the body (the inherited constructor is not read).
+    expect(calls[1]!.body).toBe("{}");
+  });
+
+  it("omits a declared property the caller did not send", async () => {
+    const calls = recordFetch();
+
+    await runHttpJson(ctx, post, { a: "1" }, declares("a", "b"));
+
+    expect(calls[0]!.body).toBe('{"a":"1"}');
+  });
+
+  it("sends an empty object, not an empty body, when the tool declares no properties, whatever the caller sent", async () => {
+    const calls = recordFetch();
+
+    await runHttpJson(ctx, post, {}, { properties: {} });
+    await runHttpJson(ctx, post, { sneaky: 1 }, { properties: {} });
+    await runHttpJson(ctx, post, { sneaky: 1 }, {});
+
+    expect(calls.map((c) => c.body)).toEqual(["{}", "{}", "{}"]);
     expect(calls[0]!.headers["content-type"]).toBe("application/json");
   });
 
-  it("resolves the URL from the input and also sends that input in the body", async () => {
+  it("resolves the URL from the whole input, and sends only the declared part of it in the body", async () => {
     const calls = recordFetch();
 
-    await runHttpJson(ctx, { ...post, url_template: "https://example.com/api/{{kind}}" }, { kind: "news", n: 2 });
+    await runHttpJson(ctx, { ...post, url_template: "https://example.com/api/{{kind}}" }, { kind: "news", n: "2" }, declares("n"));
 
     expect(calls[0]!.url).toBe("https://example.com/api/news");
-    expect(JSON.parse(calls[0]!.body as string)).toEqual({ kind: "news", n: 2 });
+    expect(JSON.parse(calls[0]!.body as string)).toEqual({ n: "2" });
   });
 
   it("still applies the allow-list: no request, no body, for a template that leaves allowed_origins", async () => {
     const calls = recordFetch();
 
-    const r = await runHttpJson(ctx, { ...post, url_template: "https://other.example.com/x" }, { a: 1 });
+    const r = await runHttpJson(ctx, { ...post, url_template: "https://other.example.com/x" }, { a: 1 }, declares("a"));
 
     if (r.ok) throw new Error("expected error");
     expect(r.error.code).toBe("invalid_input");
@@ -271,7 +316,7 @@ describe("runHttpJson: POST", () => {
   it("a GET sends no body and no content-type", async () => {
     const calls = recordFetch();
 
-    await runHttpJson(ctx, { url_template: "https://example.com/x", method: "GET" }, { a: 1 });
+    await runHttpJson(ctx, { url_template: "https://example.com/x", method: "GET" }, { a: 1 }, declares("a"));
 
     expect(calls[0]!.method).toBe("GET");
     expect(calls[0]!.body).toBeUndefined();
@@ -291,7 +336,7 @@ describe("runHttpJson: POST", () => {
         }),
       );
 
-      const r = await runHttpJson(ctx, post, { a: 1 });
+      const r = await runHttpJson(ctx, post, { a: 1, hidden: 2 }, declares("a"));
 
       expect(r.ok, String(status)).toBe(true);
       expect(calls).toEqual([
@@ -313,7 +358,7 @@ describe("runHttpJson: POST", () => {
       }),
     );
 
-    await runHttpJson(ctx, post, { a: 1 });
+    await runHttpJson(ctx, post, { a: 1 }, declares("a"));
 
     expect(calls[1]).toEqual({ method: "GET", body: undefined, contentType: undefined });
   });

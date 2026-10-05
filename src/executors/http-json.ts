@@ -11,16 +11,20 @@
  *
  * method:
  *   - "GET"  : no body.
- *   - "POST" : the validated tool input goes to origin as the JSON body (content-type
- *              application/json), whole: `{}` for a tool without input. The URL is resolved
- *              from the same input. A 307 or 308 replays the body; a 301, 302 or 303 turns
- *              the follow-up into a bodyless GET (src/safe-fetch.ts). The exec route does not
- *              cache a POST tool unless [tools.cache] sets a positive s_maxage (src/routes/exec.ts).
+ *   - "POST" : the properties of the validated tool input that the tool's input_schema declares
+ *              go to origin as the JSON body (content-type application/json): `{}` for a tool
+ *              that declares none. Anything else the caller sent (validation tolerates unknown
+ *              properties) stays out of the body, a `__proto__` entry included. The URL is
+ *              resolved from the whole input. A 307 or 308 replays the body; a 301, 302 or 303
+ *              turns the follow-up into a bodyless GET (src/safe-fetch.ts). The exec route does
+ *              not cache a POST tool unless [tools.cache] sets a positive s_maxage
+ *              (src/routes/exec.ts).
  */
 
 import type { ExecutorContext } from "./common";
 import { fromErr, mapOriginStatus, originFetch, readFailure, readWithLimit, resolveUrl } from "./common";
 import { err, ok, type Envelope } from "../envelope";
+import { declaredProperties, type DeclaredProperties } from "../validate";
 
 /** Largest JSON body we will read and parse. */
 export const MAX_JSON_BYTES = 2 * 1024 * 1024;
@@ -38,6 +42,8 @@ export async function runHttpJson(
   ctx: ExecutorContext,
   config: HttpJsonConfig,
   input: Record<string, unknown>,
+  /** The tool's input_schema: the POST body is built from the properties it declares. Without one, the body is `{}`. */
+  schema: DeclaredProperties = {},
 ): Promise<Envelope> {
   const resolved = resolveUrl(ctx, { urlTemplate: config.url_template, input });
   if (!resolved.ok) return err(resolved.error.code, resolved.error.message, resolved.error.retriable);
@@ -45,7 +51,9 @@ export async function runHttpJson(
   const res = await originFetch(ctx, resolved.url, {
     method: config.method,
     acceptHeader: "application/json, */*",
-    ...(config.method === "POST" ? { body: JSON.stringify(input), contentType: "application/json" } : {}),
+    ...(config.method === "POST"
+      ? { body: JSON.stringify(declaredProperties(schema, input)), contentType: "application/json" }
+      : {}),
   });
   if ("error" in res) return fromErr(res.error);
   const mapped = mapOriginStatus(res.status);

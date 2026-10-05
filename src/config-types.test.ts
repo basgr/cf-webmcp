@@ -496,3 +496,67 @@ describe("[origin_trial] block", () => {
     expect(ConfigSchema.safeParse({ ...minimal, origin_trial: { tokens: [42] } }).success).toBe(false);
   });
 });
+
+describe("input_schema enum", () => {
+  const withProperty = (property: Record<string, unknown>) => ({
+    ...minimal,
+    tools: [{ ...minimal.tools[0]!, input_schema: { type: "object", required: [], properties: { p: property } } }],
+  });
+  const messages = (property: Record<string, unknown>): string[] => {
+    const r = ConfigSchema.safeParse(withProperty(property));
+    return r.success ? [] : r.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`);
+  };
+
+  it.each([
+    ["string", ["a", "b"]],
+    ["integer", [1, 2, 50]],
+    ["number", [0.5, 1, 1.5]],
+    ["boolean", [true]],
+    ["boolean", [true, false]],
+  ])("accepts an enum of the declared type (%s %j)", (type, values) => {
+    expect(messages({ type, enum: values })).toEqual([]);
+  });
+
+  it.each([
+    ["integer", ["1"], '"1"'],
+    ["integer", [1, 1.5], "1.5"],
+    ["integer", [true], "true"],
+    ["number", ["x"], '"x"'],
+    ["number", [1, "2"], '"2"'],
+    ["boolean", ["true"], '"true"'],
+    ["boolean", [1], "1"],
+    ["string", [1], "1"],
+    ["string", ["a", true], "true"],
+  ])("rejects an enum whose values do not match the declared type (%s %j)", (type, values, offender) => {
+    const found = messages({ type, enum: values });
+    expect(found).toHaveLength(1);
+    expect(found[0]).toMatch(/^tools\.0\.input_schema\.properties\.p\.enum\.\d+: /);
+    expect(found[0]).toContain(`type "${type}"`);
+    expect(found[0]).toContain(offender);
+  });
+
+  it("names every value that does not fit, not only the first", () => {
+    const found = messages({ type: "integer", enum: ["a", 2, "c"] });
+    expect(found).toHaveLength(2);
+  });
+
+  it("rejects an enum on an array property: its entries are what the enum belongs on (items)", () => {
+    const found = messages({ type: "array", enum: ["a"], items: { type: "string" } });
+    expect(found).toHaveLength(1);
+    expect(found[0]).toMatch(/^tools\.0\.input_schema\.properties\.p\.enum: /);
+    expect(found[0]).toContain("array");
+    expect(found[0]).toContain("items");
+  });
+
+  it("accepts the enum on the items of an array, and checks it against the type of the items", () => {
+    expect(messages({ type: "array", items: { type: "integer", enum: [1, 2] } })).toEqual([]);
+    const found = messages({ type: "array", items: { type: "integer", enum: ["1"] } });
+    expect(found).toHaveLength(1);
+    expect(found[0]).toMatch(/properties\.p\.items\.enum\.0: /);
+  });
+
+  it("leaves a property without an enum alone", () => {
+    expect(messages({ type: "integer", minimum: 1 })).toEqual([]);
+    expect(messages({ type: "array", items: { type: "string" } })).toEqual([]);
+  });
+});

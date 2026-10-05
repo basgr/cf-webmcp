@@ -259,7 +259,11 @@ function yamlString(s: string): string {
   return `"${escaped}"`;
 }
 
-function isMarkdownish(ct: string | null): boolean {
+/**
+ * The content types the SKILL.md route merges into: preflight judges origin's file with this
+ * very test (a 200 without a Content-Type counts).
+ */
+export function isMarkdownish(ct: string | null): boolean {
   if (!ct) return true;
   return /^text\/(plain|markdown|x-markdown)/i.test(ct);
 }

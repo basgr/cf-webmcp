@@ -30,6 +30,29 @@ function hasOwn(obj: object, key: string): boolean {
   return Object.prototype.hasOwnProperty.call(obj, key);
 }
 
+/** What declaredProperties needs of an input schema. */
+export interface DeclaredProperties {
+  properties?: Record<string, unknown>;
+}
+
+/**
+ * The properties of a validated input that the tool's schema declares, in a fresh object: own
+ * entries of `input` whose name is an own key of `schema.properties`. validateInput tolerates
+ * unknown properties (the URL template may read them), so this is what may leave the Worker
+ * as a body: an undeclared property, and a `__proto__`, `constructor` or `toString` entry, never
+ * does. Such a name cannot be declared (the build refuses it), and `__proto__` is skipped here
+ * too, so it cannot become the prototype of the result.
+ */
+export function declaredProperties(schema: DeclaredProperties, input: Record<string, unknown>): Record<string, unknown> {
+  const declared = schema.properties ?? {};
+  const out: Record<string, unknown> = {};
+  for (const key of Object.keys(input)) {
+    if (key === "__proto__" || !hasOwn(declared, key)) continue;
+    out[key] = input[key];
+  }
+  return out;
+}
+
 export function validateInput(schema: InputSchemaConfig, raw: unknown): ValidationResult {
   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
     return { ok: false, message: "input must be an object" };
@@ -121,7 +144,8 @@ function validateProperty(
   // enum holds for every scalar type, after the type (and range) checks: the value must be
   // one of the listed values by strict equality, so "20" is not 20 and "true" is not true.
   // An array is not a scalar and matches no listed value; the enum of its entries sits on
-  // `items`, checked in the recursive call above.
+  // `items`, checked in the recursive call above. (The build refuses an enum on an array
+  // property, and one whose values do not fit the declared type: src/config-types.ts.)
   if (s.type !== "array" && s.enum && !s.enum.includes(value as string | number | boolean)) {
     return { ok: false, message: `"${key}" must be one of ${s.enum.join(", ")}` };
   }

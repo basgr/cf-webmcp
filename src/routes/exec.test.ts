@@ -400,6 +400,50 @@ describe("exec: the cache replays results, never another caller's CORS headers",
   });
 });
 
+describe("exec: X-Webmcp-Cache is readable by a cross-origin caller", () => {
+  const expose = (res: Response) =>
+    (res.headers.get("access-control-expose-headers") ?? "").split(",").map((v) => v.trim().toLowerCase()).filter((v) => v !== "");
+
+  it("is listed in Access-Control-Expose-Headers on a miss and on a hit, for a listed origin", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => sitemapOk()));
+    const configHash = freshConfigHash();
+
+    const miss = await runAndSettle(fromOrigin(APP_A), configHash);
+    const hit = await runAndSettle(fromOrigin(APP_B), configHash);
+
+    expect(miss.headers.get("x-webmcp-cache")).toBe("MISS");
+    expect(hit.headers.get("x-webmcp-cache")).toBe("HIT");
+    expect(expose(miss)).toContain("x-webmcp-cache");
+    expect(expose(hit)).toContain("x-webmcp-cache");
+  });
+
+  it("is listed on every answer that carries CORS, the errors included", async () => {
+    expect(expose(await run(fromOrigin(APP_A, "{"), CORS))).toContain("x-webmcp-cache");
+    expect(expose(await run(fromOrigin(APP_A), CORS, {}, "no_such_tool"))).toContain("x-webmcp-cache");
+  });
+
+  it("is not sent to an origin that is not listed, to a request without Origin, or when no origin is allowed", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => sitemapOk()));
+    const configHash = freshConfigHash();
+
+    expect(expose(await runAndSettle(fromOrigin("https://evil.example"), configHash))).toEqual([]);
+    expect(expose(await runAndSettle(fromOrigin(null), configHash))).toEqual([]);
+    expect(expose(await runAndSettle(fromOrigin(APP_A), configHash, {}))).toEqual([]);
+  });
+
+  it("is not stored in the cache with the result", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => sitemapOk()));
+    const configHash = freshConfigHash();
+
+    await runAndSettle(fromOrigin(APP_A), configHash);
+
+    const stored = await caches.default.match(
+      await makeCacheKey("example.com", { version: VERSION, configHash }, { toolName: "search_pages", bodyText: "{}" }),
+    );
+    expect(stored!.headers.has("access-control-expose-headers")).toBe(false);
+  });
+});
+
 describe("exec: every answer carries CORS for a listed origin", () => {
   const cases: Array<[string, () => Promise<Response>]> = [
     ["405 for a GET", () => run(new Request("https://example.com/_webmcp/exec/search_pages", { headers: { origin: APP_A } }), CORS)],
@@ -489,14 +533,58 @@ describe("exec: a POST http_json tool is not cached unless its [tools.cache] ask
   const storedFor = async (configHash: string) =>
     caches.default.match(await makeCacheKey("example.com", { version: VERSION, configHash }, { toolName: "search_pages", bodyText: "{}" }));
 
-  it("sends the request body to origin as the POST body", async () => {
+  const declaring = (...names: string[]): ConfigOverrides => ({
+    tools: [
+      {
+        name: "search_pages",
+        description: "d",
+        input_schema: {
+          type: "object",
+          required: [],
+          properties: Object.fromEntries(names.map((n) => [n, { type: n === "n" ? "integer" : "string" }])),
+        },
+        executor: { type: "http_json", url_template: SEND_URL, method: "POST" },
+      },
+    ],
+  });
+
+  it("sends the declared properties of the request body to origin as the POST body", async () => {
     const calls = originAnswering();
     const body = '{"email":"a@example.com","n":2}';
 
-    const res = await runAndSettle(fromOrigin(null, body), freshConfigHash(), postTool());
+    const res = await runAndSettle(fromOrigin(null, body), freshConfigHash(), declaring("email", "n"));
 
     expect(res.status).toBe(200);
     expect(calls).toEqual([{ method: "POST", body }]);
+  });
+
+  it("sends nothing the tool did not declare, a __proto__ key included, and nothing at all from a tool that declares nothing", async () => {
+    const calls = originAnswering();
+    const attack = '{"q":"abc","role":"admin","__proto__":{"isAdmin":true},"constructor":{"prototype":{"x":1}}}';
+
+    await runAndSettle(fromOrigin(null, attack), freshConfigHash(), declaring("q"));
+    await runAndSettle(fromOrigin(null, attack), freshConfigHash(), postTool());
+
+    expect(calls).toEqual([
+      { method: "POST", body: '{"q":"abc"}' },
+      { method: "POST", body: "{}" },
+    ]);
+  });
+
+  it("still keys the cache on the raw request body: a request that differs only in an undeclared key is its own entry, and reaches origin with the same declared body", async () => {
+    const calls = originAnswering();
+    const configHash = freshConfigHash();
+    const cache = { s_maxage: 60 };
+    const overrides = (): ConfigOverrides => ({
+      tools: [{ ...declaring("q").tools![0]!, cache }] as ConfigOverrides["tools"],
+    });
+
+    await runAndSettle(fromOrigin(null, '{"q":"a"}'), configHash, overrides());
+    await runAndSettle(fromOrigin(null, '{"q":"a","x":1}'), configHash, overrides());
+
+    // The cache key is the raw request body, as before; what origin gets is the declared part.
+    expect(calls).toHaveLength(2);
+    expect(calls.every((c) => c.body === '{"q":"a"}')).toBe(true);
   });
 
   it("by default neither reads nor writes the cache: every call reaches origin", async () => {

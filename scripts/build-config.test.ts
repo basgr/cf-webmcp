@@ -998,14 +998,16 @@ describe("INJECTION_HASH", () => {
 
   /**
    * The value imports of a module source, read the way the INJECTION_HASH guard reads them.
-   * `lines` counts every `import` line that is not `import type` (named, default, namespace,
-   * side-effect, either quote); `parsedLines` and `names` are what the named-import pattern
+   * `lines` counts every static `import` that is not `import type` (named, default, namespace,
+   * side-effect, either quote, any indentation) and every dynamic `import(`; `parsedLines` and
+   * `names` are what the named-import pattern
    * made of them. A form the pattern cannot read shows as lines > parsedLines, so it fails
    * loudly instead of being skipped. `import type` brings nothing into the injected HTML.
    */
   function valueImports(source: string): { lines: number; parsedLines: number; names: string[] } {
-    const lines = (source.match(/^import\s+(?!type\b)/gm) ?? []).length;
-    const named = [...source.matchAll(/^import\s+(?!type\b)\{([^}]*)\}\s+from\s+(["'])[^"'\r\n]+\2/gm)];
+    // Static imports at any indentation, and dynamic import() anywhere: every way to bring a value in.
+    const lines = (source.match(/^[ \t]*import\s+(?!type\b)/gm) ?? []).length + (source.match(/\bimport\s*\(/g) ?? []).length;
+    const named = [...source.matchAll(/^[ \t]*import\s+(?!type\b)\{([^}]*)\}\s+from\s+(["'])[^"'\r\n]+\2/gm)];
     const names = named
       .flatMap((m) => m[1]!.split(","))
       .map((name) => name.trim())
@@ -1046,6 +1048,11 @@ describe("INJECTION_HASH", () => {
       ["a default import next to a named one", 'import ard, { ARD_PATH } from "../ard";'],
       ["a namespace import in single quotes", "import * as ard from '../ard';"],
       ["a side-effect import", 'import "../polyfill";'],
+      ["an indented default import", '  import ard from "../ard";'],
+      ["a tab-indented namespace import", '\timport * as ard from "../ard";'],
+      ["a dynamic import with a string", 'const ard = await import("../ard");'],
+      ["a dynamic import with a space before the parenthesis", "const ard = await import ('../ard');"],
+      ["a dynamic import in an expression", 'void import(`../${"ard"}`);'],
     ])("notices %s, which the named-import pattern cannot read", async (_label, line) => {
       const found = valueImports(await withImports(line));
       expect(found.lines).toBeGreaterThan(found.parsedLines);
@@ -1056,6 +1063,19 @@ describe("INJECTION_HASH", () => {
       expect(found.parsedLines).toBe(found.lines);
       expect(found.names.sort()).toEqual(["ARD_PATH", "ARD_REL"]);
       expect(found.names.sort()).not.toEqual(Object.keys(REWRITER_IMPORTS).sort());
+    });
+
+    it("reads an indented named import, so its name is compared with REWRITER_IMPORTS", async () => {
+      const found = valueImports(await withImports('  import { ARD_PATH } from "../ard";'));
+      expect(found.parsedLines).toBe(found.lines);
+      expect(found.names.sort()).toEqual(["ARD_PATH", "ARD_REL"]);
+    });
+
+    it("leaves `import.meta`, a name that merely starts with import, and an indented `import type` alone", async () => {
+      const base = valueImports(await rewriterSource());
+      const copy = valueImports(await withImports("const here = import.meta.url;", "const importer = 1;", "  import type { X } from '../x';"));
+      expect(copy.lines).toBe(base.lines);
+      expect(copy.parsedLines).toBe(base.parsedLines);
     });
 
     it("reads a multi-line named import and a renamed one", async () => {
@@ -2353,7 +2373,7 @@ ${cache}`;
   it.each([
     ["max_age alone", CACHE("max_age = 60")],
     ["swr alone", CACHE("swr = 60")],
-    ["s_maxage = 0", CACHE("s_maxage = 0")],
+    ["an empty table", CACHE()],
   ])("warns that it does not cache the tool (%s)", async (_label, cache) => {
     vi.spyOn(console, "warn").mockImplementation(() => {});
     await runBuild(await writeToml("pc-warn.toml", POST(cache)));
@@ -2367,6 +2387,9 @@ ${cache}`;
     ["no [tools.cache]", ""],
     ["a positive s_maxage", CACHE("s_maxage = 60")],
     ["a positive s_maxage next to max_age", CACHE("max_age = 10", "s_maxage = 60")],
+    // s_maxage = 0 is the publisher's way to say "never cache": it is understood, not ignored.
+    ["an explicit s_maxage = 0", CACHE("s_maxage = 0")],
+    ["an explicit s_maxage = 0 next to max_age and swr", CACHE("max_age = 60", "swr = 5", "s_maxage = 0")],
   ])("does not warn for %s", async (_label, cache) => {
     vi.spyOn(console, "warn").mockImplementation(() => {});
     await runBuild(await writeToml("pc-quiet.toml", POST(cache)));
@@ -2612,13 +2635,24 @@ describe("advertisements follow the features and the widget", () => {
     });
   });
 
-  it("warns that the synthesized API catalog is empty when it is on and the manifest is off", async () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    await runBuild(await writeToml("adv-catalog-warn.toml", `${MINIMAL}\n[features]\nmanifest = false\n`));
-    const messages = warn.mock.calls.map((c) => String(c[0]));
-    expect(messages.filter((m) => /api_catalog/.test(m) && /manifest/.test(m))).toHaveLength(1);
-    expect(messages.join("\n")).toContain("empty");
-  });
+  it.each(["synthesize", "replace", "merge"])(
+    "warns that the API catalog is not served when it is on (%s) and the manifest is off, and says what that means",
+    async (mode) => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      await runBuild(
+        await writeToml("adv-catalog-warn.toml", `${MINIMAL}\n[features]\nmanifest = false\n\n[api_catalog]\nmode = "${mode}"\n`),
+      );
+      const messages = warn.mock.calls.map((c) => String(c[0])).filter((m) => /api_catalog/.test(m) && /manifest/.test(m));
+      expect(messages).toHaveLength(1);
+      const text = messages[0]!;
+      expect(text).toContain("RFC 9727");
+      expect(text).toContain("is not served");
+      expect(text).toMatch(/no route/);
+      expect(text).toMatch(/Link header/);
+      expect(text).toMatch(/llms\.txt/);
+      expect(text).toContain("/.well-known/api-catalog");
+    },
+  );
 
   it.each([
     ["the manifest is on", `${MINIMAL}\n`],
@@ -2628,6 +2662,180 @@ describe("advertisements follow the features and the widget", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     await runBuild(await writeToml("adv-catalog-quiet.toml", toml));
     expect(warn.mock.calls.map((c) => String(c[0])).filter((m) => /api_catalog/.test(m))).toEqual([]);
+  });
+});
+
+describe("the API catalog and the skills index are served, advertised and claimed only when they can be true", () => {
+  const manifestOf = (files: Record<string, string>) => JSON.parse(files["manifest.json"]!);
+  const digestOf = (files: Record<string, string>) => exportedConst(files["config.ts"]!, "AGENT_SKILLS_DIGEST");
+  const quiet = () => vi.spyOn(console, "warn").mockImplementation(() => {});
+  const warnings = () => (console.warn as unknown as { mock: { calls: unknown[][] } }).mock.calls.map((c) => String(c[0]));
+  const skills = (features: string, block = "") => `${MINIMAL}\n[features]\n${features}\n${block}`;
+
+  it("the manifest's links name the API catalog only with the manifest on", async () => {
+    expect(manifestOf((await runBuild(await writeToml("sv-api-on.toml", MINIMAL))).files).links.api_catalog).toBe(
+      "https://example.com/.well-known/api-catalog",
+    );
+    await fs.rm(path.join(tmpDir, "out"), { recursive: true });
+    quiet();
+    const off = await runBuild(await writeToml("sv-api-off.toml", `${MINIMAL}\n[features]\nmanifest = false\n`));
+    expect(manifestOf(off.files).links).not.toHaveProperty("api_catalog");
+  });
+
+  describe("the skills index digest and the manifest link", () => {
+    const cases: Array<[string, string, string, boolean]> = [
+      ["agent_skills in synthesize mode", "", "", true],
+      ["agent_skills in replace mode", "", '[agent_skills]\nmode = "replace"', true],
+      ["agent_skills off", "agent_skills = false", "", false],
+      ["agent_skills off and in replace mode", "agent_skills = false", '[agent_skills]\nmode = "replace"', false],
+      ["agent_skills in merge mode", "", '[agent_skills]\nmode = "merge"', false],
+      ["agent_skills in passthrough mode", "", '[agent_skills]\nmode = "passthrough"', false],
+      ["the index feature off", "agent_skills_index = false", "", false],
+      ["the index in passthrough mode", "", '[agent_skills_index]\nmode = "passthrough"', false],
+    ];
+    it.each(cases)("with %s", async (label, features, block, served) => {
+      quiet();
+      const { files } = await runBuild(await writeToml("sv-index.toml", skills(features, block)));
+      if (served) {
+        expect(digestOf(files), label).toMatch(/^sha256:[0-9a-f]{64}$/);
+        expect(manifestOf(files).links.agent_skills_index, label).toBe("https://example.com/.well-known/agent-skills/index.json");
+      } else {
+        expect(digestOf(files), label).toBeNull();
+        expect(manifestOf(files).links, label).not.toHaveProperty("agent_skills_index");
+      }
+    });
+  });
+
+  describe("a warning when the index is on and cannot be served", () => {
+    it.each([
+      ["agent_skills = false", "agent_skills = false", "", /agent_skills is off/],
+      ["agent_skills in merge mode", "", '[agent_skills]\nmode = "merge"', /merge mode/],
+      ["agent_skills in passthrough mode", "", '[agent_skills]\nmode = "passthrough"', /passthrough/],
+    ])("warns once for %s", async (_label, features, block, reason) => {
+      quiet();
+      await runBuild(await writeToml("sv-warn.toml", skills(features, block)));
+      const hits = warnings().filter((m) => m.includes("agent_skills_index"));
+      expect(hits).toHaveLength(1);
+      expect(hits[0]).toMatch(reason);
+      expect(hits[0]).toContain("is not served");
+      expect(hits[0]).toContain("/.well-known/agent-skills/index.json");
+      expect(hits[0]).toMatch(/left to origin/);
+    });
+
+    it.each([
+      ["the index is served", ""],
+      ["the index feature is off", "agent_skills = false\nagent_skills_index = false"],
+      ["the index is left to origin", "agent_skills = false"],
+    ])("is quiet when %s", async (label, features) => {
+      quiet();
+      const block = label === "the index is left to origin" ? '[agent_skills_index]\nmode = "passthrough"' : "";
+      await runBuild(await writeToml("sv-quiet.toml", skills(features, block)));
+      expect(warnings().filter((m) => m.includes("agent_skills_index"))).toEqual([]);
+    });
+  });
+
+  describe("path claims", () => {
+    // The landing sits at /mcp by default: a document that is served there collides, one that is not does not.
+    const at = (path: string, extra: string, block: string) => `${MINIMAL}\n[features]\n${extra}\n${block}\n`;
+
+    it("the skills index claims its path only when served", async () => {
+      quiet();
+      const index = (extra: string, mode = "") => at("/mcp", extra, `[agent_skills_index]\npath = "/mcp"\n${mode}`);
+      await expect(runBuild(await writeToml("sv-claim-a.toml", index("")))).rejects.toThrow(/path collision.*agent_skills_index.*\/mcp|path collision.*webmcp_landing.*\/mcp/);
+      await fs.rm(path.join(tmpDir, "out"), { recursive: true, force: true });
+      await expect(runBuild(await writeToml("sv-claim-b.toml", index("agent_skills = false")))).resolves.toBeDefined();
+    });
+
+    it("the API catalog claims its path only when served", async () => {
+      quiet();
+      const catalog = (extra: string) => at("/mcp", extra, `[api_catalog]\npath = "/mcp"\n`);
+      await expect(runBuild(await writeToml("sv-claim-c.toml", catalog("")))).rejects.toThrow(/path collision/);
+      await fs.rm(path.join(tmpDir, "out"), { recursive: true, force: true });
+      await expect(runBuild(await writeToml("sv-claim-d.toml", catalog("manifest = false")))).resolves.toBeDefined();
+    });
+  });
+
+  it("a skill name is not required for an index that is not served", async () => {
+    quiet();
+    const nameless = MINIMAL.replace('name   = "Example Co."', 'name   = "日本語"');
+    // SKILL.md and its index both off the air: nothing uses the name.
+    await expect(runBuild(await writeToml("sv-name.toml", `${nameless}\n[features]\nagent_skills = false\n`))).resolves.toBeDefined();
+    await fs.rm(path.join(tmpDir, "out"), { recursive: true, force: true });
+    // The SKILL.md served: the name is needed.
+    await expect(runBuild(await writeToml("sv-name2.toml", nameless))).rejects.toThrow(/\[agent_skills\]\.name/);
+  });
+});
+
+describe("input_schema enums are checked when the config is compiled", () => {
+  const withEnum = (type: string, values: string, extra = ""): string =>
+    MINIMAL.replace(
+      '    [tools.input_schema.properties.query]\n    type = "string"',
+      `    [tools.input_schema.properties.query]\n    type = "string"\n\n    [tools.input_schema.properties.limit]\n    type = "${type}"\n    enum = ${values}\n${extra}`,
+    );
+
+  it("fails the build for an integer enum written with strings, naming the property, the value and the type", async () => {
+    const err = (await runBuild(await writeToml("en-bad.toml", withEnum("integer", '["1", "2"]'))).catch((e: Error) => e)) as Error;
+    expect(err).toBeInstanceOf(Error);
+    expect(err.message).toMatch(/^\[build-config\] config validation failed/);
+    expect(err.message).toContain("tools.0.input_schema.properties.limit.enum.0");
+    expect(err.message).toContain('enum value "1" does not fit type "integer"');
+  });
+
+  it("fails the build for an enum on an array property, and says where it belongs", async () => {
+    const err = (await runBuild(await writeToml("en-array.toml", withEnum("array", '["a"]', '    items = { type = "string" }\n'))).catch((e: Error) => e)) as Error;
+    expect(err).toBeInstanceOf(Error);
+    expect(err.message).toContain("tools.0.input_schema.properties.limit.enum");
+    expect(err.message).toContain('"items"');
+  });
+
+  it("builds an enum of the declared type, on a scalar and on array items", async () => {
+    await expect(runBuild(await writeToml("en-ok.toml", withEnum("integer", "[1, 2, 3]")))).resolves.toBeDefined();
+    await fs.rm(path.join(tmpDir, "out"), { recursive: true, force: true });
+    await expect(
+      runBuild(await writeToml("en-items.toml", withEnum("array", "[]", "").replace("    enum = []\n", '    items = { type = "integer", enum = [1, 2] }\n'))),
+    ).resolves.toBeDefined();
+  });
+});
+
+describe("input_schema property names that no object may carry", () => {
+  const withProperty = (name: string): string =>
+    MINIMAL.replace(
+      '    [tools.input_schema.properties.query]\n    type = "string"',
+      `    [tools.input_schema.properties.query]\n    type = "string"\n\n    [tools.input_schema.properties.${name}]\n    type = "string"`,
+    );
+  const withRequired = (name: string): string => MINIMAL.replace('required = ["query"]', `required = ["query", "${name}"]`);
+
+  it.each(["__proto__", "constructor", "prototype"])("rejects %s as a declared property, naming the tool and the property", async (name) => {
+    const err = await runBuild(await writeToml(`rp-prop-${name}.toml`, withProperty(name))).catch((e: Error) => e);
+    expect(err).toBeInstanceOf(Error);
+    const message = (err as Error).message;
+    expect(message).toMatch(/^\[build-config\] reserved property name/);
+    expect(message).toContain('tool "search_pages"');
+    expect(message).toContain(`"${name}"`);
+    expect(message).toContain("input_schema.properties");
+  });
+
+  it.each(["__proto__", "constructor", "prototype"])("rejects %s in required, too", async (name) => {
+    const err = await runBuild(await writeToml(`rp-req-${name}.toml`, withRequired(name))).catch((e: Error) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toMatch(/reserved property name/);
+    expect((err as Error).message).toContain("input_schema.required");
+    expect((err as Error).message).toContain(`"${name}"`);
+  });
+
+  it("reports every offender at once", async () => {
+    // (A `constructor` table next to a later reserved key trips the TOML parser itself, so the
+    // property here is `prototype`.)
+    const toml = withProperty("prototype").replace('required = ["query"]', 'required = ["query", "constructor", "__proto__"]');
+    const err = (await runBuild(await writeToml("rp-many.toml", toml)).catch((e: Error) => e)) as Error;
+    expect(err.message).toContain('input_schema.properties declares "prototype"');
+    expect(err.message).toContain('input_schema.required lists "constructor"');
+    expect(err.message).toContain('input_schema.required lists "__proto__"');
+  });
+
+  it.each(["constructors", "proto", "my_constructor", "prototype_id", "to_string"])("accepts %s", async (name) => {
+    await expect(runBuild(await writeToml(`rp-ok-${name}.toml`, withProperty(name)))).resolves.toBeDefined();
+    await fs.rm(path.join(tmpDir, "out"), { recursive: true, force: true });
   });
 });
 

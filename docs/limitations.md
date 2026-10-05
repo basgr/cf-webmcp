@@ -42,6 +42,10 @@ If building the HTML rewriter throws for any other reason, the Worker logs the e
 
 An error raised while the response body is already streaming to the visitor cannot be recovered this way: the status line and headers have been sent. The Worker does not use `ctx.passThroughOnException()` as a second net. It forwards to the zone's origin server rather than to `[origin].base_url`, and it does nothing on Custom Domains and `workers.dev` routes.
 
+## `dom_extract` follows explicit end tags only
+
+`dom_extract` reads a page with Cloudflare's HTMLRewriter, which is a streaming tokenizer, not a tree builder: it does not know that a `<p>` is closed by the next `<p>`, or a `<li>` by the next `<li>`. The `selector` region and every `strip` element end at their own explicit end tag. HTML that leaves end tags out therefore runs on: with `strip = ["p"]`, `<main>A<p>P1<p>P2</p>B</main>` yields `A`, because the second `<p>` opens one more level and the single `</p>` closes only one, so `B` and the rest of the region stay hidden. The same happens with an unclosed `<li>`. Void tags (`br`, `img`, `input`, `hr`) and self-closing elements are fine; the problem is only elements that omit their end tag. Workaround: do not list such elements in `strip` (strip their container instead, such as `ul`, `nav` or `aside`), or fix the markup at origin.
+
 ## Route-only mode loses in-page injection
 
 Two deployment modes are supported:

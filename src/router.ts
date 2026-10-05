@@ -5,6 +5,7 @@
 
 import type { Config } from "./config-types";
 import { widgetEnabled } from "./widget-state";
+import { apiCatalogServed, skillsIndexServed } from "./served";
 
 export interface RouteMatch {
   kind:
@@ -163,12 +164,8 @@ export function matchRoute(
     }
   }
 
-  // RFC 9727 API Catalog
-  if (
-    config.features.api_catalog &&
-    config.api_catalog.mode !== "passthrough" &&
-    pathname === config.api_catalog.path
-  ) {
+  // RFC 9727 API Catalog (not served, so left to origin, while the manifest it links to is off)
+  if (apiCatalogServed(config) && pathname === config.api_catalog.path) {
     return { kind: "api_catalog" };
   }
 
@@ -189,12 +186,8 @@ export function matchRoute(
     }
   }
 
-  // Cloudflare Agent Skills Discovery RFC index file
-  if (
-    config.features.agent_skills_index &&
-    config.agent_skills_index.mode !== "passthrough" &&
-    pathname === config.agent_skills_index.path
-  ) {
+  // Cloudflare Agent Skills Discovery RFC index file (left to origin when there is no digest to list)
+  if (skillsIndexServed(config) && pathname === config.agent_skills_index.path) {
     return { kind: "agent_skills_index" };
   }
 
