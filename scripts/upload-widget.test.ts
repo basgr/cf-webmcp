@@ -6,9 +6,12 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { LICENSE_PREAMBLE } from "../src/widget-preamble";
 import {
+  checkBucketName,
+  checkShellSafePath,
   objectKeyFor,
   readVendoredWidget,
   shellQuote,
+  validateUploadInputs,
   verifyComposedWidget,
   wranglerConfigPath,
   wranglerPutArgs,
@@ -151,6 +154,79 @@ describe("shellQuote", () => {
   it("double-quotes an argument with spaces and escapes embedded quotes", () => {
     expect(shellQuote("C:\\Users\\Jane Doe\\x.js")).toBe('"C:\\Users\\Jane Doe\\x.js"');
     expect(shellQuote('a"b c')).toBe('"a\\"b c"');
+  });
+});
+
+// The wrangler command runs through a shell (wrangler.cmd on Windows needs one), and quoting does
+// not stop $(...), backticks or %VAR%. So the inputs that reach the command line are checked
+// strictly instead: the bucket name against the R2 naming rule, the paths for shell metacharacters.
+describe("checkBucketName: the R2 naming rule", () => {
+  it.each(["my-bucket", "abc", "a1b", "cf-webmcp-assets", "0bucket9", "a".repeat(63)])("accepts %j", (name) => {
+    expect(checkBucketName(name)).toBe(name);
+  });
+
+  it.each([
+    ["too short", "ab"],
+    ["too long", "a".repeat(64)],
+    ["upper case", "My-Bucket"],
+    ["a leading hyphen", "-abc"],
+    ["a trailing hyphen", "abc-"],
+    ["an underscore", "a_b"],
+    ["a dot", "a.b"],
+    ["a space", "my bucket"],
+    ["a command substitution", "$(touch x)"],
+    ["a backtick", "a`id`b"],
+    ["a cmd variable", "%PATH%"],
+    ["a semicolon", "abc;rm"],
+    ["an ampersand", "abc&calc"],
+    ["a pipe", "abc|x"],
+    ["a newline", "abc\ndef"],
+    ["a slash", "abc/def"],
+  ])("refuses %s, naming the rule", (_label, name) => {
+    expect(() => checkBucketName(name)).toThrow(/\[upload-widget\] bucket name .* is not a valid R2 bucket name/);
+  });
+});
+
+describe("checkShellSafePath: no shell metacharacters in a path on the command line", () => {
+  it.each([
+    "C:\\Users\\bg\\github-local\\webmcp\\wrangler.toml",
+    "C:\\Users\\Jane Doe\\AppData\\Local\\Temp\\cf-webmcp-widget-abc",
+    "/home/user/repo/wrangler.dev.toml",
+    "/tmp/cf-webmcp-widget-x1y2",
+    "C:\\Program Files (x86)\\x\\wrangler.toml",
+  ])("accepts %j", (p) => {
+    expect(checkShellSafePath("the wrangler config path", p)).toBe(p);
+  });
+
+  it.each([
+    ["$", "/repo/$(touch pwned)/wrangler.toml"],
+    ["a backtick", "/repo/`id`/wrangler.toml"],
+    ["%", "C:\\%USERPROFILE%\\wrangler.toml"],
+    ['"', 'C:\\a"b\\wrangler.toml'],
+    ["'", "/repo/o'brien/wrangler.toml"],
+    [";", "/repo;rm -rf x/wrangler.toml"],
+    ["&", "C:\\a&calc\\wrangler.toml"],
+    ["|", "/repo|x/wrangler.toml"],
+    ["<", "/repo/<x/wrangler.toml"],
+    [">", "/repo/>x/wrangler.toml"],
+    ["a newline", "/repo/a\nb/wrangler.toml"],
+    ["a carriage return", "/repo/a\rb/wrangler.toml"],
+  ])("refuses a path with %s, naming what it is and the character", (_label, p) => {
+    expect(() => checkShellSafePath("the wrangler config path", p)).toThrow(/\[upload-widget\] the wrangler config path .* contains a character the shell would interpret/);
+  });
+});
+
+describe("validateUploadInputs", () => {
+  const ok = { bucket: "cf-webmcp-assets", config: "/repo/wrangler.toml", tmpDir: "/tmp/cf-webmcp-widget-x" };
+
+  it("passes inputs that are all safe", () => {
+    expect(() => validateUploadInputs(ok)).not.toThrow();
+  });
+
+  it("refuses an unsafe bucket, config path or temp directory", () => {
+    expect(() => validateUploadInputs({ ...ok, bucket: "$(id)" })).toThrow(/bucket name/);
+    expect(() => validateUploadInputs({ ...ok, config: "/repo/`id`/wrangler.toml" })).toThrow(/wrangler config path/);
+    expect(() => validateUploadInputs({ ...ok, tmpDir: "C:\\%TEMP%\\x" })).toThrow(/temporary directory/);
   });
 });
 

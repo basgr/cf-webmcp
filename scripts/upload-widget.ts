@@ -135,10 +135,47 @@ export function wranglerPutArgs(opts: { bucket: string; key: string; file: strin
   ];
 }
 
-/** Quote one argument for the shell spawnSync starts (needed for wrangler.cmd on Windows). */
+/**
+ * Quote one argument for the shell spawnSync starts (needed for wrangler.cmd on Windows). Quoting
+ * keeps spaces together, and nothing more: `$(...)`, backticks and `%VAR%` still expand. What
+ * reaches the command line is therefore checked first (validateUploadInputs); the object key is
+ * hex from the pin, the other arguments are fixed.
+ */
 export function shellQuote(arg: string): string {
   if (/^[A-Za-z0-9_@%+=:,./\\-]+$/.test(arg)) return arg;
   return `"${arg.replace(/"/g, '\\"')}"`;
+}
+
+/** R2's bucket naming rule: 3 to 63 lower-case letters, digits and hyphens, starting and ending with a letter or digit. */
+const R2_BUCKET_NAME = /^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$/;
+
+/** The bucket name, or an error naming the rule. It comes from the wrangler config and goes onto a shell command line. */
+export function checkBucketName(bucket: string): string {
+  if (R2_BUCKET_NAME.test(bucket)) return bucket;
+  throw new Error(
+    `[upload-widget] bucket name ${JSON.stringify(bucket)} is not a valid R2 bucket name: 3 to 63 lower-case letters, digits ` +
+      `and hyphens, starting and ending with a letter or digit. Fix bucket_name of the CF_WEBMCP_ASSETS binding.`,
+  );
+}
+
+/** Characters a POSIX shell or cmd.exe would interpret even inside double quotes, or that end a command. */
+const SHELL_METACHARACTERS = /[$`%"';&|<>\r\n]/;
+
+/** The path, or an error naming `what` and the character. The path goes onto a shell command line. */
+export function checkShellSafePath(what: string, p: string): string {
+  const bad = SHELL_METACHARACTERS.exec(p);
+  if (bad === null) return p;
+  throw new Error(
+    `[upload-widget] ${what} ${JSON.stringify(p)} contains a character the shell would interpret (${JSON.stringify(bad[0])}); ` +
+      `upload-widget runs wrangler through a shell and refuses it. Use a path without $, backtick, %, quotes, ;, &, |, <, > or line breaks.`,
+  );
+}
+
+/** Check everything of the wrangler command line that does not come from this script: throws the first problem found. */
+export function validateUploadInputs(inputs: { bucket: string; config: string; tmpDir: string }): void {
+  checkBucketName(inputs.bucket);
+  checkShellSafePath("the wrangler config path", inputs.config);
+  checkShellSafePath("the temporary directory", inputs.tmpDir);
 }
 
 async function main(): Promise<void> {
@@ -166,11 +203,13 @@ async function main(): Promise<void> {
     throw new Error(`[upload-widget] CF_WEBMCP_ASSETS R2 binding not found in ${wranglerPath}`);
   }
   const bucket = bucketMatch[1];
+  // The command runs through a shell: refuse an input that it would interpret, before anything is written.
+  validateUploadInputs({ bucket, config: wranglerPath, tmpDir: os.tmpdir() });
 
   // wrangler uploads from a file, so write the verified composed bytes to a temp one.
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "cf-webmcp-widget-"));
   try {
-    const tmpFile = path.join(tmpDir, objectKey);
+    const tmpFile = checkShellSafePath("the temporary file", path.join(tmpDir, objectKey));
     await fs.writeFile(tmpFile, composed);
 
     // eslint-disable-next-line no-console
