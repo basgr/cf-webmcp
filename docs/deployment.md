@@ -50,8 +50,8 @@ wrangler r2 bucket create cf-webmcp-assets
 Set secrets:
 
 ```bash
-wrangler secret put CF_WEBMCP_DEPLOY_TOKEN   # any random string; used by preflight
-wrangler secret put CF_WEBMCP_HEALTH_TOKEN   # only needed if [health].token is set in TOML
+wrangler secret put CF_WEBMCP_DEPLOY_TOKEN   # any random string; sent in a header on the Worker's origin fetches so your origin's WAF can allow them
+wrangler secret put CF_WEBMCP_HEALTH_TOKEN   # optional: bearer token for /_webmcp/health; replaces [health].token when set
 ```
 
 ## Two deployment modes
@@ -71,6 +71,10 @@ npm run preflight -- --config=webmcp.toml
 ```
 
 Reports OK / merge / COLLISION per path. Exits non-zero on hard collisions. Pass `--force` to override.
+
+Preflight asks `[origin].base_url` as an ordinary client. Once that hostname is routed through the Worker, those requests land on the Worker, and preflight reads the Worker's own answers (the landing page, the manifest, the merged files) back as collisions and merges, so the result says nothing about your origin. Run it before you route the hostname, or against a direct origin hostname (a copy of the TOML whose `[origin].base_url` points at it). `CF_WEBMCP_DEPLOY_TOKEN`, if set in your environment, goes out in the same two headers the Worker sends to origin; the Worker does not check those headers, they only let a rule at your origin recognise the request.
+
+Preflight also POSTs a JSON-RPC `initialize` to the landing path (and, for a directory-form path such as `/mcp/`, to `/mcp`). If origin answers 200 with JSON or an event stream, an MCP server lives there. That is a warning, not a collision: the Worker serves the landing page only for `GET` and `HEAD` requests that accept HTML, so the server stays reachable for every other request, `POST` included (see [`docs/scope.md`](scope.md)). A network error skips the probe and never fails preflight. The probe is a real `initialize`, so a stateful MCP server may open a session for it.
 
 If a path collides, either:
 
@@ -106,7 +110,7 @@ npm run deploy
 
 This chains `npm run build` (compiles TOML to TypeScript modules) and `wrangler deploy`. The first deploy provisions the Worker and binds the R2 bucket if configured. Subsequent deploys re-upload the bundle and rotate the `CONFIG_HASH`.
 
-After deploy, hit `https://yourdomain.com/_webmcp/health` to confirm the Worker is alive and the config hash matches. With `fallback_widget = true`, `widget_asset_present` should be `true`; `false` means the widget object is missing from R2 (run `npm run upload-widget`), and `null` means the widget is not applicable or could not be checked (feature off, no pinned widget in this build, no R2 binding).
+After deploy, hit `https://yourdomain.com/_webmcp/health` to confirm the Worker is alive and the config hash matches. If the `CF_WEBMCP_HEALTH_TOKEN` secret or `[health].token` is set, send it as `Authorization: Bearer <token>`; the secret wins when both are set. With `[health].public = false` and a token set, the endpoint answers 401 without it; with no token at all, it answers 404. With `fallback_widget = true`, `widget_asset_present` should be `true`; `false` means the widget object is missing from R2 (run `npm run upload-widget`), and `null` means the widget is not applicable or could not be checked (feature off, no pinned widget in this build, no R2 binding).
 
 ## Origin and allowed_origins safety
 
@@ -117,8 +121,9 @@ After deploy, hit `https://yourdomain.com/_webmcp/health` to confirm the Worker 
 - **The Worker checks every redirect target before it requests it.** On its own fetches to origin, that is the tool executors and the merge routes (`/llms.txt`, `/robots.txt`, `/.well-known/agents.md`, the API catalog, the AI catalog and the agent skill, each when it merges with origin's file), the Worker does not let the runtime follow redirects. It reads each `Location`, resolves it against the current URL, and requests it only if it is an `http` or `https` URL whose origin (scheme, host and port) is in `allowed_origins`. It follows at most 5 redirects. A target that fails the check is never requested, so the `cf-webmcp-bypass` and `cf-webmcp-deploy-token` headers go only to listed origins, on every hop, and an open redirect at origin cannot leak the deploy token. If you have a legitimate cross-host redirect (apex to `www`, for example), add the target to `allowed_origins` and the Worker follows it.
 - **What a refused redirect looks like.** A refusal that returns an error keeps the refused host and `Location` out of the response. The Worker writes them to its log (`wrangler tail`) as one line that starts with `cf-webmcp: executor refused an origin redirect` or `cf-webmcp: proxy refused an origin redirect`.
   - Tool executors: a redirect to an origin outside `allowed_origins` returns an `invalid_input` error. More than 5 redirects, or a `Location` that is not a usable `http` or `https` URL, returns an `internal` error. The messages are fixed text.
-  - Merge routes: a redirect to an origin outside `allowed_origins` is relayed to the client as it came: the same status, the `Location` resolved to an absolute URL (any userinfo removed), no body, `Cache-Control: no-store` and `X-Robots-Tag: noindex`. The Worker sends no request to that target and no deploy token with the relay. This keeps a crawler's `/robots.txt` fetch from turning into a 5xx when origin redirects between apex and `www`. The AI catalog in `merge` mode differs: it answers with its own generated document whenever the origin fetch ends in anything but a 200 (a 404, a relayed redirect, a 502 or a 504 included). A 200 declared as JSON (`application/json`, `application/ai-catalog+json` or no `Content-Type`) gets our entry merged in when it is a valid catalog and is replaced by the generated document when it is not. Any other 200 is relayed with `X-Robots-Tag: noindex`.
-  - Merge routes, other failures: more than 5 redirects, an unusable `Location`, or a `[origin].base_url` that is not in `allowed_origins` answer 502 with `X-Robots-Tag: noindex` and a fixed message. A failed connection is also a 502. If origin has not sent its response headers within 10 seconds, the Worker gives up and answers 504 with the same header. The deadline ends when the headers arrive, so it does not limit how long origin takes to send the body.
+  - Merge routes: a redirect to an origin outside `allowed_origins` is relayed to the client as it came: the same status, the `Location` resolved to an absolute URL (any userinfo removed), no body and `Cache-Control: no-store`. The relay carries `X-Robots-Tag: noindex` on the routes under `/.well-known/` (`agents.md`, the API catalog, the AI catalog and the agent skill) and no `X-Robots-Tag` on `/llms.txt` and `/robots.txt`, which never carry one, whatever they answer. The Worker sends no request to that target and no deploy token with the relay. This keeps a crawler's `/robots.txt` fetch from turning into a 5xx when origin redirects between apex and `www`. The AI catalog in `merge` mode differs: it answers with its own generated document whenever the origin fetch ends in anything but a 200 (a 404, a relayed redirect, a 502 or a 504 included). A 200 declared as JSON (`application/json`, `application/ai-catalog+json` or no `Content-Type`) gets our entry merged in when it is a valid catalog and is replaced by the generated document when it is not. Any other 200 is relayed with `X-Robots-Tag: noindex`.
+  - Merge routes, other failures: more than 5 redirects, an unusable `Location`, or a `[origin].base_url` that is not in `allowed_origins` answer 502 with a fixed message. A failed connection is also a 502. If origin has not sent its response headers within 10 seconds, the Worker gives up and answers 504. The 502 and the 504 carry `X-Robots-Tag: noindex` on the routes under `/.well-known/` and no `X-Robots-Tag` on `/llms.txt` and `/robots.txt`. The deadline ends when the headers arrive, so it does not limit how long origin takes to send the body.
+  - Merge routes, an origin answer they cannot merge: a 5xx, an HTML page or a non-text type is relayed as it came (the AI catalog excepted, see above). Under `/.well-known/` the Worker sets `X-Robots-Tag: noindex` on it; on `/llms.txt` and `/robots.txt` it removes any `X-Robots-Tag`, including one origin sent.
 - **Redirects on proxied pages are not followed by the Worker.** For ordinary page requests the Worker passes an origin 3xx to the visitor's browser with the status, body and `Location` that origin sent, and adds only the `Link` header (when `[features].link_header` is on). No deploy token is attached to those requests.
 
 ## Subresource Integrity (SRI) on the injected bootstrap
@@ -144,7 +149,7 @@ Some Cloudflare products (Bot Management, custom WAF rules, rate-limiting) will 
 - `User-Agent: cf-webmcp/<version>` on origin fetches
 - `cf-webmcp-bypass: 1` and `cf-webmcp-deploy-token: <token>` headers, only on requests to origins (scheme, host and port) listed in `allowed_origins`, redirect targets included
 
-Configure your WAF / Bot Management to allow requests with these headers. Otherwise tool calls will return `origin_4xx` or `rate_limited` envelope errors.
+Configure your WAF / Bot Management to allow requests with these headers. Otherwise tool calls will return `origin_4xx` or `rate_limited` envelope errors. The Worker does not read these headers itself and has no bypass mode: they exist only so a rule at your origin can recognise the Worker's traffic (and preflight's).
 
 ## Cloudflare AI crawler defaults (September 2026)
 

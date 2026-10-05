@@ -9,6 +9,11 @@ export interface HealthOptions {
   widgetAsset?: string | null;
   /** The CF_WEBMCP_ASSETS R2 binding, used only to probe for the widget object. */
   bucket?: Pick<R2Bucket, "head">;
+  /**
+   * The CF_WEBMCP_HEALTH_TOKEN secret (env.CF_WEBMCP_HEALTH_TOKEN). When non-empty it is
+   * the bearer token and replaces [health].token. An empty string counts as unset.
+   */
+  envToken?: string;
 }
 
 /**
@@ -43,19 +48,26 @@ function timingSafeEqual(a: string, b: string): boolean {
 
 /**
  * /_webmcp/health
- * If [health].token is set, requires Authorization: Bearer <token>.
- * If [health].public is false (and no token), refuses.
+ *
+ * The bearer token is the CF_WEBMCP_HEALTH_TOKEN secret when it is set (non-empty),
+ * otherwise [health].token. The secret wins outright: with both set, the TOML token
+ * is not accepted.
+ *
+ * If a token is set, requires Authorization: Bearer <token>.
+ * If [health].public is false and no token is set (secret or TOML), answers 404.
+ * So public = false plus only the secret is an authenticated endpoint, not a 404.
  */
 export async function healthResponse(request: Request, config: Config, opts: HealthOptions): Promise<Response> {
-  if (!config.health.public && !config.health.token) {
+  const token = opts.envToken || config.health.token;
+  if (!config.health.public && !token) {
     return new Response("health endpoint disabled", {
       status: 404,
       headers: { "x-robots-tag": "noindex" },
     });
   }
-  if (config.health.token) {
+  if (token) {
     const auth = request.headers.get("authorization") ?? "";
-    const expected = `Bearer ${config.health.token}`;
+    const expected = `Bearer ${token}`;
     if (!timingSafeEqual(auth, expected)) {
       return new Response("unauthorized", {
         status: 401,

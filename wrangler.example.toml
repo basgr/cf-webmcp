@@ -35,5 +35,9 @@ bucket_name = "cf-webmcp-assets"
 # Cache API binding is implicit on Workers.
 
 # Secrets (set via `wrangler secret put`):
-#   CF_WEBMCP_DEPLOY_TOKEN   used by preflight to bypass Worker routing when verifying origin paths
-#   CF_WEBMCP_HEALTH_TOKEN   used by /_webmcp/health bearer auth if [health].token is set in TOML
+#   CF_WEBMCP_DEPLOY_TOKEN   sent as cf-webmcp-bypass and cf-webmcp-deploy-token headers on the Worker's own
+#                            fetches to origin (preflight sends them too), so your origin's WAF or Bot
+#                            Management can allow-list that traffic. The Worker does not read these headers
+#                            itself: there is no bypass mode.
+#   CF_WEBMCP_HEALTH_TOKEN   bearer token for /_webmcp/health. When set it replaces [health].token, and with
+#                            [health].public = false it makes the endpoint authenticated instead of a 404.

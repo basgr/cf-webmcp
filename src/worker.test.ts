@@ -7,7 +7,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createHandler, PROXY_ORIGIN_TIMEOUT_MS, type Env } from "./handler";
-import { makeDeps } from "./test-support/config";
+import { makeDeps, type ConfigOverrides } from "./test-support/config";
 
 const HTML = "<html><head></head><body>hi</body></html>";
 
@@ -511,16 +511,17 @@ describe("proxyToOrigin redirects (llms.txt, robots.txt, agents.md and the other
 
   describe("an origin redirect that leaves allowed_origins is relayed, not followed", () => {
     // Every route that goes through proxyToOrigin and relays an uninterpretable origin answer.
+    // The /.well-known/* routes add noindex to the relay; the apex discovery files (llms.txt, robots.txt) never do.
     const relayRoutes = [
-      { name: "llms.txt", path: "/llms.txt" },
-      { name: "robots.txt", path: "/robots.txt" },
-      { name: "agents.md", path: "/.well-known/agents.md" },
-      { name: "api-catalog", path: "/.well-known/api-catalog" },
-      { name: "agent-skills (merge)", path: "/.well-known/agent-skills/site/SKILL.md" },
+      { name: "llms.txt", path: "/llms.txt", noindex: null },
+      { name: "robots.txt", path: "/robots.txt", noindex: null },
+      { name: "agents.md", path: "/.well-known/agents.md", noindex: "noindex" },
+      { name: "api-catalog", path: "/.well-known/api-catalog", noindex: "noindex" },
+      { name: "agent-skills (merge)", path: "/.well-known/agent-skills/site/SKILL.md", noindex: "noindex" },
     ];
     const deps = () => makeDeps({ agent_skills: { mode: "merge" } });
 
-    it.each(relayRoutes)("$name: answers the origin's 301 with the resolved Location, no body, no-store, noindex", async ({ path }) => {
+    it.each(relayRoutes)("$name: answers the origin's 301 with the resolved Location, no body, no-store, and noindex only under /.well-known/", async ({ path, noindex }) => {
       const fetchMock = stubOrigin({
         [`https://example.com${path}`]: () => redirectTo(301, `https://www.example.com${path}`),
         [`https://www.example.com${path}`]: () => textResponse("should never be fetched"),
@@ -532,7 +533,7 @@ describe("proxyToOrigin redirects (llms.txt, robots.txt, agents.md and the other
       expect(res.status).toBe(301);
       expect(res.headers.get("location")).toBe(`https://www.example.com${path}`);
       expect(res.headers.get("cache-control")).toBe("no-store");
-      expect(res.headers.get("x-robots-tag")).toBe("noindex");
+      expect(res.headers.get("x-robots-tag")).toBe(noindex);
       const body = await res.text();
       expect(body).toBe("");
       // Exactly one request, to origin; none to the other host, and the token is on that one only.
@@ -610,7 +611,7 @@ describe("proxyToOrigin redirects (llms.txt, robots.txt, agents.md and the other
 
       expect(res.status).toBe(307);
       expect(res.headers.get("location")).toBe("https://evil.example/robots.txt");
-      expect(res.headers.get("x-robots-tag")).toBe("noindex");
+      expect(res.headers.get("x-robots-tag")).toBeNull();
       expect(urlsOf(fetchMock)).toEqual(["https://example.com/robots.txt", "https://cdn.example.com/robots.txt"]);
       expectNoToken(res, await res.text());
     });
@@ -639,6 +640,8 @@ describe("proxyToOrigin redirects (llms.txt, robots.txt, agents.md and the other
   });
 
   describe("failures that stay a 502 with noindex and a generic body", () => {
+    // Run on agents.md: a /.well-known/* route, so the 502 carries noindex. llms.txt and robots.txt
+    // answer the same 502 without it (see "llms.txt and robots.txt never carry X-Robots-Tag").
     async function expect502(res: Response, body: string) {
       expect(res.status).toBe(502);
       expect(res.headers.get("x-robots-tag")).toBe("noindex");
@@ -651,13 +654,13 @@ describe("proxyToOrigin redirects (llms.txt, robots.txt, agents.md and the other
     it("more than 5 redirects", async () => {
       const routes: Record<string, Canned> = {};
       for (let i = 0; i < 6; i++) {
-        routes[i === 0 ? "https://example.com/llms.txt" : `https://example.com/h${i}`] = () =>
+        routes[i === 0 ? "https://example.com/.well-known/agents.md" : `https://example.com/h${i}`] = () =>
           redirectTo(302, `/h${i + 1}`);
       }
       const fetchMock = stubOrigin(routes);
       const handler = createHandler(makeDeps());
 
-      const res = await call(handler, "https://example.com/llms.txt", undefined, tokenEnv);
+      const res = await call(handler, "https://example.com/.well-known/agents.md", undefined, tokenEnv);
 
       await expect502(res, "origin redirected too many times");
       expect(fetchMock).toHaveBeenCalledTimes(6);
@@ -665,10 +668,10 @@ describe("proxyToOrigin redirects (llms.txt, robots.txt, agents.md and the other
     });
 
     it("an unparseable Location, which is logged but not echoed", async () => {
-      stubOrigin({ "https://example.com/llms.txt": () => redirectTo(302, "http://:notaport?q=secret") });
+      stubOrigin({ "https://example.com/.well-known/agents.md": () => redirectTo(302, "http://:notaport?q=secret") });
       const handler = createHandler(makeDeps());
 
-      const res = await call(handler, "https://example.com/llms.txt", undefined, tokenEnv);
+      const res = await call(handler, "https://example.com/.well-known/agents.md", undefined, tokenEnv);
 
       await expect502(res, "origin returned an unusable redirect location");
       const line = errorLog.mock.calls[0]![0] as string;
@@ -680,14 +683,14 @@ describe("proxyToOrigin redirects (llms.txt, robots.txt, agents.md and the other
 
     it("a blob: Location whose origin looks allowed: nothing is requested for it", async () => {
       const fetchMock = stubOrigin({
-        "https://example.com/llms.txt": () => redirectTo(302, "blob:https://example.com/abc?q=secret"),
+        "https://example.com/.well-known/agents.md": () => redirectTo(302, "blob:https://example.com/abc?q=secret"),
       });
       const handler = createHandler(makeDeps());
 
-      const res = await call(handler, "https://example.com/llms.txt", undefined, tokenEnv);
+      const res = await call(handler, "https://example.com/.well-known/agents.md", undefined, tokenEnv);
 
       await expect502(res, "origin returned an unusable redirect location");
-      expect(urlsOf(fetchMock)).toEqual(["https://example.com/llms.txt"]);
+      expect(urlsOf(fetchMock)).toEqual(["https://example.com/.well-known/agents.md"]);
     });
 
     it("base_url itself outside allowed_origins: nothing is sent, and only the log names the origin", async () => {
@@ -696,7 +699,7 @@ describe("proxyToOrigin redirects (llms.txt, robots.txt, agents.md and the other
         makeDeps({ origin: { base_url: "https://other.example", allowed_origins: ["https://example.com"] } }),
       );
 
-      const res = await call(handler, "https://example.com/llms.txt", undefined, tokenEnv);
+      const res = await call(handler, "https://example.com/.well-known/agents.md", undefined, tokenEnv);
 
       await expect502(res, "configured origin is not in allowed_origins");
       expect(fetchMock).not.toHaveBeenCalled();
@@ -761,7 +764,7 @@ describe("proxyToOrigin failure handling and deadline", () => {
     );
     const handler = createHandler(makeDeps());
 
-    const res = await call(handler, "https://example.com/robots.txt", undefined, tokenEnv);
+    const res = await call(handler, "https://example.com/.well-known/agents.md", undefined, tokenEnv);
 
     expect(res.status).toBe(502);
     expect(res.headers.get("x-robots-tag")).toBe("noindex");
@@ -779,7 +782,7 @@ describe("proxyToOrigin failure handling and deadline", () => {
     vi.stubGlobal("fetch", vi.fn((_url: string, init?: RequestInit) => stallUntilAborted(init)));
     const handler = createHandler(makeDeps());
 
-    const pending = call(handler, "https://example.com/llms.txt", undefined, tokenEnv);
+    const pending = call(handler, "https://example.com/.well-known/agents.md", undefined, tokenEnv);
     let settled = false;
     void pending.then(() => {
       settled = true;
@@ -861,5 +864,363 @@ describe("proxyToOrigin failure handling and deadline", () => {
 
     expect(res.status).toBe(301);
     expect(vi.getTimerCount()).toBe(0);
+  });
+});
+
+describe("llms.txt and robots.txt never carry X-Robots-Tag", () => {
+  // House rule: every route under /_webmcp/* or /.well-known/* emits noindex; the apex discovery files
+  // /llms.txt and /robots.txt are the explicit exceptions and must never carry it, whatever the answer is:
+  // a merge, a relayed redirect, a 502, a 504, or an origin answer relayed as it came.
+  const tokenEnv: Env = { ...env, CF_WEBMCP_DEPLOY_TOKEN: "deploy-token-x" };
+  const files = [
+    { name: "llms.txt", path: "/llms.txt" },
+    { name: "robots.txt", path: "/robots.txt" },
+  ];
+
+  beforeEach(() => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function expectNoRobotsTag(res: Response) {
+    expect([...res.headers.keys()]).not.toContain("x-robots-tag");
+  }
+
+  describe.each(files)("$name", ({ path }) => {
+    const origin = `https://example.com${path}`;
+
+    it("merged answer (origin has the file)", async () => {
+      stubOrigin({
+        [origin]: () => new Response("# origin\n", { status: 200, headers: { "content-type": "text/plain" } }),
+      });
+      const res = await call(createHandler(makeDeps()), origin, undefined, tokenEnv);
+
+      expect(res.status).toBe(200);
+      expectNoRobotsTag(res);
+    });
+
+    it("generated answer (origin has no file)", async () => {
+      stubOrigin({ [origin]: () => new Response("", { status: 404 }) });
+      const res = await call(createHandler(makeDeps()), origin, undefined, tokenEnv);
+
+      expect(res.status).toBe(200);
+      expect(await res.text()).toContain("cf-webmcp:begin");
+      expectNoRobotsTag(res);
+    });
+
+    it("relayed redirect that leaves allowed_origins", async () => {
+      stubOrigin({
+        [origin]: () => new Response(null, { status: 301, headers: { location: `https://www.example.com${path}` } }),
+      });
+      const res = await call(createHandler(makeDeps()), origin, undefined, tokenEnv);
+
+      expect(res.status).toBe(301);
+      expect(res.headers.get("location")).toBe(`https://www.example.com${path}`);
+      expect(res.headers.get("cache-control")).toBe("no-store");
+      expectNoRobotsTag(res);
+    });
+
+    it("502 when the origin fetch fails", async () => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => {
+          throw new TypeError("Network connection lost.");
+        }),
+      );
+      const res = await call(createHandler(makeDeps()), origin, undefined, tokenEnv);
+
+      expect(res.status).toBe(502);
+      expect(await res.text()).toBe("origin request failed");
+      expectNoRobotsTag(res);
+    });
+
+    it("502 for an unusable redirect location and for a base_url outside allowed_origins", async () => {
+      stubOrigin({ [origin]: () => new Response(null, { status: 302, headers: { location: "http://:notaport" } }) });
+      const unusable = await call(createHandler(makeDeps()), origin, undefined, tokenEnv);
+      const offList = await call(
+        createHandler(makeDeps({ origin: { base_url: "https://other.example", allowed_origins: ["https://example.com"] } })),
+        origin,
+        undefined,
+        tokenEnv,
+      );
+
+      expect(unusable.status).toBe(502);
+      expect(offList.status).toBe(502);
+      expectNoRobotsTag(unusable);
+      expectNoRobotsTag(offList);
+    });
+
+    it("504 when the origin does not answer in time", async () => {
+      vi.useFakeTimers();
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(
+          (_url: string, init?: RequestInit) =>
+            new Promise<Response>((_, reject) => {
+              init!.signal!.addEventListener("abort", () =>
+                reject(Object.assign(new Error("aborted"), { name: "AbortError" })),
+              );
+            }),
+        ),
+      );
+      const pending = call(createHandler(makeDeps()), origin, undefined, tokenEnv);
+      await vi.advanceTimersByTimeAsync(PROXY_ORIGIN_TIMEOUT_MS);
+      const res = await pending;
+
+      expect(res.status).toBe(504);
+      expect(await res.text()).toBe("origin did not answer in time");
+      expectNoRobotsTag(res);
+    });
+
+    it("an origin 5xx is relayed as it came, and drops an X-Robots-Tag the origin sent itself", async () => {
+      stubOrigin({
+        [origin]: () =>
+          new Response("boom", { status: 503, headers: { "content-type": "text/plain", "x-robots-tag": "noindex" } }),
+      });
+      const res = await call(createHandler(makeDeps()), origin, undefined, tokenEnv);
+
+      expect(res.status).toBe(503);
+      expect(await res.text()).toBe("boom");
+      expectNoRobotsTag(res);
+    });
+
+    it("an origin answer that is not text is relayed without an X-Robots-Tag", async () => {
+      stubOrigin({
+        [origin]: () =>
+          new Response("<html></html>", {
+            status: 200,
+            headers: { "content-type": "text/html", "x-robots-tag": "noindex" },
+          }),
+      });
+      const res = await call(createHandler(makeDeps()), origin, undefined, tokenEnv);
+
+      expect(res.status).toBe(200);
+      expect(res.headers.get("content-type")).toBe("text/html");
+      expect(await res.text()).toBe("<html></html>");
+      expectNoRobotsTag(res);
+    });
+  });
+
+  it("agents.md, a /.well-known/* route, keeps noindex on the same relay and the same failure", async () => {
+    const agents = "https://example.com/.well-known/agents.md";
+    stubOrigin({
+      [agents]: () =>
+        new Response(null, { status: 301, headers: { location: "https://www.example.com/.well-known/agents.md" } }),
+    });
+    const relayed = await call(createHandler(makeDeps()), agents, undefined, tokenEnv);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new TypeError("Network connection lost.");
+      }),
+    );
+    const failed = await call(createHandler(makeDeps()), agents, undefined, tokenEnv);
+
+    expect(relayed.status).toBe(301);
+    expect(relayed.headers.get("x-robots-tag")).toBe("noindex");
+    expect(failed.status).toBe(502);
+    expect(failed.headers.get("x-robots-tag")).toBe("noindex");
+  });
+});
+
+describe("the landing path is shared with MCP traffic", () => {
+  // Cloudflare WebMCP Labs POSTs MCP JSON-RPC to data-mcp-url="/mcp"; an origin MCP server may live there too.
+  const rpcBody = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} });
+  const rpcAnswer = () =>
+    new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result: {} }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+
+  it("proxies a POST to /mcp to origin with its method and body, and does not serve the landing", async () => {
+    const fetchMock = stubOrigin({ "https://example.com/mcp": rpcAnswer });
+    const res = await call(createHandler(makeDeps()), "https://example.com/mcp", {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: "application/json, text/event-stream" },
+      body: rpcBody,
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toBe("application/json");
+    expect(await res.json()).toEqual({ jsonrpc: "2.0", id: 1, result: {} });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [target, init] = fetchMock.mock.calls[0]!;
+    expect(target).toBe("https://example.com/mcp");
+    expect((init as Request).method).toBe("POST");
+    expect(await (init as Request).text()).toBe(rpcBody);
+  });
+
+  it("proxies a DELETE to /mcp to origin (MCP session termination)", async () => {
+    const fetchMock = stubOrigin({ "https://example.com/mcp": () => new Response(null, { status: 204 }) });
+    const res = await call(createHandler(makeDeps()), "https://example.com/mcp", { method: "DELETE" });
+
+    expect(res.status).toBe(204);
+    expect((fetchMock.mock.calls[0]![1] as Request).method).toBe("DELETE");
+  });
+
+  it.each(["application/json", "application/json, text/event-stream", "text/event-stream"])(
+    "proxies a GET to /mcp with Accept: %s to origin",
+    async (accept) => {
+      const fetchMock = stubOrigin({ "https://example.com/mcp": rpcAnswer });
+      const res = await call(createHandler(makeDeps()), "https://example.com/mcp", { headers: { accept } });
+
+      expect(res.headers.get("content-type")).toBe("application/json");
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it("serves the landing for a GET with Accept: text/html, without asking origin", async () => {
+    const fetchMock = stubOrigin({});
+    const res = await call(createHandler(makeDeps()), "https://example.com/mcp", { headers: { accept: "text/html" } });
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toContain("text/html");
+    expect(await res.text()).toContain("landing");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("serves the landing for a GET with no Accept header and for HEAD", async () => {
+    const fetchMock = stubOrigin({});
+    const handler = createHandler(makeDeps());
+
+    const get = await call(handler, "https://example.com/mcp");
+    const head = await call(handler, "https://example.com/mcp", { method: "HEAD" });
+
+    expect(await get.text()).toContain("landing");
+    expect(head.status).toBe(200);
+    expect(head.headers.get("content-type")).toContain("text/html");
+    expect(await head.text()).toBe("");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  describe("directory-form landing path", () => {
+    const dirForm = { webmcp_landing: { path: "/mcp/" } };
+
+    it("redirects a browser GET on /mcp to /mcp/", async () => {
+      const fetchMock = stubOrigin({});
+      const res = await call(createHandler(makeDeps(dirForm)), "https://example.com/mcp", {
+        headers: { accept: "text/html" },
+      });
+
+      expect(res.status).toBe(308);
+      expect(res.headers.get("location")).toBe("/mcp/");
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it("sends a POST on /mcp (no trailing slash) to origin, not to a redirect", async () => {
+      const fetchMock = stubOrigin({ "https://example.com/mcp": rpcAnswer });
+      const res = await call(createHandler(makeDeps(dirForm)), "https://example.com/mcp", {
+        method: "POST",
+        body: rpcBody,
+      });
+
+      expect(res.status).toBe(200);
+      expect(res.headers.get("location")).toBeNull();
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect((fetchMock.mock.calls[0]![1] as Request).method).toBe("POST");
+    });
+
+    it("sends a JSON GET on /mcp to origin, not to a redirect", async () => {
+      stubOrigin({ "https://example.com/mcp": rpcAnswer });
+      const res = await call(createHandler(makeDeps(dirForm)), "https://example.com/mcp", {
+        headers: { accept: "application/json" },
+      });
+
+      expect(res.status).toBe(200);
+      expect(res.headers.get("content-type")).toBe("application/json");
+    });
+  });
+});
+
+describe("passthrough mode: origin owns the file", () => {
+  const cases: Array<{ name: string; path: string; override: ConfigOverrides }> = [
+    { name: "llms.txt", path: "/llms.txt", override: { llms_txt: { mode: "passthrough" } } },
+    { name: "robots.txt", path: "/robots.txt", override: { robots_txt: { mode: "passthrough" } } },
+    { name: "agents.md", path: "/.well-known/agents.md", override: { agents_md: { mode: "passthrough" } } },
+    { name: "the /AGENTS.md alias of agents.md", path: "/AGENTS.md", override: { agents_md: { mode: "passthrough" } } },
+  ];
+
+  it.each(cases)(
+    "$name is proxied: origin's own response, our Link header, nothing merged or added",
+    async ({ path, override }) => {
+      const fetchMock = stubOrigin({
+        [`https://example.com${path}`]: () =>
+          new Response("the origin file\n", { status: 200, headers: { "content-type": "text/plain; charset=utf-8" } }),
+      });
+      const res = await call(createHandler(makeDeps(override)), `https://example.com${path}`);
+
+      expect(res.status).toBe(200);
+      expect(await res.text()).toBe("the origin file\n");
+      expect(res.headers.get("link")).toContain('rel="webmcp"');
+      // The Worker does not serve this path, so it adds no noindex to the origin response.
+      expect(res.headers.get("x-robots-tag")).toBeNull();
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect((fetchMock.mock.calls[0]![1] as Request).redirect).toBe("manual");
+    },
+  );
+
+  it.each(cases)("$name: an origin 404 stays a 404 (no generated fallback)", async ({ path, override }) => {
+    stubOrigin({ [`https://example.com${path}`]: () => new Response("not here", { status: 404 }) });
+    const res = await call(createHandler(makeDeps(override)), `https://example.com${path}`);
+
+    expect(res.status).toBe(404);
+    expect(await res.text()).toBe("not here");
+  });
+
+  it("an agents.md alias is relayed from origin, not redirected to the canonical path", async () => {
+    stubOrigin({
+      "https://example.com/agents.md": () =>
+        new Response("# mine\n", { status: 200, headers: { "content-type": "text/markdown" } }),
+    });
+    const res = await call(
+      createHandler(makeDeps({ agents_md: { mode: "passthrough" } })),
+      "https://example.com/agents.md",
+    );
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("location")).toBeNull();
+    expect(await res.text()).toBe("# mine\n");
+  });
+});
+
+describe("the health token", () => {
+  const healthUrl = "https://example.com/_webmcp/health";
+  const bearer = (token: string): RequestInit => ({ headers: { authorization: `Bearer ${token}` } });
+  const envWithSecret = (secret?: string): Env => ({ ...env, CF_WEBMCP_HEALTH_TOKEN: secret });
+
+  it("with public = false and only the CF_WEBMCP_HEALTH_TOKEN secret, answers 401 without auth and 200 with the secret", async () => {
+    const handler = createHandler(makeDeps({ health: { public: false } }));
+    const secretEnv = envWithSecret("from-secret");
+
+    expect((await call(handler, healthUrl, undefined, secretEnv)).status).toBe(401);
+    expect((await call(handler, healthUrl, bearer("wrong"), secretEnv)).status).toBe(401);
+    const ok = await call(handler, healthUrl, bearer("from-secret"), secretEnv);
+    expect(ok.status).toBe(200);
+    expect(ok.headers.get("x-robots-tag")).toBe("noindex");
+  });
+
+  it("when both are set, the secret wins and the TOML token is rejected", async () => {
+    const handler = createHandler(makeDeps({ health: { public: false, token: "from-toml" } }));
+    const secretEnv = envWithSecret("from-secret");
+
+    expect((await call(handler, healthUrl, bearer("from-toml"), secretEnv)).status).toBe(401);
+    expect((await call(handler, healthUrl, bearer("from-secret"), secretEnv)).status).toBe(200);
+  });
+
+  it("the TOML token still works when no secret is set", async () => {
+    const handler = createHandler(makeDeps({ health: { public: false, token: "from-toml" } }));
+
+    expect((await call(handler, healthUrl, bearer("from-toml"))).status).toBe(200);
+    expect((await call(handler, healthUrl)).status).toBe(401);
+  });
+
+  it("with public = false and neither token set, answers 404", async () => {
+    const handler = createHandler(makeDeps({ health: { public: false } }));
+
+    expect((await call(handler, healthUrl)).status).toBe(404);
+    expect((await call(handler, healthUrl, undefined, envWithSecret(""))).status).toBe(404);
   });
 });

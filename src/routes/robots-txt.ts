@@ -5,6 +5,7 @@
 
 import type { Config } from "../config-types";
 import { buildCacheControl } from "../cache";
+import { withoutRobotsTag } from "../robots-tag";
 
 const BEGIN = "# cf-webmcp:begin";
 const END = "# cf-webmcp:end";
@@ -25,7 +26,9 @@ export async function robotsTxtResponse(
     const original = await upstream.text();
     body = mergeBlock(original, block);
   } else {
-    return upstream;
+    // Relay origin's answer. This route never carries X-Robots-Tag, so the noindex
+    // proxyToOrigin puts on its own relays and failures comes off here.
+    return withoutRobotsTag(upstream);
   }
 
   return new Response(body, {

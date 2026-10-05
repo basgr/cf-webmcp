@@ -1,7 +1,13 @@
 /**
  * Coverage rule: every route cf-webmcp serves under `/_webmcp/*` or
  * `/.well-known/*` MUST emit `X-Robots-Tag: noindex`. `/llms.txt` and
- * `/robots.txt` at apex are explicit exceptions.
+ * `/robots.txt` at apex are explicit exceptions: they MUST NOT carry the
+ * header on any answer (a merge, a relayed redirect, a 502 or 504, an origin
+ * answer relayed as it came).
+ *
+ * A path in `passthrough` mode is not served by cf-webmcp at all: the router
+ * hands it to the ordinary proxy, and the response is origin's own. The rule
+ * does not apply to it, and the Worker adds no header there.
  *
  * This file enumerates every `RouteMatch["kind"]` value via an exhaustive
  * `Record` type. Adding a new kind to `router.ts` will fail to compile here
@@ -16,7 +22,7 @@
 
 import { describe, it, expect } from "vitest";
 import type { Config, FormInjectionConfig } from "./config-types";
-import type { RouteMatch } from "./router";
+import { matchRoute, type RouteMatch } from "./router";
 import { manifestResponse, manifestRedirect } from "./routes/manifest";
 import { landingResponse, landingRedirect } from "./routes/landing";
 import { bootstrapResponse } from "./routes/bootstrap";
@@ -41,7 +47,10 @@ function isProtected(path: string): boolean {
 
 // Classification of every RouteMatch kind. TypeScript fails to compile this
 // file if a new kind is added to router.ts without a classification entry.
-type Classification = "noindex_required" | "exempt";
+//   noindex_required:  the answer MUST carry X-Robots-Tag: noindex
+//   noindex_forbidden: the answer MUST NOT carry X-Robots-Tag at all (apex discovery files)
+//   exempt:            no rule; cf-webmcp does not own the response, or the path is not under a protected prefix
+type Classification = "noindex_required" | "noindex_forbidden" | "exempt";
 const CLASSIFICATION: Record<RouteMatch["kind"], Classification> = {
   manifest: "noindex_required",                // /.well-known/webmcp
   manifest_redirect: "noindex_required",        // alias /.well-known/webmcp.json under a protected prefix
@@ -53,8 +62,8 @@ const CLASSIFICATION: Record<RouteMatch["kind"], Classification> = {
   namespace_not_found: "noindex_required",      // /_webmcp/<anything else> incl. invalid exec tool names (404)
   exec: "noindex_required",                     // /_webmcp/exec/<tool>
   health: "noindex_required",                   // /_webmcp/health
-  llms_txt: "exempt",                           // /llms.txt at apex (memory rule)
-  robots_txt: "exempt",                         // /robots.txt at apex (memory rule)
+  llms_txt: "noindex_forbidden",                // /llms.txt at apex (house rule: never noindex)
+  robots_txt: "noindex_forbidden",              // /robots.txt at apex (house rule: never noindex)
   agents_md: "noindex_required",                // /.well-known/agents.md
   agents_md_redirect: "exempt",                 // /AGENTS.md, /agents.md at apex
   api_catalog: "noindex_required",              // /.well-known/api-catalog
@@ -251,13 +260,13 @@ describe("X-Robots-Tag noindex coverage on protected-prefix routes", () => {
     expect(kinds.length).toBeGreaterThan(0);
   });
 
-  it("no 'exempt' kind has its canonical path under a protected prefix", () => {
+  it("no 'exempt' or 'noindex_forbidden' kind has its canonical path under a protected prefix", () => {
     const misclassified: string[] = [];
     for (const kind of kinds) {
-      if (CLASSIFICATION[kind] !== "exempt") continue;
+      if (CLASSIFICATION[kind] === "noindex_required") continue;
       const path = samplePath(kind, config);
       if (isProtected(path)) {
-        misclassified.push(`${kind} -> ${path} (classified exempt but path is under a protected prefix)`);
+        misclassified.push(`${kind} -> ${path} (classified ${CLASSIFICATION[kind]} but path is under a protected prefix)`);
       }
     }
     expect(misclassified, "exempt routes must not serve a protected-prefix path").toEqual([]);
@@ -273,6 +282,120 @@ describe("X-Robots-Tag noindex coverage on protected-prefix routes", () => {
         header,
         `${kind} (sample path ${samplePath(kind, config)}) must emit X-Robots-Tag: noindex but got: ${JSON.stringify(header)}`,
       ).toContain("noindex");
+    });
+  }
+});
+
+// What proxyToOrigin can hand a route: its own relays and failures carry noindex (most of its callers
+// live under /.well-known/), and an origin answer can carry any header, X-Robots-Tag included.
+const upstreamAnswers: Record<string, () => Response> = {
+  "origin has no file (404)": () => new Response("", { status: 404 }),
+  "origin text file (200)": () => new Response("# origin\n", { status: 200, headers: { "content-type": "text/plain" } }),
+  "origin text file (200) that sends its own noindex": () =>
+    new Response("# origin\n", { status: 200, headers: { "content-type": "text/plain", "x-robots-tag": "noindex" } }),
+  "relayed redirect that left allowed_origins": () =>
+    new Response(null, {
+      status: 301,
+      headers: { location: "https://www.example.com/x", "cache-control": "no-store", "x-robots-tag": "noindex" },
+    }),
+  "502 from proxyToOrigin": () =>
+    new Response("origin request failed", {
+      status: 502,
+      headers: { "content-type": "text/plain; charset=utf-8", "x-robots-tag": "noindex" },
+    }),
+  "504 from proxyToOrigin": () =>
+    new Response("origin did not answer in time", {
+      status: 504,
+      headers: { "content-type": "text/plain; charset=utf-8", "x-robots-tag": "noindex" },
+    }),
+  "origin 5xx relayed as it came": () => new Response("boom", { status: 503, headers: { "content-type": "text/plain" } }),
+  "origin 5xx that sends its own noindex": () =>
+    new Response("boom", { status: 503, headers: { "content-type": "text/plain", "x-robots-tag": "noindex" } }),
+  "origin HTML (not mergeable)": () =>
+    new Response("<html></html>", { status: 200, headers: { "content-type": "text/html" } }),
+};
+
+function forbiddenRoute(kind: RouteMatch["kind"], config: Config, answer: () => Response): Promise<Response> {
+  const proxy = async () => answer();
+  switch (kind) {
+    case "llms_txt":
+      return llmsTxtResponse(new Request("https://example.com/llms.txt"), config, proxy);
+    case "robots_txt":
+      return robotsTxtResponse(new Request("https://example.com/robots.txt"), config, proxy);
+    default:
+      throw new Error(`no 'noindex_forbidden' route builder for kind ${kind}; add one`);
+  }
+}
+
+describe("X-Robots-Tag is absent on the apex discovery files, whatever the answer", () => {
+  const config = makeConfig();
+  const forbidden = (Object.keys(CLASSIFICATION) as RouteMatch["kind"][]).filter(
+    (k) => CLASSIFICATION[k] === "noindex_forbidden",
+  );
+
+  it("classifies llms.txt and robots.txt as noindex_forbidden", () => {
+    expect([...forbidden].sort()).toEqual(["llms_txt", "robots_txt"]);
+  });
+
+  for (const kind of forbidden) {
+    for (const [label, answer] of Object.entries(upstreamAnswers)) {
+      it(`${kind}: ${label}`, async () => {
+        const res = await forbiddenRoute(kind, config, answer);
+        expect(
+          [...res.headers.keys()],
+          `${kind} (sample path ${samplePath(kind, config)}) must carry no X-Robots-Tag, got ${JSON.stringify(res.headers.get("x-robots-tag"))}`,
+        ).not.toContain("x-robots-tag");
+      });
+    }
+  }
+
+  it("keeps the status, body and other headers of what it relays", async () => {
+    const res = await forbiddenRoute("robots_txt", config, upstreamAnswers["502 from proxyToOrigin"]!);
+    expect(res.status).toBe(502);
+    expect(res.headers.get("content-type")).toBe("text/plain; charset=utf-8");
+    expect(await res.text()).toBe("origin request failed");
+
+    const redirect = await forbiddenRoute("llms_txt", config, upstreamAnswers["relayed redirect that left allowed_origins"]!);
+    expect(redirect.status).toBe(301);
+    expect(redirect.headers.get("location")).toBe("https://www.example.com/x");
+    expect(redirect.headers.get("cache-control")).toBe("no-store");
+  });
+});
+
+describe("a path in passthrough mode is origin's, not a route cf-webmcp serves", () => {
+  // The router hands these to the ordinary proxy ("proxy" is classified exempt), so the noindex rule
+  // does not apply and the Worker adds no X-Robots-Tag to the origin answer.
+  const base = makeConfig();
+  const request = (path: string) => new Request(`https://example.com${path}`);
+  const surfaces: Array<{ name: string; config: Config; paths: string[] }> = [
+    { name: "llms_txt", config: { ...base, llms_txt: { ...base.llms_txt, mode: "passthrough" } }, paths: [base.llms_txt.path] },
+    { name: "robots_txt", config: { ...base, robots_txt: { ...base.robots_txt, mode: "passthrough" } }, paths: [base.robots_txt.path] },
+    {
+      name: "agents_md",
+      config: { ...base, agents_md: { ...base.agents_md, mode: "passthrough" } },
+      paths: [base.agents_md.path, ...base.agents_md.aliases],
+    },
+    { name: "api_catalog", config: { ...base, api_catalog: { ...base.api_catalog, mode: "passthrough" } }, paths: [base.api_catalog.path] },
+    { name: "ai_catalog", config: { ...base, ai_catalog: { ...base.ai_catalog, mode: "passthrough" } }, paths: [base.ai_catalog.path] },
+    {
+      name: "agent_skills",
+      config: { ...base, agent_skills: { ...base.agent_skills, mode: "passthrough" } },
+      paths: [base.agent_skills.path, ...base.agent_skills.aliases],
+    },
+    {
+      name: "agent_skills_index",
+      config: { ...base, agent_skills_index: { ...base.agent_skills_index, mode: "passthrough" } },
+      paths: [base.agent_skills_index.path],
+    },
+  ];
+
+  for (const { name, config, paths } of surfaces) {
+    it(`${name}: every path routes to the exempt proxy, so no noindex is expected`, () => {
+      for (const path of paths) {
+        const kind = matchRoute(config, request(path), "bootstrap.abc12345.js", "widget.abc12345.js").kind;
+        expect(kind, `${name} path ${path} in passthrough mode`).toBe("proxy");
+        expect(CLASSIFICATION[kind]).toBe("exempt");
+      }
     });
   }
 });

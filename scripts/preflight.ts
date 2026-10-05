@@ -1,18 +1,29 @@
 /**
  * Preflight: detect path collisions before deploy.
  *
- * Given a target webmcp.toml, fetches every Worker-claimed path directly from
- * origin (bypassing the Worker) and reports OK / merge / COLLISION per path.
+ * Given a target webmcp.toml, fetches every Worker-claimed path from
+ * [origin].base_url and reports OK / merge / COLLISION per path. It also POSTs a
+ * JSON-RPC `initialize` to the landing path and warns when an origin MCP server
+ * answers there.
  *
  * Usage:
  *   npm run preflight -- --config=templates/example-site/webmcp.toml
  *   npm run preflight -- --config=webmcp.toml --force   # do not exit non-zero
  *
- * Bypass mechanism:
- *   - If CF_WEBMCP_DEPLOY_TOKEN is set, sends `cf-webmcp-bypass: 1` plus the
- *     token header so the Worker forwards the request to origin unmodified.
- *   - If not set, fetches the origin's [origin].base_url directly (typical
- *     for initial deploys before DNS is routed through CF).
+ * Where it is valid:
+ *   Preflight requests [origin].base_url as an ordinary client. It sees the
+ *   origin's own answers only while that hostname is NOT routed through the
+ *   Worker. Once it is, every request lands on the Worker and preflight reports
+ *   the Worker's own responses (landing, manifest, merged files) back as
+ *   collisions and merges. Run it before routing the hostname, or against a
+ *   direct origin hostname (a copy of the TOML with [origin].base_url set to it).
+ *
+ * Token headers:
+ *   If CF_WEBMCP_DEPLOY_TOKEN is set, preflight sends `cf-webmcp-bypass: 1` and
+ *   `cf-webmcp-deploy-token`, the same headers the Worker puts on its own origin
+ *   fetches, so the publisher's origin WAF rule that allows the Worker also lets
+ *   preflight through. The Worker does not read these headers: it has no bypass
+ *   mode and forwards nothing to origin because of them.
  */
 
 import { promises as fs } from "node:fs";
@@ -20,6 +31,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import TOML from "@iarna/toml";
 import { ConfigSchema, type Config } from "../src/config-types.js";
+import { configHashOf, resolveInherits } from "./build-config.js";
 
 interface Args {
   configPath: string;
@@ -51,10 +63,10 @@ function parseArgs(argv: string[]): Args {
 async function loadConfig(p: string): Promise<Config> {
   const text = await fs.readFile(p, "utf8");
   const raw = TOML.parse(text) as Record<string, unknown>;
-  // Strip `inherits` (preflight does not resolve inheritance; it inspects
-  // declared paths in the target file).
-  delete raw["inherits"];
-  const parsed = ConfigSchema.safeParse(raw);
+  // Resolve `inherits` exactly as the build does, so preflight inspects the same
+  // merged config the Worker is built from and stamps the same config hash.
+  const merged = await resolveInherits(raw, path.dirname(p));
+  const parsed = ConfigSchema.safeParse(merged);
   if (!parsed.success) {
     throw new Error(`config validation failed:\n${parsed.error.issues.map((i) => `  - ${i.path.join(".")}: ${i.message}`).join("\n")}`);
   }
@@ -107,12 +119,18 @@ function pathsToCheck(config: Config): PathCheck[] {
 const MARKER_LLMS = "<!-- cf-webmcp:begin -->";
 const MARKER_ROBOTS = "# cf-webmcp:begin";
 
-async function probe(check: PathCheck, deployToken: string | undefined): Promise<Outcome> {
+/** Request headers for every preflight probe: a User-Agent, plus the token pair when a token is set. */
+function originHeaders(deployToken: string | undefined): Record<string, string> {
   const headers: Record<string, string> = { "user-agent": "cf-webmcp-preflight/1.0" };
   if (deployToken) {
     headers["cf-webmcp-bypass"] = "1";
     headers["cf-webmcp-deploy-token"] = deployToken;
   }
+  return headers;
+}
+
+async function probe(check: PathCheck, deployToken: string | undefined): Promise<Outcome> {
+  const headers = originHeaders(deployToken);
   try {
     const res = await fetch(check.url.toString(), {
       method: "GET",
@@ -156,6 +174,95 @@ async function probe(check: PathCheck, deployToken: string | undefined): Promise
   }
 }
 
+/** One MCP probe: the path it POSTs to, what came back. */
+type McpOutcome =
+  | { kind: "mcp"; status: number; contentType: string }
+  | { kind: "none"; status: number; contentType: string }
+  | { kind: "skipped"; reason: string };
+
+/** The probe must not hang preflight on an origin that never answers a POST. */
+const MCP_PROBE_TIMEOUT_MS = 10_000;
+
+/** An MCP server answers an initialize with a JSON body or an event stream. */
+const MCP_CONTENT_TYPE = /^(?:application\/json|text\/event-stream)\s*(?:;|$)/i;
+
+/**
+ * The landing paths the Worker stops answering for non-HTML requests: the configured
+ * path and, for a directory-form path (/mcp/), the slash-less form the router
+ * redirects (/mcp), which is where Cloudflare WebMCP Labs POSTs. Empty when the
+ * landing feature is off, because then the Worker leaves the path to origin anyway.
+ */
+function mcpProbePaths(config: Config): string[] {
+  if (!config.features.webmcp_landing) return [];
+  const landing = config.webmcp_landing.path;
+  const paths = [landing];
+  if (landing.endsWith("/") && landing.length > 1) paths.push(landing.slice(0, -1));
+  return paths;
+}
+
+async function packageVersion(): Promise<string> {
+  try {
+    const file = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "package.json");
+    const pkg = JSON.parse(await fs.readFile(file, "utf8")) as { version?: unknown };
+    return typeof pkg.version === "string" ? pkg.version : "0";
+  } catch {
+    return "0";
+  }
+}
+
+/**
+ * POST a minimal JSON-RPC 2.0 `initialize` to `url`. A 200 with a JSON or event-stream
+ * content type means an MCP server answers at that path on origin. Anything else, and
+ * any network error, is "no MCP server": this probe never fails preflight. The body is
+ * cancelled unread, so an event stream that stays open cannot hold the process.
+ */
+async function probeMcpServer(url: URL, deployToken: string | undefined, version: string): Promise<McpOutcome> {
+  const headers = {
+    ...originHeaders(deployToken),
+    "content-type": "application/json",
+    accept: "application/json, text/event-stream",
+  };
+  const body = JSON.stringify({
+    jsonrpc: "2.0",
+    id: 1,
+    method: "initialize",
+    params: {
+      protocolVersion: "2025-06-18",
+      capabilities: {},
+      clientInfo: { name: "cf-webmcp-preflight", version },
+    },
+  });
+  try {
+    const res = await fetch(url.toString(), {
+      method: "POST",
+      headers,
+      body,
+      redirect: "manual",
+      signal: AbortSignal.timeout(MCP_PROBE_TIMEOUT_MS),
+    });
+    const contentType = res.headers.get("content-type") ?? "";
+    await res.body?.cancel().catch(() => {});
+    if (res.status === 200 && MCP_CONTENT_TYPE.test(contentType)) {
+      return { kind: "mcp", status: res.status, contentType };
+    }
+    return { kind: "none", status: res.status, contentType };
+  } catch (e) {
+    return { kind: "skipped", reason: (e as Error).message };
+  }
+}
+
+function formatMcpRow(label: string, outcome: McpOutcome): string {
+  const row = `${label} (POST initialize)`.padEnd(34);
+  switch (outcome.kind) {
+    case "mcp":
+      return `  ${row} ${String(outcome.status).padEnd(3)} ${outcome.contentType.padEnd(28)} → WARNING (an MCP server answers at origin)`;
+    case "none":
+      return `  ${row} ${String(outcome.status).padEnd(3)} ${outcome.contentType.padEnd(28)} → no MCP server`;
+    case "skipped":
+      return `  ${row} ERR                              → not checked (${outcome.reason})`;
+  }
+}
+
 function formatRow(check: PathCheck, outcome: Outcome): string {
   const label = check.label.padEnd(34);
   switch (outcome.kind) {
@@ -170,22 +277,31 @@ function formatRow(check: PathCheck, outcome: Outcome): string {
   }
 }
 
-export async function runPreflight(configPath: string, force: boolean): Promise<number> {
+export interface PreflightOptions {
+  /** Directory preflight.json is written to. Default: src/generated. */
+  outDir?: string;
+  /** Deploy token to send. Default: the CF_WEBMCP_DEPLOY_TOKEN environment variable. */
+  deployToken?: string;
+  /** Receives each output line. Default: console.log. */
+  log?: (line: string) => void;
+}
+
+export async function runPreflight(configPath: string, force: boolean, opts: PreflightOptions = {}): Promise<number> {
   const absPath = path.resolve(configPath);
   const config = await loadConfig(absPath);
   const checks = pathsToCheck(config);
-  const deployToken = process.env["CF_WEBMCP_DEPLOY_TOKEN"];
-
+  const deployToken = opts.deployToken ?? process.env["CF_WEBMCP_DEPLOY_TOKEN"];
   // eslint-disable-next-line no-console
-  console.log(`preflight  ${new URL(config.origin.base_url).host}  (token: ${deployToken ? "present" : "absent"})`);
+  const log = opts.log ?? ((line: string) => console.log(line));
+
+  log(`preflight  ${new URL(config.origin.base_url).host}  (token: ${deployToken ? "present" : "absent"})`);
 
   let hardCollisions = 0;
   const collisions: string[] = [];
   const warnings: string[] = [];
   for (const check of checks) {
     const outcome = await probe(check, deployToken);
-    // eslint-disable-next-line no-console
-    console.log(formatRow(check, outcome));
+    log(formatRow(check, outcome));
     if (outcome.kind === "collision") {
       hardCollisions++;
       collisions.push(`${check.label}: ${outcome.reason}`);
@@ -196,57 +312,62 @@ export async function runPreflight(configPath: string, force: boolean): Promise<
     }
   }
 
+  // An origin MCP server at the landing path is not a collision: the Worker serves
+  // the landing page only for HTML GET and HEAD, so the server stays reachable for
+  // everything else. It is worth a warning, because that is a change from the days
+  // the landing answered every method.
+  const version = await packageVersion();
+  for (const landingPath of mcpProbePaths(config)) {
+    const outcome = await probeMcpServer(new URL(landingPath, config.origin.base_url), deployToken, version);
+    log(formatMcpRow(landingPath, outcome));
+    if (outcome.kind === "mcp") {
+      warnings.push(
+        `${landingPath}: an MCP server answers here at origin (POST initialize returned 200 ${outcome.contentType}). ` +
+          `The Worker serves its landing page only to GET and HEAD requests that accept HTML; ` +
+          `non-HTML requests, MCP clients included, now reach that server.`,
+      );
+    }
+  }
+
   // Persist the result so build-config.ts can embed it into the generated
   // config module. The Worker surfaces this on /_webmcp/health.preflight.
-  await writePreflightResult({
-    ran_at: new Date().toISOString(),
-    collisions,
-    warnings,
-    config_hash: await computeCurrentConfigHash(absPath),
-  });
+  // The hash comes from the build's own function over the same resolved config.
+  await writePreflightResult(
+    {
+      ran_at: new Date().toISOString(),
+      collisions,
+      warnings,
+      config_hash: configHashOf(config),
+    },
+    opts.outDir,
+  );
 
-  // eslint-disable-next-line no-console
-  console.log("");
+  log("");
   if (hardCollisions === 0) {
-    // eslint-disable-next-line no-console
-    console.log(`preflight  OK`);
+    log(`preflight  OK`);
     return 0;
   }
   if (force) {
-    // eslint-disable-next-line no-console
-    console.log(`preflight  ${hardCollisions} hard collision(s), continuing anyway (--force)`);
+    log(`preflight  ${hardCollisions} hard collision(s), continuing anyway (--force)`);
     return 0;
   }
-  // eslint-disable-next-line no-console
-  console.log(`preflight  ${hardCollisions} hard collision(s), exit non-zero. Override with --force.`);
+  log(`preflight  ${hardCollisions} hard collision(s), exit non-zero. Override with --force.`);
   return 1;
 }
 
-async function writePreflightResult(result: {
-  ran_at: string;
-  collisions: string[];
-  warnings: string[];
-  config_hash: string;
-}): Promise<void> {
-  const outDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "generated");
+async function writePreflightResult(
+  result: {
+    ran_at: string;
+    collisions: string[];
+    warnings: string[];
+    config_hash: string;
+  },
+  outDirOverride?: string,
+): Promise<void> {
+  const outDir =
+    outDirOverride ?? path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "generated");
   await fs.mkdir(outDir, { recursive: true });
   await fs.writeFile(path.join(outDir, "preflight.json"), JSON.stringify(result, null, 2) + "\n");
-}
-
-/**
- * Compute the same hash that build-config.ts will use, so the embedded
- * preflight result can be cross-checked against the active config at
- * build time and flagged as stale on mismatch.
- */
-async function computeCurrentConfigHash(tomlPath: string): Promise<string> {
-  const raw = await fs.readFile(tomlPath, "utf8");
-  const parsedToml = TOML.parse(raw) as Record<string, unknown>;
-  delete parsedToml["inherits"];
-  const parsed = ConfigSchema.safeParse(parsedToml);
-  if (!parsed.success) return "unknown";
-  const canonical = JSON.stringify(parsed.data);
-  const { createHash } = await import("node:crypto");
-  return createHash("sha256").update(canonical).digest("hex").slice(0, 8);
 }
 
 async function main(): Promise<void> {

@@ -11,6 +11,7 @@
 
 import type { Config } from "../config-types";
 import { buildCacheControl } from "../cache";
+import { withoutRobotsTag } from "../robots-tag";
 
 const BEGIN = "<!-- cf-webmcp:begin -->";
 const END = "<!-- cf-webmcp:end -->";
@@ -38,7 +39,7 @@ export async function llmsTxtResponse(
   if (config.llms_txt.mode === "synthesize" || config.llms_txt.mode === "replace") {
     body = `${BEGIN}\n${block}\n${END}\n`;
   } else {
-    // merge
+    // merge (passthrough never gets here: the router leaves that path to origin)
     const target = new URL(config.llms_txt.path, config.origin.base_url);
     const upstream = await proxyToOrigin(target);
     if (upstream.status === 404) {
@@ -47,8 +48,10 @@ export async function llmsTxtResponse(
       const original = await upstream.text();
       body = mergeBlock(original, block);
     } else {
-      // Pass origin's response through, augmentation is best-effort.
-      return upstream;
+      // Pass origin's response through, augmentation is best-effort. This route
+      // never carries X-Robots-Tag, so the noindex proxyToOrigin puts on its own
+      // relays and failures comes off here.
+      return withoutRobotsTag(upstream);
     }
   }
 

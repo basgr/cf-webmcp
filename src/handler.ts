@@ -94,8 +94,7 @@ export function createHandler(deps: HandlerDeps): Required<Pick<ExportedHandler<
 
   return {
     async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-      const url = new URL(request.url);
-      const match = matchRoute(config, url, meta.BOOTSTRAP_ASSET, meta.WIDGET_ASSET);
+      const match = matchRoute(config, request, meta.BOOTSTRAP_ASSET, meta.WIDGET_ASSET);
 
       switch (match.kind) {
         case "manifest":
@@ -133,6 +132,7 @@ export function createHandler(deps: HandlerDeps): Required<Pick<ExportedHandler<
             preflight: meta.PREFLIGHT,
             widgetAsset: meta.WIDGET_ASSET,
             bucket: env.CF_WEBMCP_ASSETS,
+            envToken: env.CF_WEBMCP_HEALTH_TOKEN,
           });
         case "llms_txt":
           return llmsTxtResponse(request, config, (u) => proxyToOrigin(u, env), meta.LLMS_TXT_TOKEN_HINTS);
@@ -171,7 +171,8 @@ export function createHandler(deps: HandlerDeps): Required<Pick<ExportedHandler<
    * checked against allowed_origins before it is requested and the deploy token only
    * ever goes to a listed origin. An origin redirect that leaves the list is relayed
    * to the caller's client instead of followed. Any other failure is a 502 (a stalled
-   * origin a 504), always with noindex, so a route never throws.
+   * origin a 504), always with noindex, so a route never throws. The llms.txt and
+   * robots.txt routes remove that noindex before they answer (see proxyFailure).
    */
   async function proxyToOrigin(url: URL, env: Env): Promise<Response> {
     const target = new URL(url.pathname + url.search, config.origin.base_url);
@@ -221,9 +222,10 @@ export function createHandler(deps: HandlerDeps): Required<Pick<ExportedHandler<
    * Everything else is a 502 with a fixed message. The refused value goes to the log,
    * never to the client: a host can be an internal name and a Location can carry a query.
    *
-   * Every response here carries noindex. These routes live under /.well-known/*
-   * (llms.txt and robots.txt are exempt on success, but an error or a relay is
-   * not content worth indexing).
+   * Every response here carries noindex, because most callers serve under
+   * /.well-known/*. The two apex discovery files, llms.txt and robots.txt, must never
+   * carry X-Robots-Tag: their route handlers drop the header from whatever they pass
+   * on (see src/robots-tag.ts), so a relay or a 502 from them has none.
    */
   function proxyFailure(start: URL, failure: RedirectFailure): Response {
     if (failure.kind === "off_list" && failure.redirected) {

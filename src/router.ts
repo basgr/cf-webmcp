@@ -40,6 +40,26 @@ const BOOTSTRAP_ASSET_NAME = /^bootstrap\.[^/]+\.js$/;
 const WIDGET_ASSET_NAME = /^widget\.[^/]+\.js$/;
 
 /**
+ * Whether a request is for the landing page rather than for something that merely
+ * shares its URL. The landing is a page for people: only GET and HEAD, and only
+ * when Accept names neither `application/json` nor `text/event-stream`.
+ *
+ * Anything else is MCP traffic or an API call and must reach origin. Cloudflare
+ * WebMCP Labs injects a bridge with `data-mcp-url="/mcp"` and POSTs JSON-RPC there,
+ * and an origin MCP server may sit at the same path; a streamable HTTP client sends
+ * `Accept: application/json, text/event-stream`. A missing Accept header or a
+ * wildcard one is a browser or a plain fetch and gets the landing.
+ *
+ * The match is a case-insensitive substring test, and any occurrence counts, a
+ * `q=0` refusal included: a client that names either type is not asking for a page.
+ */
+function isLandingRequest(request: Request): boolean {
+  if (request.method !== "GET" && request.method !== "HEAD") return false;
+  const accept = (request.headers.get("accept") ?? "").toLowerCase();
+  return !accept.includes("application/json") && !accept.includes("text/event-stream");
+}
+
+/**
  * `widgetAsset` is null when this build ships no widget (feature pin missing).
  * A request for any other `bootstrap.<x>.js` / `widget.<x>.js` under the
  * namespace is a stale or unknown asset URL: it gets `asset_not_found` and is
@@ -48,11 +68,11 @@ const WIDGET_ASSET_NAME = /^widget\.[^/]+\.js$/;
  */
 export function matchRoute(
   config: Config,
-  url: URL,
+  request: Request,
   bootstrapAsset: string,
   widgetAsset: string | null,
 ): RouteMatch {
-  const pathname = url.pathname;
+  const pathname = new URL(request.url).pathname;
   const ns = config.paths.namespace;
 
   // Manifest (canonical) plus 301-aliases (e.g. legacy /.well-known/webmcp.json).
@@ -65,9 +85,11 @@ export function matchRoute(
     }
   }
 
-  // Landing with directory semantics: redirect "/foo" → "/foo/"
+  // Landing with directory semantics: redirect "/foo" → "/foo/". Both the page and
+  // the redirect belong to people with a browser: a request that is not an HTML GET
+  // or HEAD falls through to origin (see isLandingRequest).
   const landingPath = config.webmcp_landing.path;
-  if (config.features.webmcp_landing) {
+  if (config.features.webmcp_landing && isLandingRequest(request)) {
     if (pathname === landingPath) return { kind: "landing" };
     if (landingPath.endsWith("/") && pathname === landingPath.slice(0, -1)) {
       return { kind: "landing_redirect" };
@@ -101,18 +123,32 @@ export function matchRoute(
   // Health
   if (pathname === `${ns}/health`) return { kind: "health" };
 
+  // Passthrough means cf-webmcp does not serve the path: origin owns the file and
+  // the request goes through the ordinary proxy, which relays origin's response and
+  // adds only the Link header. That includes /.well-known/agents.md: the Worker adds
+  // no X-Robots-Tag there, because the response is origin's, not ours (same as the
+  // api_catalog, ai_catalog and agent_skills surfaces below).
+
   // llms.txt
-  if (config.features.llms_txt && pathname === config.llms_txt.path) {
+  if (
+    config.features.llms_txt &&
+    config.llms_txt.mode !== "passthrough" &&
+    pathname === config.llms_txt.path
+  ) {
     return { kind: "llms_txt" };
   }
 
   // robots.txt
-  if (config.features.robots_txt && pathname === config.robots_txt.path) {
+  if (
+    config.features.robots_txt &&
+    config.robots_txt.mode !== "passthrough" &&
+    pathname === config.robots_txt.path
+  ) {
     return { kind: "robots_txt" };
   }
 
   // agents.md (canonical) plus 301-aliases
-  if (config.features.agents_md) {
+  if (config.features.agents_md && config.agents_md.mode !== "passthrough") {
     if (pathname === config.agents_md.path) {
       return { kind: "agents_md" };
     }

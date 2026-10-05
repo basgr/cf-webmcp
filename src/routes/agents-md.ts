@@ -33,7 +33,7 @@ export async function agentsMdResponse(
   if (config.agents_md.mode === "synthesize" || config.agents_md.mode === "replace") {
     body = `${BEGIN}\n${block}\n${END}\n`;
   } else {
-    // merge
+    // merge (passthrough never gets here: the router leaves that path to origin)
     const target = new URL(config.agents_md.path, config.origin.base_url);
     const upstream = await proxyToOrigin(target);
     if (upstream.status === 404) {

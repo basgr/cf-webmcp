@@ -163,4 +163,61 @@ describe("healthResponse", () => {
     );
     expect(authed.status).toBe(200);
   });
+
+  describe("the CF_WEBMCP_HEALTH_TOKEN secret (envToken)", () => {
+    const base = { configHash: "abc12345", schemaVersion: 1, deployedAt: "2026-05-13T20:00:00.000Z" };
+    const get = (config: Config, envToken: string | undefined, bearer?: string) =>
+      healthResponse(
+        new Request("https://example.com/_webmcp/health", bearer ? { headers: { authorization: `Bearer ${bearer}` } } : undefined),
+        config,
+        { ...base, envToken },
+      );
+
+    it("with public = false and only the secret: 401 without auth or with a wrong bearer, 200 with the secret", async () => {
+      const config = makeConfig({ health: { public: false, token: "" } });
+
+      const none = await get(config, "from-secret");
+      expect(none.status).toBe(401);
+      expect(none.headers.get("x-robots-tag")).toBe("noindex");
+      expect((await get(config, "from-secret", "wrong")).status).toBe(401);
+      expect((await get(config, "from-secret", "from-secret")).status).toBe(200);
+    });
+
+    it("the secret wins over [health].token: the TOML token is rejected", async () => {
+      const config = makeConfig({ health: { public: false, token: "from-toml" } });
+
+      expect((await get(config, "from-secret", "from-toml")).status).toBe(401);
+      expect((await get(config, "from-secret", "from-secret")).status).toBe(200);
+    });
+
+    it("falls back to [health].token when no secret is set", async () => {
+      const config = makeConfig({ health: { public: false, token: "from-toml" } });
+
+      expect((await get(config, undefined, "from-toml")).status).toBe(200);
+      expect((await get(config, undefined)).status).toBe(401);
+    });
+
+    it("an empty secret counts as unset", async () => {
+      const closed = makeConfig({ health: { public: false, token: "" } });
+      const open = makeConfig({ health: { public: true, token: "" } });
+      const toml = makeConfig({ health: { public: false, token: "from-toml" } });
+
+      expect((await get(closed, "")).status).toBe(404);
+      expect((await get(open, "")).status).toBe(200);
+      expect((await get(toml, "", "from-toml")).status).toBe(200);
+    });
+
+    it("with public = false and neither token: 404", async () => {
+      const res = await get(makeConfig({ health: { public: false, token: "" } }), undefined);
+      expect(res.status).toBe(404);
+      expect(res.headers.get("x-robots-tag")).toBe("noindex");
+    });
+
+    it("with public = true, a secret alone still requires the bearer", async () => {
+      const config = makeConfig({ health: { public: true, token: "" } });
+
+      expect((await get(config, "from-secret")).status).toBe(401);
+      expect((await get(config, "from-secret", "from-secret")).status).toBe(200);
+    });
+  });
 });

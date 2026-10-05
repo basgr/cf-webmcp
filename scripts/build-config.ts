@@ -49,8 +49,9 @@ async function readToml(filePath: string): Promise<Record<string, unknown>> {
 /**
  * Resolve `inherits = "wordpress.toml"`. Single-parent only, no chaining.
  * Top-level blocks in the child replace the parent block; tools merge by name.
+ * Exported so scripts/preflight.ts reads the same merged config the build does.
  */
-async function resolveInherits(
+export async function resolveInherits(
   raw: Record<string, unknown>,
   baseDir: string,
 ): Promise<Record<string, unknown>> {
@@ -149,6 +150,15 @@ function checkAllowList(config: Config): void {
 
 function computeHash(input: string): string {
   return createHash("sha256").update(input).digest("hex").slice(0, 8);
+}
+
+/**
+ * CONFIG_HASH: the first 8 hex of the sha256 of the validated, inheritance-resolved
+ * config. Exported so scripts/preflight.ts stamps its result with the very same
+ * function; a preflight hash that differs from the build's marks the result stale.
+ */
+export function configHashOf(config: Config): string {
+  return computeHash(JSON.stringify(config));
 }
 
 /**
@@ -887,10 +897,10 @@ export async function buildConfig(opts: BuildOptions): Promise<void> {
   checkPathCollisions(config);
   checkToolNameCollisions(config);
 
-  const canonical = JSON.stringify(config); // deterministic enough
-  // CONFIG_HASH covers the config alone (preflight recomputes it from the TOML)
-  // and stamps ETags. It does NOT name the served assets.
-  const configHash = computeHash(canonical);
+  // CONFIG_HASH covers the config alone (preflight recomputes it from the TOML,
+  // through the same resolveInherits and configHashOf) and stamps ETags. It does
+  // NOT name the served assets.
+  const configHash = configHashOf(config);
 
   // Content-addressed assets. The bootstrap is named after its own bytes, so a
   // generator change with an unchanged TOML still moves the URL, together with
