@@ -81,6 +81,39 @@ export function validateInput(schema: InputSchemaConfig, raw: unknown): Validati
   return { ok: true, value: input };
 }
 
+/** How many levels of arrays an array without `items` may nest. A bound, so that no input can make the check recurse without one. */
+const MAX_UNTYPED_ARRAY_DEPTH = 8;
+
+/**
+ * The check for an array that declares no `items`: every element is a string, a finite number or a
+ * boolean, or an array that holds only those (nested at most MAX_UNTYPED_ARRAY_DEPTH levels).
+ * Anything else, an object or null included, is refused, named by its path. Returns null when the
+ * array passes. Typed `items` are checked by validateProperty, as before.
+ */
+function scalarArray(value: unknown[], key: string, depth: number): ValidationResult | null {
+  if (depth > MAX_UNTYPED_ARRAY_DEPTH) {
+    return {
+      ok: false,
+      message: `"${key}" is nested too deeply (an array without "items" holds at most ${MAX_UNTYPED_ARRAY_DEPTH} levels of arrays)`,
+    };
+  }
+  for (let i = 0; i < value.length; i++) {
+    const element = value[i];
+    const path = `${key}[${i}]`;
+    if (Array.isArray(element)) {
+      const r = scalarArray(element, path, depth + 1);
+      if (r) return r;
+    } else if (
+      typeof element !== "string" &&
+      typeof element !== "boolean" &&
+      !(typeof element === "number" && Number.isFinite(element))
+    ) {
+      return { ok: false, message: `"${path}" must be a string, number or boolean (an array without "items" holds only those)` };
+    }
+  }
+  return null;
+}
+
 function validateProperty(
   schema: InputSchemaProperty_,
   key: string,
@@ -136,6 +169,12 @@ function validateProperty(
           const r = validateProperty(s.items, `${key}[${i}]`, value[i]);
           if (!r.ok) return r;
         }
+      } else {
+        // No `items`: nothing says what an element is. The schema subset has no object type, so an
+        // object can never be a declared shape, and one let through here would be carried, with
+        // everything nested in it, to wherever the input goes (a POST body, say).
+        const r = scalarArray(value, key, 1);
+        if (r) return r;
       }
       break;
     default:

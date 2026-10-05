@@ -560,3 +560,37 @@ describe("input_schema enum", () => {
     expect(messages({ type: "array", items: { type: "string" } })).toEqual([]);
   });
 });
+
+describe("input_schema required", () => {
+  const schema = (input_schema: Record<string, unknown>) => ({
+    ...minimal,
+    tools: [{ ...minimal.tools[0]!, input_schema }],
+  });
+  const messages = (input_schema: Record<string, unknown>): string[] => {
+    const r = ConfigSchema.safeParse(schema(input_schema));
+    return r.success ? [] : r.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`);
+  };
+
+  it("accepts names that are all declared, and an empty list", () => {
+    expect(messages({ type: "object", required: ["a"], properties: { a: { type: "string" } } })).toEqual([]);
+    expect(messages({ type: "object", required: [], properties: {} })).toEqual([]);
+    expect(messages({ type: "object", properties: { a: { type: "string" } } })).toEqual([]);
+  });
+
+  it("rejects a required name that is not declared in properties, naming its place in the list", () => {
+    const found = messages({ type: "object", required: ["a", "token"], properties: { a: { type: "string" } } });
+    expect(found).toEqual([
+      'tools.0.input_schema.required.1: required name "token" is not declared in properties (only declared properties reach an executor, so it would be dropped)',
+    ]);
+  });
+
+  it("rejects every undeclared required name, and any when there are no properties at all", () => {
+    expect(messages({ type: "object", required: ["x", "y"], properties: {} })).toHaveLength(2);
+    expect(messages({ type: "object", required: ["x"] })).toHaveLength(1);
+  });
+
+  it("does not take an inherited name for a declared one", () => {
+    expect(messages({ type: "object", required: ["constructor"], properties: {} })).toHaveLength(1);
+    expect(messages({ type: "object", required: ["toString"], properties: { a: { type: "string" } } })).toHaveLength(1);
+  });
+});

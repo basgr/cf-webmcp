@@ -39,6 +39,7 @@ cf-webmcp publishes tools. It does not authenticate or rate-limit the agent runt
 ## Defence-in-depth in cf-webmcp itself
 
 - **Subresource Integrity (SRI) on the injected bootstrap `<script>`** (since v0.3.6). The injected tag carries `integrity="sha384-..."` and `crossorigin="anonymous"`. A browser refuses to execute the bootstrap if its body has been substituted between server and client (compromised CDN node, MITM on a non-HTTPS leg, intermediary cache poisoning). Toggle via `[features].subresource_integrity` (default `true`). Note: this does not address the cross-origin prompt-injection class above; it is a separate, network-layer defence.
+- **Executors read declared input only, and a path placeholder stays under its prefix.** The exec route hands an executor, a POST body and the cache key only the properties the tool declares in `input_schema` (an undeclared key, a `__proto__` entry or an object inside an untyped array never leaves the Worker), and a value written into a `url_template` path cannot hold a `.` or `..` segment or move the request outside the template's own path prefix, so the deploy-token headers only go to the paths the publisher named. See [`docs/limitations.md`](limitations.md#a-path-placeholder-cannot-climb-out-of-its-path).
 
 ## Reporting a vulnerability
 

@@ -49,7 +49,8 @@ export interface ResolveOptions {
 }
 
 /**
- * Resolve a template into a URL, asserting the result lies in allowedOrigins.
+ * Resolve a template into a URL, asserting the result lies in allowedOrigins and under the
+ * template's own path prefix (a placeholder cannot climb out of the path the template names).
  * Throws an Envelope error payload on failure.
  */
 export function resolveUrl(
@@ -57,9 +58,11 @@ export function resolveUrl(
   opts: ResolveOptions,
 ): { ok: true; url: URL } | { ok: false; error: ErrorPayload } {
   let resolved: string;
+  let pathPrefix: string | null;
   try {
     const compiled = compileTemplate(opts.urlTemplate);
     resolved = compiled.resolver(opts.input);
+    pathPrefix = compiled.pathPrefix;
   } catch (e) {
     return { ok: false, error: { code: "invalid_input", message: (e as Error).message, retriable: false } };
   }
@@ -75,6 +78,20 @@ export function resolveUrl(
       error: {
         code: "invalid_input",
         message: `resolved origin ${url.origin} is not in allowed_origins`,
+        retriable: false,
+      },
+    };
+  }
+  // Defence in depth behind the placeholder check (a value with a dot segment never gets here):
+  // the path the URL parser produced must still start with the path the template spells out before
+  // its first placeholder. A template rooted at the origin has the prefix "/", which any path has.
+  // The message names the prefix and nothing of the path, which came from the caller.
+  if (pathPrefix !== null && !url.pathname.startsWith(pathPrefix)) {
+    return {
+      ok: false,
+      error: {
+        code: "invalid_input",
+        message: `resolved URL is outside the template's path prefix ${pathPrefix}`,
         retriable: false,
       },
     };

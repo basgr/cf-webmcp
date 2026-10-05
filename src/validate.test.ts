@@ -207,3 +207,88 @@ describe("declaredProperties", () => {
     expect(declaredProperties({}, { q: "a" })).toEqual({});
   });
 });
+
+describe("validateInput: an array without items holds scalars only", () => {
+  const parse = (text: string) => JSON.parse(text) as Record<string, unknown>;
+  const untyped: InputSchemaConfig = { type: "object", required: [], properties: { tags: { type: "array" } } };
+  const nestedUntyped: InputSchemaConfig = {
+    type: "object",
+    required: [],
+    properties: { tags: { type: "array", items: { type: "array" } } },
+  };
+
+  it("accepts strings, numbers and booleans, and the empty array", () => {
+    expect(validateInput(untyped, { tags: ["a", 1, 2.5, true, false, ""] }).ok).toBe(true);
+    expect(validateInput(untyped, { tags: [] }).ok).toBe(true);
+  });
+
+  it("rejects an object element, the message naming the element", () => {
+    expect(validateInput(untyped, { tags: ["a", { role: "admin" }] })).toEqual({
+      ok: false,
+      message: '"tags[1]" must be a string, number or boolean (an array without "items" holds only those)',
+    });
+  });
+
+  it("rejects the element that carries a __proto__ key, however it is nested in the object", () => {
+    const input = parse('{"tags":[{"role":"admin","__proto__":{"isAdmin":true}}]}');
+    const r = validateInput(untyped, input);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.message).toContain('"tags[0]"');
+  });
+
+  it("rejects null, which is not one of the scalar types", () => {
+    expect(validateInput(untyped, { tags: [null] }).ok).toBe(false);
+    expect(validateInput(untyped, { tags: ["a", null] }).ok).toBe(false);
+  });
+
+  it("accepts nested arrays of scalars, and rejects an object at any depth, naming the path", () => {
+    expect(validateInput(untyped, { tags: [["a", "b"], [1], [[true]]] }).ok).toBe(true);
+    expect(validateInput(untyped, { tags: [["a", { x: 1 }]] })).toEqual({
+      ok: false,
+      message: '"tags[0][1]" must be a string, number or boolean (an array without "items" holds only those)',
+    });
+    expect(validateInput(untyped, { tags: [[[["a"]], [{ deep: 1 }]]] }).ok).toBe(false);
+  });
+
+  it("applies the same rule one level down, to an array whose items are arrays without items", () => {
+    expect(validateInput(nestedUntyped, { tags: [["a"], [1, true]] }).ok).toBe(true);
+    expect(validateInput(nestedUntyped, { tags: [[{ role: "admin" }]] })).toEqual({
+      ok: false,
+      message: '"tags[0][0]" must be a string, number or boolean (an array without "items" holds only those)',
+    });
+    // The items are arrays, so a scalar item is a type error of its own.
+    expect(validateInput(nestedUntyped, { tags: ["a"] })).toEqual({ ok: false, message: '"tags[0]" must be an array' });
+  });
+
+  it("stops at a nesting depth of 8, without recursing without bound", () => {
+    const nest = (levels: number): unknown => (levels === 0 ? "x" : [nest(levels - 1)]);
+    expect(validateInput(untyped, { tags: nest(7) }).ok).toBe(true);
+    const tooDeep = validateInput(untyped, { tags: nest(60) });
+    expect(tooDeep.ok).toBe(false);
+    if (!tooDeep.ok) expect(tooDeep.message).toMatch(/^"tags(\[0\])+" is nested too deeply \(an array without "items" holds at most 8 levels of arrays\)$/);
+    // A hostile depth is refused, not a stack overflow.
+    expect(validateInput(untyped, { tags: nest(5000) }).ok).toBe(false);
+  });
+
+  it("leaves a typed items schema exactly as it was", () => {
+    const typed: InputSchemaConfig = {
+      type: "object",
+      required: [],
+      properties: { tags: { type: "array", items: { type: "string" } }, sizes: { type: "array", items: { type: "integer", enum: [1, 2] } } },
+    };
+    expect(validateInput(typed, { tags: ["a", "b"], sizes: [1, 2] }).ok).toBe(true);
+    expect(validateInput(typed, { tags: ["a", 5] })).toEqual({ ok: false, message: '"tags[1]" must be a string' });
+    expect(validateInput(typed, { tags: [{ role: "admin" }] })).toEqual({ ok: false, message: '"tags[0]" must be a string' });
+    expect(validateInput(typed, { sizes: [1, 3] })).toEqual({ ok: false, message: '"sizes[1]" must be one of 1, 2' });
+  });
+
+  it("so what declaredProperties passes on holds no object, whatever the caller sent", () => {
+    const input = parse('{"tags":["a",["b",1]],"role":"admin","__proto__":{"isAdmin":true}}');
+    const r = validateInput(untyped, input);
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      const out = declaredProperties(untyped, r.value);
+      expect(JSON.stringify(out)).toBe('{"tags":["a",["b",1]]}');
+    }
+  });
+});

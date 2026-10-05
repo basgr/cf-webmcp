@@ -144,11 +144,24 @@ const InputSchemaProperty: z.ZodType<unknown> = z.lazy(() =>
     }),
 );
 
-const InputSchema = z.object({
-  type: z.literal("object"),
-  required: z.array(z.string()).optional().default([]),
-  properties: z.record(InputSchemaProperty).optional().default({}),
-});
+const InputSchema = z
+  .object({
+    type: z.literal("object"),
+    required: z.array(z.string()).optional().default([]),
+    properties: z.record(InputSchemaProperty).optional().default({}),
+  })
+  .superRefine((schema, ctx) => {
+    // Only declared properties reach an executor, a POST body or the exec cache key. A required name
+    // with no property behind it would pass validation and then be dropped without a word.
+    schema.required.forEach((name, i) => {
+      if (Object.prototype.hasOwnProperty.call(schema.properties, name)) return;
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["required", i],
+        message: `required name "${name}" is not declared in properties (only declared properties reach an executor, so it would be dropped)`,
+      });
+    });
+  });
 
 // ---------- Executors ----------
 

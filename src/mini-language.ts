@@ -18,6 +18,12 @@ export interface CompiledTemplate {
   resolver: Resolver;
   /** Names of every placeholder referenced. */
   params: string[];
+  /**
+   * The path every URL this template resolves to must start with (see staticPathPrefix), or null
+   * for a template without a placeholder. The executors check the resolved URL against it
+   * (resolveUrl in src/executors/common.ts), after the URL parser has normalised the path.
+   */
+  pathPrefix: string | null;
 }
 
 interface Placeholder {
@@ -111,7 +117,7 @@ export function compileTemplate(template: string): CompiledTemplate {
       if (!p) continue;
       const pos = positions[idx];
       if (!pos) continue;
-      const value = resolvePlaceholder(p, input);
+      const value = resolvePlaceholder(p, input, pos.isQuery);
       if (value === OMIT) {
         // Strip surrounding query param (`&key=` or `?key=` to the next `&` or end).
         // Only valid in query positions.
@@ -131,7 +137,38 @@ export function compileTemplate(template: string): CompiledTemplate {
     return result;
   };
 
-  return { raw: template, resolver, params };
+  return { raw: template, resolver, params, pathPrefix: staticPathPrefix(template) };
+}
+
+/**
+ * The part of the path that no placeholder can reach: the template's text before its first
+ * placeholder, as a path, cut after its last `/` (what follows the slash is the start of a segment
+ * the placeholder continues). `https://example.com/api/{{id}}` has the prefix `/api/`, a template
+ * rooted at the origin (`https://example.com{{path}}`, `https://example.com/{{path}}`) has `/` and
+ * so keeps allowing any path, and when the first placeholder sits in the query the whole path is
+ * fixed (`https://example.com/api/items?x={{q}}` has `/api/items`). The prefix is written the way
+ * the URL parser writes a pathname, so that it compares with the one `new URL` produces.
+ * Null for a template with no placeholder.
+ */
+export function staticPathPrefix(template: string): string | null {
+  PLACEHOLDER_RE.lastIndex = 0;
+  const first = PLACEHOLDER_RE.exec(template);
+  PLACEHOLDER_RE.lastIndex = 0;
+  if (first === null) return null;
+  const head = template.slice(0, first.index);
+  const authority = /^[A-Za-z][A-Za-z0-9+.-]*:\/\/[^/?#]*/.exec(head);
+  if (authority === null) return null;
+  const rest = head.slice(authority[0].length);
+  let prefix = "/";
+  if (rest.startsWith("/")) {
+    const query = rest.search(/[?#]/);
+    prefix = query === -1 ? rest.slice(0, rest.lastIndexOf("/") + 1) : rest.slice(0, query);
+  }
+  try {
+    return new URL(`http://x${prefix}`).pathname;
+  } catch {
+    return prefix;
+  }
 }
 
 const OMIT = Symbol("OMIT");
@@ -146,20 +183,49 @@ export function encodePath(value: string): string {
   return encodeURIComponent(value).replace(/%2F/gi, "/");
 }
 
-function resolvePlaceholder(p: Placeholder, input: Record<string, unknown>): ResolvedValue {
+/**
+ * Whether a value written into a path holds a `.` or `..` segment, which the URL parser would
+ * resolve and so move the request out of the path the template names. Segments are split on `/`
+ * and on `\` (a backslash is a slash in a special URL), and percent-escapes are decoded first, up
+ * to five layers deep, because `%2e%2e`, `..%2F` and `%252e%252e` all end up as `..` somewhere
+ * that decodes them. The decoding is for this test only: the value goes out unchanged (encodePath
+ * escapes its percent signs, so a `%2F` the caller wrote stays literal text, never a slash).
+ * `..foo`, `v1.2`, `file.json` and `...` are ordinary names.
+ */
+function hasDotSegment(value: string): boolean {
+  let v = value;
+  for (let layer = 0; layer < 5; layer++) {
+    if (v.split(/[/\\]/).some((segment) => segment === "." || segment === "..")) return true;
+    const decoded = v.replace(/%([0-9a-f]{2})/gi, (_, hex: string) => String.fromCharCode(parseInt(hex, 16)));
+    if (decoded === v) return false;
+    v = decoded;
+  }
+  return false;
+}
+
+function resolvePlaceholder(p: Placeholder, input: Record<string, unknown>, isQuery: boolean): ResolvedValue {
   // An own property only: `input.constructor` of an input without one is the Object function.
   const raw = Object.prototype.hasOwnProperty.call(input, p.name) ? input[p.name] : undefined;
   const present = raw !== undefined && raw !== null && raw !== "";
+  // The caller's own value, in a path: it must not climb out of the template's path. What the
+  // publisher wrote (a default, a map value) is the publisher's.
+  const fromCaller = (): string => {
+    const value = String(raw);
+    if (!isQuery && hasDotSegment(value)) {
+      throw new Error(`{{${p.name}}} in a path position must not contain a "." or ".." path segment`);
+    }
+    return value;
+  };
 
   if (p.operator === "required") {
     if (!present) throw new Error(`required parameter "${p.name}" missing`);
-    return String(raw);
+    return fromCaller();
   }
   if (p.operator === "optional") {
-    return present ? String(raw) : OMIT;
+    return present ? fromCaller() : OMIT;
   }
   if (p.operator === "default") {
-    return present ? String(raw) : (p.defaultValue ?? "");
+    return present ? fromCaller() : (p.defaultValue ?? "");
   }
   if (p.operator === "map") {
     const key = present ? String(raw) : "";

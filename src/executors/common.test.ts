@@ -55,6 +55,72 @@ describe("resolveUrl", () => {
   });
 });
 
+describe("resolveUrl: a template cannot be steered out of its path prefix", () => {
+  const resolve = (urlTemplate: string, input: Record<string, unknown>) => resolveUrl(ctx, { urlTemplate, input });
+
+  it.each(["../../admin", "..", "../", "a/../../admin", "..%2F..%2Fadmin", "%2e%2e/%2e%2e/admin", ".%2e/admin", "/./", "..\\admin"])(
+    "refuses %j in a path position, as invalid_input, before any URL exists",
+    (id) => {
+      const r = resolve("https://example.com/api/{{id}}", { id });
+      if (r.ok) throw new Error(`resolved to ${r.url.href}`);
+      expect(r.error.code).toBe("invalid_input");
+      expect(r.error.retriable).toBe(false);
+      expect(r.error.message).toContain("{{id}}");
+      expect(r.error.message).not.toContain("admin");
+    },
+  );
+
+  it("resolves a legitimate id and keeps it under /api/", () => {
+    for (const id of ["42", "v1.2", "file.json", "..foo", "a/b", "café"]) {
+      const r = resolve("https://example.com/api/{{id}}", { id });
+      if (!r.ok) throw new Error(JSON.stringify(r));
+      expect(r.url.pathname.startsWith("/api/"), id).toBe(true);
+      expect(r.url.origin).toBe("https://example.com");
+    }
+  });
+
+  it("still lets a root template (get_page) take any normal path", () => {
+    for (const path of ["/", "/about", "/blog/hello-world.html", "/a.b/c", "/search%20page"]) {
+      const r = resolve("https://example.com{{path}}", { path });
+      if (!r.ok) throw new Error(`${path}: ${JSON.stringify(r)}`);
+      expect(r.url.origin).toBe("https://example.com");
+    }
+    const r2 = resolve("https://example.com/{{path}}", { path: "blog/x" });
+    expect(r2.ok).toBe(true);
+    const climb = resolve("https://example.com{{path}}", { path: "/../admin" });
+    expect(climb.ok).toBe(false);
+  });
+
+  it("a query-position value is not a path concern: .. there is text", () => {
+    const r = resolve("https://example.com/search?q={{q}}", { q: "../.." });
+    if (!r.ok) throw new Error(JSON.stringify(r));
+    expect(r.url.pathname).toBe("/search");
+    expect(r.url.search).toBe("?q=..%2F..");
+  });
+
+  it("the prefix check refuses what the URL parser normalised out of the prefix, even when no value has a dot segment", () => {
+    // The template's own `..` meets a value that starts with a slash: /files/../admin is /admin.
+    const r = resolve("https://example.com/files/..{{x}}", { x: "/admin" });
+    if (r.ok) throw new Error(`resolved to ${r.url.href}`);
+    expect(r.error.code).toBe("invalid_input");
+    expect(r.error.message).toContain("/files/");
+    expect(r.error.message).toContain("path prefix");
+    expect(r.error.message).not.toContain("/admin");
+  });
+
+  it("compares with the pathname new URL produced: a prefix written with dots in the template still holds", () => {
+    const ok = resolve("https://example.com/a/c/../b/{{x}}", { x: "y" });
+    if (!ok.ok) throw new Error(JSON.stringify(ok));
+    expect(ok.url.pathname).toBe("/a/b/y");
+  });
+
+  it("checks the origin first: a host that left allowed_origins is still refused for that", () => {
+    const r = resolve("https://{{h}}/api/x", { h: "evil.example.com" });
+    if (r.ok) throw new Error("expected rejection");
+    expect(r.error.message).toContain("not in allowed_origins");
+  });
+});
+
 describe("originFetch", () => {
   it("strips visitor cookies and sets the bypass header", async () => {
     const seen: { headers: Record<string, string> } = { headers: {} };

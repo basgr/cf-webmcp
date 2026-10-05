@@ -359,7 +359,7 @@ describe("exec: the cache replays results, never another caller's CORS headers",
     await runAndSettle(fromOrigin(APP_A), configHash);
 
     const stored = await caches.default.match(
-      await makeCacheKey("example.com", { version: VERSION, configHash }, { toolName: "search_pages", bodyText: "{}" }),
+      await makeCacheKey("example.com", { version: VERSION, configHash }, { toolName: "search_pages", inputJson: "{}" }),
     );
     expect(stored).toBeDefined();
     const names = [...stored!.headers.keys()];
@@ -392,7 +392,7 @@ describe("exec: the cache replays results, never another caller's CORS headers",
 
   it("puts the version and the config hash into the cache key URL", async () => {
     const key = (version: string, configHash: string) =>
-      makeCacheKey("example.com", { version, configHash }, { toolName: "search_pages", bodyText: "{}" });
+      makeCacheKey("example.com", { version, configHash }, { toolName: "search_pages", inputJson: "{}" });
     const a = await key("0.6.0", "aaaa1111");
     expect(a.url).toContain("/0.6.0/aaaa1111/search_pages/");
     expect((await key("0.6.0", "bbbb2222")).url).not.toBe(a.url);
@@ -438,7 +438,7 @@ describe("exec: X-Webmcp-Cache is readable by a cross-origin caller", () => {
     await runAndSettle(fromOrigin(APP_A), configHash);
 
     const stored = await caches.default.match(
-      await makeCacheKey("example.com", { version: VERSION, configHash }, { toolName: "search_pages", bodyText: "{}" }),
+      await makeCacheKey("example.com", { version: VERSION, configHash }, { toolName: "search_pages", inputJson: "{}" }),
     );
     expect(stored!.headers.has("access-control-expose-headers")).toBe(false);
   });
@@ -531,7 +531,7 @@ describe("exec: a POST http_json tool is not cached unless its [tools.cache] ask
   }
 
   const storedFor = async (configHash: string) =>
-    caches.default.match(await makeCacheKey("example.com", { version: VERSION, configHash }, { toolName: "search_pages", bodyText: "{}" }));
+    caches.default.match(await makeCacheKey("example.com", { version: VERSION, configHash }, { toolName: "search_pages", inputJson: "{}" }));
 
   const declaring = (...names: string[]): ConfigOverrides => ({
     tools: [
@@ -569,22 +569,6 @@ describe("exec: a POST http_json tool is not cached unless its [tools.cache] ask
       { method: "POST", body: '{"q":"abc"}' },
       { method: "POST", body: "{}" },
     ]);
-  });
-
-  it("still keys the cache on the raw request body: a request that differs only in an undeclared key is its own entry, and reaches origin with the same declared body", async () => {
-    const calls = originAnswering();
-    const configHash = freshConfigHash();
-    const cache = { s_maxage: 60 };
-    const overrides = (): ConfigOverrides => ({
-      tools: [{ ...declaring("q").tools![0]!, cache }] as ConfigOverrides["tools"],
-    });
-
-    await runAndSettle(fromOrigin(null, '{"q":"a"}'), configHash, overrides());
-    await runAndSettle(fromOrigin(null, '{"q":"a","x":1}'), configHash, overrides());
-
-    // The cache key is the raw request body, as before; what origin gets is the declared part.
-    expect(calls).toHaveLength(2);
-    expect(calls.every((c) => c.body === '{"q":"a"}')).toBe(true);
   });
 
   it("by default neither reads nor writes the cache: every call reaches origin", async () => {
@@ -641,14 +625,16 @@ describe("exec: a POST http_json tool is not cached unless its [tools.cache] ask
     expect(await storedFor(configHash)).toBeDefined();
   });
 
-  it("keys a cached POST tool on the body, so another body is a miss", async () => {
+  it("keys a cached POST tool on its declared input, so another declared value is a miss", async () => {
     const calls = originAnswering();
     const configHash = freshConfigHash();
-    const cache = { s_maxage: 60 };
+    const overrides: ConfigOverrides = {
+      tools: [{ ...declaring("q").tools![0]!, cache: { s_maxage: 60 } }] as ConfigOverrides["tools"],
+    };
 
-    await runAndSettle(fromOrigin(null, '{"q":"a"}'), configHash, postTool(cache));
-    await runAndSettle(fromOrigin(null, '{"q":"a"}'), configHash, postTool(cache));
-    await runAndSettle(fromOrigin(null, '{"q":"b"}'), configHash, postTool(cache));
+    await runAndSettle(fromOrigin(null, '{"q":"a"}'), configHash, overrides);
+    await runAndSettle(fromOrigin(null, '{"q":"a"}'), configHash, overrides);
+    await runAndSettle(fromOrigin(null, '{"q":"b"}'), configHash, overrides);
 
     expect(calls).toHaveLength(2);
   });
@@ -730,5 +716,232 @@ describe("exec: the User-Agent names the cf-webmcp version", () => {
     }
 
     expect(agents).toEqual(Array(5).fill("cf-webmcp/4.5.6"));
+  });
+});
+
+describe("exec: what the executor reads and what the cache is keyed on is the declared input", () => {
+  const DATA_URL = "https://example.com/data";
+  const declared = (names: string[], executor: Record<string, unknown>, extra: Record<string, unknown> = {}): ConfigOverrides =>
+    ({
+      tools: [
+        {
+          name: "search_pages",
+          description: "d",
+          input_schema: {
+            type: "object",
+            required: [],
+            properties: Object.fromEntries(names.map((n) => [n, n === "tags" ? { type: "array", items: { type: "string" } } : { type: "string" }])),
+          },
+          executor,
+          ...extra,
+        },
+      ],
+    }) as unknown as ConfigOverrides;
+  const getJson = (names: string[]) => declared(names, { type: "http_json", url_template: DATA_URL, method: "GET" });
+
+  function origin() {
+    const urls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        urls.push(String(url));
+        return new Response('{"n":1}', { status: 200, headers: { "content-type": "application/json" } });
+      }),
+    );
+    return urls;
+  }
+
+  describe("the cache key is canonical JSON of the declared input", () => {
+    it("is one entry for junk keys, another key order and extra whitespace: a MISS, then HITs, one origin call", async () => {
+      const urls = origin();
+      const configHash = freshConfigHash();
+      const overrides = getJson(["a", "b"]);
+      const bodies = [
+        '{"a":"1","b":"2"}',
+        '{"b":"2","a":"1"}',
+        '  {  "a" :  "1" ,   "b" : "2"  }  ',
+        '{"a":"1","b":"2","junk":"x","role":"admin"}',
+        '{"junk":{"deep":[1,2]},"b":"2","a":"1","__proto__":{"isAdmin":true}}',
+      ];
+
+      const answers: string[] = [];
+      for (const body of bodies) {
+        const res = await runAndSettle(fromOrigin(null, body), configHash, overrides);
+        expect(res.status, body).toBe(200);
+        answers.push(res.headers.get("x-webmcp-cache")!);
+      }
+
+      expect(answers).toEqual(["MISS", "HIT", "HIT", "HIT", "HIT"]);
+      expect(urls).toHaveLength(1);
+    });
+
+    it("is a different entry for a different declared value: a MISS", async () => {
+      const urls = origin();
+      const configHash = freshConfigHash();
+      const overrides = getJson(["a", "b"]);
+
+      const seen: string[] = [];
+      for (const body of ['{"a":"1","b":"2"}', '{"a":"1","b":"3"}', '{"a":"2","b":"2"}', '{"a":"1"}', "{}", '{"a":"1","b":"2"}']) {
+        seen.push((await runAndSettle(fromOrigin(null, body), configHash, overrides)).headers.get("x-webmcp-cache")!);
+      }
+
+      expect(seen).toEqual(["MISS", "MISS", "MISS", "MISS", "MISS", "HIT"]);
+      expect(urls).toHaveLength(5);
+    });
+
+    it("keeps the order of an array value: it is part of the input", async () => {
+      origin();
+      const configHash = freshConfigHash();
+      const overrides = getJson(["tags"]);
+
+      const a = await runAndSettle(fromOrigin(null, '{"tags":["x","y"]}'), configHash, overrides);
+      const b = await runAndSettle(fromOrigin(null, '{"tags":["y","x"]}'), configHash, overrides);
+      const c = await runAndSettle(fromOrigin(null, '{ "tags" : ["x","y"] }'), configHash, overrides);
+
+      expect([a, b, c].map((r) => r.headers.get("x-webmcp-cache"))).toEqual(["MISS", "MISS", "HIT"]);
+    });
+
+    it("is stored under the key of the canonical text, which still names the version and the config hash", async () => {
+      origin();
+      const configHash = freshConfigHash();
+
+      await runAndSettle(fromOrigin(null, '{"b":"2","a":"1","junk":1}'), configHash, getJson(["a", "b"]));
+
+      const key = (version: string, hash: string) =>
+        makeCacheKey("example.com", { version, configHash: hash }, { toolName: "search_pages", inputJson: '{"a":"1","b":"2"}' });
+      const stored = await caches.default.match(await key(VERSION, configHash));
+      expect(stored).toBeDefined();
+      expect((await key(VERSION, configHash)).url).toContain(`/${VERSION}/${configHash}/search_pages/`);
+      expect(await caches.default.match(await key("9.9.9", configHash))).toBeUndefined();
+      expect(await caches.default.match(await key(VERSION, "other000"))).toBeUndefined();
+    });
+
+    it("the same declared input under another cf-webmcp version or config hash is a MISS", async () => {
+      const urls = origin();
+      const configHash = freshConfigHash();
+      const overrides = getJson(["a"]);
+
+      const first = await runAndSettle(fromOrigin(null, '{"a":"1"}'), configHash, overrides, "0.6.0");
+      const sameKey = await runAndSettle(fromOrigin(null, '{ "a":"1", "x":2 }'), configHash, overrides, "0.6.0");
+      const upgraded = await runAndSettle(fromOrigin(null, '{"a":"1"}'), configHash, overrides, "0.6.1");
+      const reconfigured = await runAndSettle(fromOrigin(null, '{"a":"1"}'), freshConfigHash(), overrides, "0.6.0");
+
+      expect([first, sameKey, upgraded, reconfigured].map((r) => r.headers.get("x-webmcp-cache"))).toEqual(["MISS", "HIT", "MISS", "MISS"]);
+      expect(urls).toHaveLength(3);
+    });
+
+    it("applies to every tool, a tool that declares nothing included: any body is the same call", async () => {
+      const urls = origin();
+      const configHash = freshConfigHash();
+      const none = getJson([]);
+
+      const seen = [];
+      for (const body of ["{}", '{"anything":1}', '{"a":"x","b":[1]}', "  {  }  "]) {
+        seen.push((await runAndSettle(fromOrigin(null, body), configHash, none)).headers.get("x-webmcp-cache"));
+      }
+
+      expect(seen).toEqual(["MISS", "HIT", "HIT", "HIT"]);
+      expect(urls).toHaveLength(1);
+    });
+
+    it("a cached POST tool is keyed the same way, and sends the declared body on a miss only", async () => {
+      const calls: unknown[] = [];
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (_url: string, init?: RequestInit) => {
+          calls.push(init?.body);
+          return new Response('{"ok":1}', { status: 200, headers: { "content-type": "application/json" } });
+        }),
+      );
+      const configHash = freshConfigHash();
+      const overrides = declared(["q"], { type: "http_json", url_template: "https://example.com/send", method: "POST" }, { cache: { s_maxage: 60 } });
+
+      const a = await runAndSettle(fromOrigin(null, '{"q":"a","junk":1}'), configHash, overrides);
+      const b = await runAndSettle(fromOrigin(null, '{"junk":2,"q":"a"}'), configHash, overrides);
+
+      expect([a, b].map((r) => r.headers.get("x-webmcp-cache"))).toEqual(["MISS", "HIT"]);
+      expect(calls).toEqual(['{"q":"a"}']);
+    });
+  });
+
+  describe("the executor is given the declared input only", () => {
+    it("reads a declared placeholder from the request, and nothing else", async () => {
+      const urls = origin();
+      const overrides = declared(["id"], { type: "http_json", url_template: "https://example.com/items/{{id}}", method: "GET" });
+
+      const res = await runAndSettle(fromOrigin(null, '{"id":"7","junk":1}'), freshConfigHash(), overrides);
+
+      expect(res.status).toBe(200);
+      expect(urls).toEqual(["https://example.com/items/7"]);
+    });
+
+    it("never reads a placeholder the tool does not declare, even from a stale config: the call fails and origin is not asked", async () => {
+      const urls = origin();
+      // The build refuses this config (undeclared input name); the runtime does not depend on that.
+      const overrides = declared([], { type: "http_json", url_template: "https://example.com/items/{{secret}}", method: "GET" });
+
+      const res = await runAndSettle(fromOrigin(null, '{"secret":"x"}'), freshConfigHash(), overrides);
+
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as ErrorBody).error.code).toBe("invalid_input");
+      expect(urls).toEqual([]);
+    });
+
+    it("ignores an undeclared query on a sitemap_filter tool: it lists, as a tool that declares no query does", async () => {
+      vi.stubGlobal("fetch", vi.fn(async () => sitemapOk()));
+      const overrides = declared([], { type: "sitemap_filter", sitemap_url: SITEMAP_URL });
+
+      const res = await runAndSettle(fromOrigin(null, '{"query":"no-such-page-anywhere"}'), freshConfigHash(), overrides);
+
+      const body = (await res.json()) as { ok: boolean; data: { entries: unknown[] } };
+      expect(body.ok).toBe(true);
+      expect(body.data.entries).toHaveLength(1);
+    });
+  });
+
+  describe("a path placeholder cannot leave its path prefix", () => {
+    const apiTool = declared(["id"], { type: "http_json", url_template: "https://example.com/api/{{id}}", method: "GET" });
+
+    it.each(["../../admin", "..%2F..%2Fadmin", "%2e%2e/admin", "a/../../admin", "/./x"])(
+      "%j is refused as invalid_input, and no request, with its token headers, is made",
+      async (id) => {
+        const urls = origin();
+
+        const res = await run(post(JSON.stringify({ id })), apiTool, { deployToken: "t0ken", configHash: freshConfigHash() });
+
+        expect(res.status).toBe(400);
+        const body = (await res.json()) as ErrorBody;
+        expect(body.error.code).toBe("invalid_input");
+        expect(body.error.message).toContain("{{id}}");
+        expect(urls).toEqual([]);
+      },
+    );
+
+    it("lets a normal id through to the path it names", async () => {
+      const urls = origin();
+
+      await run(post(JSON.stringify({ id: "v1.2/file.json" })), apiTool, { configHash: freshConfigHash() });
+
+      expect(urls).toEqual(["https://example.com/api/v1.2/file.json"]);
+    });
+
+    it("still lets a get_page-style root template fetch any normal path", async () => {
+      const urls: string[] = [];
+      const page = declared(["path"], { type: "dom_extract", url_template: "https://example.com{{path}}" });
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (url: string) => {
+          urls.push(String(url));
+          return new Response("<html><body><main>hi</main></body></html>", { status: 200, headers: { "content-type": "text/html" } });
+        }),
+      );
+
+      const ok = await run(post(JSON.stringify({ path: "/blog/hello-world.html" })), page, { configHash: freshConfigHash() });
+      const climb = await run(post(JSON.stringify({ path: "/../admin" })), page, { configHash: freshConfigHash() });
+
+      expect(ok.status).toBe(200);
+      expect(climb.status).toBe(400);
+      expect(urls).toEqual(["https://example.com/blog/hello-world.html"]);
+    });
   });
 });

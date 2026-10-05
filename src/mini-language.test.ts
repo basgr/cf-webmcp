@@ -127,3 +127,125 @@ describe("placeholders read own properties of the input only", () => {
     expect(defaulted.resolver({})).toBe("https://example.com/x/none");
   });
 });
+
+describe("a path-position placeholder cannot carry a dot segment", () => {
+  const path = compileTemplate("https://example.com/api/{{id}}");
+
+  // The value is joined into the path: `..` would be resolved by the URL parser and move the
+  // request out of /api/ (to /admin, with the deploy-token headers attached).
+  it.each([
+    ["../../admin", "a parent segment and more"],
+    ["..", "a bare .."],
+    [".", "a bare ."],
+    ["../", "a parent segment with a slash"],
+    ["/../", "slashes round a parent segment"],
+    ["a/../b", "a parent segment in the middle"],
+    ["a/..", "a trailing .."],
+    ["a/.", "a trailing ."],
+    ["/./", "a current-directory segment"],
+    ["..%2F", "an encoded slash after .."],
+    ["..%2f..%2fadmin", "lower-case encoded slashes"],
+    ["%2e%2e/", "an encoded .."],
+    ["%2E%2E/", "an encoded .. in capitals"],
+    [".%2e/", "a mixed-case, mixed-form .."],
+    ["%2e./", "an encoded dot then a dot"],
+    ["a%2f%2e%2e%2fb", "an encoded slash, .. and slash"],
+    ["..\\", "a backslash after .."],
+    ["a\\..\\b", "backslashes round .."],
+    ["a%5c..%5cb", "encoded backslashes round .."],
+    ["%252e%252e/x", "a doubly encoded .."],
+    ["%25252e%25252e/x", "a triply encoded .."],
+  ])("refuses %j (%s)", (value) => {
+    expect(() => path.resolver({ id: value })).toThrow(/must not contain a "\." or "\.\." path segment/);
+  });
+
+  it.each([
+    ["v1.2"],
+    ["file.json"],
+    ["..foo"],
+    ["foo.."],
+    ["a..b"],
+    ["..."],
+    [".hidden"],
+    ["a/b.c/d"],
+    ["a%2Fb"],
+    ["x y"],
+    ["café"],
+    ["100%"],
+  ])("lets %j through, as text", (value) => {
+    expect(() => path.resolver({ id: value })).not.toThrow();
+  });
+
+  it("writes an allowed value into the path as before", () => {
+    expect(path.resolver({ id: "v1.2/file.json" })).toBe("https://example.com/api/v1.2/file.json");
+    expect(path.resolver({ id: "..foo" })).toBe("https://example.com/api/..foo");
+  });
+
+  it("keeps a %2F the caller wrote as literal text: the percent sign is escaped, so it is never a slash", () => {
+    expect(path.resolver({ id: "a%2Fb" })).toBe("https://example.com/api/a%252Fb");
+    expect(new URL(path.resolver({ id: "a%2Fb" })).pathname).toBe("/api/a%252Fb");
+  });
+
+  it("applies to every operator that takes the caller's value: required, optional and default", () => {
+    expect(() => compileTemplate("https://example.com/a/{{x|default:safe}}").resolver({ x: ".." })).toThrow(/path segment/);
+    expect(() => compileTemplate("https://example.com/a/{{x|optional}}").resolver({ x: ".." })).toThrow(/path segment/);
+    expect(() => compileTemplate("https://example.com/a/{{x}}").resolver({ x: ".." })).toThrow(/path segment/);
+  });
+
+  it("does not judge what the publisher wrote: a default and a map value are the template's own", () => {
+    expect(compileTemplate("https://example.com/a/{{x|default:..}}").resolver({})).toBe("https://example.com/a/..");
+    expect(compileTemplate("https://example.com/a/{{x|map:up=..}}").resolver({ x: "up" })).toBe("https://example.com/a/..");
+  });
+
+  it("does not apply in a query position, where .. is just text", () => {
+    expect(compileTemplate("https://example.com/search?q={{q}}").resolver({ q: ".." })).toBe("https://example.com/search?q=..");
+    expect(compileTemplate("https://example.com/search?q={{q}}").resolver({ q: "../x" })).toBe("https://example.com/search?q=..%2Fx");
+  });
+
+  it("names the placeholder and never echoes the value", () => {
+    let message = "";
+    try {
+      path.resolver({ id: "../../secret-token" });
+    } catch (e) {
+      message = (e as Error).message;
+    }
+    expect(message).toContain("{{id}}");
+    expect(message).not.toContain("secret-token");
+  });
+
+  it("still lets a root template take any normal path (get_page)", () => {
+    const root = compileTemplate("https://example.com{{path}}");
+    expect(root.resolver({ path: "/about/team" })).toBe("https://example.com/about/team");
+    expect(root.resolver({ path: "/blog/hello-world.html" })).toBe("https://example.com/blog/hello-world.html");
+    expect(() => root.resolver({ path: "/../admin" })).toThrow(/path segment/);
+    expect(() => root.resolver({ path: "/a/%2e%2e/b" })).toThrow(/path segment/);
+  });
+});
+
+describe("the static path prefix of a template", () => {
+  it.each([
+    ["https://example.com/api/{{id}}", "/api/"],
+    ["https://example.com/api/v1/{{a}}/{{b}}", "/api/v1/"],
+    ["https://example.com/{{path}}", "/"],
+    ["https://example.com{{path}}", "/"],
+    ["https://example.com/api{{x}}", "/"],
+    ["https://example.com/a/b/c-{{id}}", "/a/b/"],
+    ["https://example.com/api/items?x={{q}}", "/api/items"],
+    ["https://example.com/api/items/?x={{q}}&y={{r}}", "/api/items/"],
+    ["https://example.com/a%20b/{{x}}", "/a%20b/"],
+    ["https://example.com/wp-json/wp/v2/posts?slug={{slug}}", "/wp-json/wp/v2/posts"],
+    ["https://{{host}}.example.com/x", "/"],
+    ["https://exa{{x}}.com/x", "/"],
+  ])("%s has the prefix %j", (template, prefix) => {
+    expect(compileTemplate(template).pathPrefix).toBe(prefix);
+  });
+
+  it("has none for a template without a placeholder: there is nothing to contain", () => {
+    expect(compileTemplate("https://example.com/static/page").pathPrefix).toBeNull();
+  });
+
+  it("is the prefix as the URL parser writes it, so it compares with the pathname that new URL produced", () => {
+    expect(compileTemplate("https://example.com/a/./b/{{x}}").pathPrefix).toBe("/a/b/");
+    expect(compileTemplate("https://example.com/a/c/../b/{{x}}").pathPrefix).toBe("/a/b/");
+  });
+});

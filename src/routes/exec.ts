@@ -1,7 +1,13 @@
 /**
  * POST /<namespace>/exec/:tool_name
  * Validates input, dispatches to the executor, wraps in the response envelope,
- * sets cache headers. Cache lookup is keyed on version + config_hash + tool_name + sha256(body).
+ * sets cache headers.
+ *
+ * Only the properties the tool declares in its input_schema go on from validation (validateInput
+ * tolerates unknown ones): they are what the executor reads, what a POST body is made of, and
+ * what the cache is keyed on, as canonical JSON (sorted keys). Cache lookup is keyed on
+ * version + config_hash + tool_name + sha256(that), so a request body's junk keys, key order and
+ * whitespace do not make a second entry, and nothing the executor reads is outside the key.
  *
  * CORS is computed per request, for every answer: a cache hit, a miss, and every
  * error (405, 404, 400, 413, 429, 5xx). The cache stores results without any CORS
@@ -14,9 +20,9 @@
 import type { Config, ToolConfig } from "../config-types";
 import { runExecutor } from "../executors";
 import { readWithLimit, timeoutError, type ExecutorContext } from "../executors/common";
-import { validateInput } from "../validate";
+import { declaredProperties, validateInput } from "../validate";
 import { jsonResponse, err, type Envelope } from "../envelope";
-import { buildCacheControl, makeCacheKey } from "../cache";
+import { buildCacheControl, canonicalJson, makeCacheKey } from "../cache";
 import { checkGlobalRateLimit, checkPerToolRateLimit, clientIp } from "../rate-limit";
 import { cachesResults } from "../tool-cache";
 
@@ -115,10 +121,13 @@ async function execAnswer(
     return jsonResponse(err("invalid_input", validation.message));
   }
 
+  // What goes on from here is the declared input, and nothing else.
+  const input = declaredProperties(tool.input_schema, validation.value);
+
   // Cache check, for the tools that use the cache at all.
   const useCache = cachesResults(tool);
   const cacheKey = useCache
-    ? await makeCacheKey(opts.domain, { version: opts.version, configHash: opts.configHash }, { toolName, bodyText })
+    ? await makeCacheKey(opts.domain, { version: opts.version, configHash: opts.configHash }, { toolName, inputJson: canonicalJson(input) })
     : null;
   const cache = caches.default;
   const cached = cacheKey ? await cache.match(cacheKey) : undefined;
@@ -135,7 +144,7 @@ async function execAnswer(
     timeoutMs: opts.timeoutMs ?? DEFAULT_TIMEOUT_MS,
   };
 
-  const envelope = await runWithDeadline(ctx, tool as ToolConfig, validation.value);
+  const envelope = await runWithDeadline(ctx, tool as ToolConfig, input);
 
   const ttl = tool.cache ?? {};
   // A tool that does not use the cache says so to everything downstream as well: no-store.

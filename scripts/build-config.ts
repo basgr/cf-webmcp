@@ -153,6 +153,51 @@ function checkReservedPropertyNames(raw: Record<string, unknown>): void {
 }
 
 /**
+ * Refuse a tool whose executor reads an input name the tool does not declare in
+ * input_schema.properties. Only declared properties reach an executor (the exec route passes
+ * declaredProperties of the validated input, and keys its cache on the same), so a name that is
+ * not declared could never be set, and a url_template placeholder would always be missing. The
+ * executors read input in two ways: through the placeholders of a url_template (dom_extract,
+ * http_json, http_get) and, for sitemap_filter, through the one field `query` (a tool that does not
+ * declare it lists the sitemap without filtering, which is a legitimate tool, so that is a warning:
+ * declaredInputWarnings). rss_feed reads none. Every offender is reported at once.
+ */
+function checkDeclaredInputs(config: Config): void {
+  const problems: string[] = [];
+  for (const tool of config.tools) {
+    const declared = (name: string): boolean => Object.prototype.hasOwnProperty.call(tool.input_schema.properties, name);
+    const executor = tool.executor;
+    if (executor.type === "dom_extract" || executor.type === "http_json" || executor.type === "http_get") {
+      for (const name of compileTemplate(executor.url_template).params) {
+        if (!declared(name)) problems.push(`tool "${tool.name}" (${executor.type}) has the url_template placeholder {{${name}}}`);
+      }
+    }
+  }
+  if (problems.length === 0) return;
+  throw new Error(
+    `[build-config] undeclared input name: ${problems.join("; ")}, and input_schema.properties does not declare it. ` +
+      `Only declared properties reach an executor, so it could never be set. Declare it under [tools.input_schema.properties.<name>].`,
+  );
+}
+
+/**
+ * A sitemap_filter tool filters on the input name `query`, which only reaches it when the tool
+ * declares it. Before only declared properties reached executors, an undeclared `query` that a
+ * caller sent was read anyway; now it is dropped, so such a tool lists the sitemap without
+ * filtering. That is exactly what a listing tool wants and exactly what a forgotten declaration
+ * looks like, so the build says it once per tool instead of refusing.
+ */
+export function declaredInputWarnings(config: Config): string[] {
+  return config.tools
+    .filter((t) => t.executor.type === "sitemap_filter" && !Object.prototype.hasOwnProperty.call(t.input_schema.properties, "query"))
+    .map(
+      (t) =>
+        `[build-config] tool "${t.name}" (sitemap_filter) does not declare the input property "query", so it lists the sitemap without filtering ` +
+        `(a caller's undeclared query is dropped, as is every undeclared property). Declare [tools.input_schema.properties.query] if it should filter.`,
+    );
+}
+
+/**
  * Sample inputs that exercise every URL template against the allow-list.
  * The check is paranoid by design: if a template can ever resolve outside
  * allowed_origins, build fails.
@@ -1909,6 +1954,7 @@ export async function buildConfig(opts: BuildOptions): Promise<void> {
     }
   }
   checkBaseUrlAllowed(config);
+  checkDeclaredInputs(config);
   checkAllowList(config);
   checkPathCollisions(config);
   checkSkillName(config);
@@ -1949,6 +1995,7 @@ export async function buildConfig(opts: BuildOptions): Promise<void> {
     ...apiCatalogWarnings(config),
     ...skillsIndexWarnings(config),
     ...toolCacheWarnings(config),
+    ...declaredInputWarnings(config),
     ...deadConfigWarnings(config),
   ]) {
     // eslint-disable-next-line no-console

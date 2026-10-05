@@ -210,6 +210,9 @@ description = "leaks"
   [tools.input_schema]
   type = "object"
 
+    [tools.input_schema.properties.anything]
+    type = "string"
+
   [tools.executor]
   type         = "http_json"
   url_template = "https://other.example.com/{{anything|default:x}}"
@@ -2794,6 +2797,115 @@ describe("input_schema enums are checked when the config is compiled", () => {
     await expect(
       runBuild(await writeToml("en-items.toml", withEnum("array", "[]", "").replace("    enum = []\n", '    items = { type = "integer", enum = [1, 2] }\n'))),
     ).resolves.toBeDefined();
+  });
+});
+
+describe("an executor reads only input names the tool declares", () => {
+  const tool = (name: string, executor: string, properties: string[] = [], required: string[] = []): string => `
+[[tools]]
+name        = "${name}"
+description = "Tool ${name}."
+  [tools.input_schema]
+  type     = "object"
+  required = [${required.map((r) => `"${r}"`).join(", ")}]
+${properties.map((p) => `    [tools.input_schema.properties.${p}]\n    type = "string"`).join("\n")}
+  [tools.executor]
+${executor}
+`;
+  const template = (url: string, type = "http_json") => `  type         = "${type}"\n  url_template = "${url}"`;
+  const build = async (toml: string) => runBuild(await writeToml("dp.toml", toml));
+
+  it.each([
+    ["http_json", "https://example.com/api/{{id}}"],
+    ["http_get", "https://example.com/data?q={{q}}"],
+    ["dom_extract", "https://example.com{{path}}"],
+  ])("refuses a %s url_template placeholder that is not a declared property, naming the tool and the placeholder", async (type, url) => {
+    const name = /\{\{(\w+)\}\}/.exec(url)![1]!;
+    const err = (await build(MINIMAL + tool("fetch_it", template(url, type))).catch((e: Error) => e)) as Error;
+    expect(err).toBeInstanceOf(Error);
+    expect(err.message).toMatch(/^\[build-config\] undeclared input name/);
+    expect(err.message).toContain('tool "fetch_it"');
+    expect(err.message).toContain(`{{${name}}}`);
+    expect(err.message).toContain("input_schema.properties");
+  });
+
+  it("accepts the same templates once the placeholders are declared, for every operator", async () => {
+    const url = "https://example.com/api/{{id}}?q={{q|optional}}&n={{n|default:5}}&k={{k|map:a=1,b=2}}";
+    await expect(build(MINIMAL + tool("fetch_it", template(url), ["id", "q", "n", "k"]))).resolves.toBeDefined();
+  });
+
+  it("refuses an optional or defaulted placeholder that is not declared too", async () => {
+    for (const url of ["https://example.com/x?q={{q|optional}}", "https://example.com/x?n={{n|default:5}}"]) {
+      await fs.rm(path.join(tmpDir, "out"), { recursive: true, force: true });
+      const err = (await build(MINIMAL + tool("fetch_it", template(url))).catch((e: Error) => e)) as Error;
+      expect(err.message).toMatch(/undeclared input name/);
+    }
+  });
+
+  it("reports every offender, in every tool, at once", async () => {
+    const toml =
+      MINIMAL +
+      tool("a_tool", template("https://example.com/{{x}}/{{y}}"), ["y"]) +
+      tool("b_tool", template("https://example.com/{{z}}", "http_get"));
+    const err = (await build(toml).catch((e: Error) => e)) as Error;
+    expect(err.message).toContain('tool "a_tool"');
+    expect(err.message).toContain("{{x}}");
+    expect(err.message).not.toContain("{{y}}");
+    expect(err.message).toContain('tool "b_tool"');
+    expect(err.message).toContain("{{z}}");
+  });
+
+  describe("a sitemap_filter tool and the input name query", () => {
+    const noQuery = () => {
+      const toml = MINIMAL.replace(/\n    \[tools\.input_schema\.properties\.query\]\n    type = "string"\n/, "\n").replace('required = ["query"]', "required = []");
+      expect(toml).not.toContain("properties.query");
+      return toml;
+    };
+    const warnings = () => (console.warn as unknown as { mock: { calls: unknown[][] } }).mock.calls.map((c) => String(c[0]));
+
+    it("still builds without query declared (a listing tool is a legitimate tool), and says it will not filter", async () => {
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+      await expect(build(noQuery())).resolves.toBeDefined();
+      const hits = warnings().filter((m) => m.includes('"search_pages"') && m.includes("sitemap_filter"));
+      expect(hits).toHaveLength(1);
+      expect(hits[0]).toContain('"query"');
+      expect(hits[0]).toContain("without filtering");
+    });
+
+    it("is quiet when query is declared, and for tools that are not sitemap_filter", async () => {
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+      await build(MINIMAL + tool("feed", `  type     = "rss_feed"\n  feed_url = "https://example.com/feed/"`));
+      expect(warnings().filter((m) => m.includes("without filtering"))).toEqual([]);
+    });
+  });
+
+  it("builds a sitemap_filter that declares query, and executors that read no input name without a schema", async () => {
+    await expect(build(MINIMAL)).resolves.toBeDefined();
+    await fs.rm(path.join(tmpDir, "out"), { recursive: true, force: true });
+    const toml =
+      MINIMAL +
+      tool("feed", `  type     = "rss_feed"\n  feed_url = "https://example.com/feed/"`) +
+      tool("fixed", template("https://example.com/fixed.json")) +
+      tool("page", template("https://example.com/about", "dom_extract"));
+    await expect(build(toml)).resolves.toBeDefined();
+  });
+
+  it("refuses a required name that is not declared, with the schema's own message", async () => {
+    const err = (await build(MINIMAL.replace('required = ["query"]', 'required = ["query", "token"]')).catch((e: Error) => e)) as Error;
+    expect(err.message).toMatch(/^\[build-config\] config validation failed/);
+    expect(err.message).toContain("tools.0.input_schema.required.1");
+    expect(err.message).toContain('required name "token" is not declared in properties');
+  });
+
+  it("builds every template: none reads a name it does not declare", async () => {
+    const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+    let tools = 0;
+    for (const rel of ["templates/default.toml", "templates/wordpress.toml", "templates/woocommerce.toml", "templates/example-site/webmcp.toml"]) {
+      await fs.rm(path.join(tmpDir, "out"), { recursive: true, force: true });
+      const { files } = await runBuild(path.join(repo, rel));
+      tools += JSON.parse(files["manifest.json"]!).tools.length;
+    }
+    expect(tools).toBe(22);
   });
 });
 
