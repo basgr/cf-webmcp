@@ -42,6 +42,8 @@ import { apiCatalogResponse } from "./routes/api-catalog";
 import { agentSkillsResponse, agentSkillsRedirect } from "./routes/agent-skills";
 import { agentSkillsIndexResponse } from "./routes/agent-skills-index";
 import { aiCatalogResponse, ardRedirect } from "./routes/ai-catalog";
+import { createHandler, type Env } from "./handler";
+import { makeDeps, type ConfigOverrides } from "./test-support/config";
 
 const PROTECTED_PREFIXES = ["/_webmcp/", "/.well-known/"] as const;
 
@@ -196,7 +198,7 @@ async function responseFor(kind: RouteMatch["kind"], config: Config): Promise<Re
     case "landing":
       return landingResponse("<html><head></head><body></body></html>", config, "abc12345");
     case "landing_redirect":
-      return landingRedirect(config.webmcp_landing.path);
+      return landingRedirect(config);
     case "bootstrap":
       return bootstrapResponse("// js", config);
     case "widget":
@@ -231,7 +233,7 @@ async function responseFor(kind: RouteMatch["kind"], config: Config): Promise<Re
     case "agents_md":
       return agentsMdResponse(new Request("https://example.com/.well-known/agents.md"), config, proxy404);
     case "agents_md_redirect":
-      return agentsMdRedirect(config);
+      return agentsMdRedirect(config, samplePath(kind, config));
     case "api_catalog":
       return apiCatalogResponse(new Request("https://example.com/.well-known/api-catalog"), config, proxy404);
     case "agent_skills":
@@ -456,5 +458,59 @@ describe("llms.txt and robots.txt decide by their configured path", () => {
         expect([...res.headers.keys()], `${kind}: ${label}`).not.toContain("x-robots-tag");
       }
     }
+  });
+});
+
+describe("every redirect decides by its own path: one under a protected prefix carries noindex", () => {
+  // The redirect kinds are classified by their default paths. Aliases and the landing path are
+  // configurable, so a config can put any redirect under /.well-known/ or the namespace; then the
+  // prefix rule applies to the redirect itself, through the real router and handler.
+  const env: Env = { CF_WEBMCP_ASSETS: { get: async () => null, head: async () => null } as unknown as R2Bucket };
+  const ctx = { waitUntil: () => {}, passThroughOnException: () => {}, props: {} } as unknown as ExecutionContext;
+  const redirectKinds = (Object.keys(CLASSIFICATION) as RouteMatch["kind"][]).filter((k) => k.endsWith("_redirect"));
+
+  const cases: Array<{ kind: RouteMatch["kind"]; path: string; overrides: ConfigOverrides }> = [
+    { kind: "agents_md_redirect", path: "/.well-known/AGENTS.md", overrides: { agents_md: { aliases: ["/.well-known/AGENTS.md"] } } },
+    { kind: "agents_md_redirect", path: "/_webmcp/agents.md", overrides: { agents_md: { aliases: ["/_webmcp/agents.md"] } } },
+    { kind: "landing_redirect", path: "/.well-known/mcp", overrides: { webmcp_landing: { path: "/.well-known/mcp/" } } },
+    { kind: "landing_redirect", path: "/_webmcp/mcp", overrides: { webmcp_landing: { path: "/_webmcp/mcp/" } } },
+    { kind: "landing_redirect", path: "/_x/mcp", overrides: { paths: { namespace: "/_x" }, webmcp_landing: { path: "/_x/mcp/" } } },
+    { kind: "manifest_redirect", path: "/.well-known/webmcp.json", overrides: { manifest: { aliases: ["/.well-known/webmcp.json"] } } },
+    {
+      kind: "ards_catalog_redirect",
+      path: "/.well-known/ai-catalog.json",
+      overrides: { features: { ai_catalog: true }, ai_catalog: { aliases: ["/.well-known/ai-catalog.json"] } },
+    },
+    {
+      kind: "agent_skills_redirect",
+      path: "/.well-known/agent-skills/site/skill.md",
+      overrides: { features: { agent_skills: true }, agent_skills: { aliases: ["/.well-known/agent-skills/site/skill.md"] } },
+    },
+  ];
+
+  it("covers every redirect kind", () => {
+    expect([...new Set(cases.map((c) => c.kind))].sort()).toEqual([...redirectKinds].sort());
+  });
+
+  for (const { kind, path, overrides } of cases) {
+    it(`${kind} at ${path} carries noindex`, async () => {
+      const deps = makeDeps(overrides);
+      const request = new Request(`https://example.com${path}`);
+      expect(matchRoute(deps.config, request, deps.meta.BOOTSTRAP_ASSET, deps.meta.WIDGET_ASSET).kind).toBe(kind);
+
+      const res = await createHandler(deps).fetch(request as Request<unknown, IncomingRequestCfProperties>, env, ctx);
+
+      expect(res.status).toBeGreaterThanOrEqual(301);
+      expect(res.status).toBeLessThanOrEqual(308);
+      expect(res.headers.get("x-robots-tag"), `${kind} at ${path}`).toBe("noindex");
+    });
+  }
+});
+
+describe("a redirect at an apex path keeps its own rule", () => {
+  it("agents.md and landing redirects outside the protected prefixes carry no X-Robots-Tag, as before", () => {
+    const config = makeConfig();
+    expect(agentsMdRedirect(config, "/AGENTS.md").headers.get("x-robots-tag")).toBeNull();
+    expect(landingRedirect({ ...config, webmcp_landing: { path: "/agents/" } }).headers.get("x-robots-tag")).toBeNull();
   });
 });

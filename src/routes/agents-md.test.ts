@@ -237,13 +237,13 @@ describe("agents.md says only what this config does", () => {
 
 describe("agentsMdRedirect", () => {
   it("returns 301 to the canonical path", () => {
-    const res = agentsMdRedirect(makeConfig());
+    const res = agentsMdRedirect(makeConfig(), "/AGENTS.md");
     expect(res.status).toBe(301);
     expect(res.headers.get("location")).toBe("/.well-known/agents.md");
   });
 
   it("includes cache headers so the redirect itself is cacheable", () => {
-    const res = agentsMdRedirect(makeConfig());
+    const res = agentsMdRedirect(makeConfig(), "/AGENTS.md");
     const cc = res.headers.get("cache-control") ?? "";
     expect(cc).toContain("max-age=86400");
     expect(cc).toContain("s-maxage=604800");
@@ -251,6 +251,13 @@ describe("agentsMdRedirect", () => {
 
   it("respects a custom canonical path", () => {
     const config = makeConfig({ agents_md: { path: "/agents.md", mode: "merge", aliases: ["/AGENTS.md"] } });
-    expect(agentsMdRedirect(config).headers.get("location")).toBe("/agents.md");
+    expect(agentsMdRedirect(config, "/AGENTS.md").headers.get("location")).toBe("/agents.md");
+  });
+
+  it("carries noindex for an alias under /.well-known/ or the namespace, and none at the apex", () => {
+    const config = makeConfig();
+    expect(agentsMdRedirect(config, "/.well-known/AGENTS.md").headers.get("x-robots-tag")).toBe("noindex");
+    expect(agentsMdRedirect(config, "/_webmcp/agents.md").headers.get("x-robots-tag")).toBe("noindex");
+    expect(agentsMdRedirect(config, "/AGENTS.md").headers.get("x-robots-tag")).toBeNull();
   });
 });

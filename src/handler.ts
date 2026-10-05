@@ -126,7 +126,7 @@ export function createHandler(deps: HandlerDeps): Required<Pick<ExportedHandler<
         case "landing":
           return handleHeadable(request, landingResponse(assets.landingHtml, config, meta.LANDING_ETAG));
         case "landing_redirect":
-          return landingRedirect(config.webmcp_landing.path);
+          return landingRedirect(config);
         case "bootstrap":
           return handleHeadable(request, bootstrapResponse(assets.bootstrapJs, config));
         case "widget":
@@ -182,7 +182,7 @@ export function createHandler(deps: HandlerDeps): Required<Pick<ExportedHandler<
             ),
           );
         case "agents_md_redirect":
-          return agentsMdRedirect(config);
+          return agentsMdRedirect(config, new URL(request.url).pathname);
         case "api_catalog":
           return withoutToken(env, apiCatalogResponse(request, config, (u) => proxyToOrigin(u, env)));
         case "ards_catalog":

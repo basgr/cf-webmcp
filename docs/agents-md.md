@@ -64,6 +64,8 @@ Cache-Control: public, max-age=86400, s-maxage=604800
 
 A day in the browser, a week at the edge. Redirects are stable; aggressive caching is appropriate.
 
+The default aliases sit at the apex and the redirect carries no `X-Robots-Tag`. An alias you put under `/.well-known/` or the namespace (`aliases = ["/.well-known/AGENTS.md"]`) answers with `X-Robots-Tag: noindex`, like every answer there.
+
 ### Why have aliases at all?
 
 The AGENTS.md convention started in code-repo tooling (Cursor, Aider, Codex), where the canonical location is `/AGENTS.md` at the repo root. Some web adopters publish at the same path; others use `/agents.md`; others use `/.well-known/agents.md`. Rather than picking one and being wrong half the time, cf-webmcp picks the most web-native option (`/.well-known/`) as canonical and 301-aliases the two common variants. An agent that tries any of the three finds the same content.

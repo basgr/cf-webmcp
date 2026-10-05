@@ -24,6 +24,7 @@ import type { Config } from "../config-types";
 import { buildCacheControl } from "../cache";
 import { ORIGIN_FAILURE_CACHE_CONTROL, readTextCapped } from "./read-capped";
 import { browserRegistration, defaultLandingTemplate, formToolsStamped, scriptTools } from "../runtime-copy";
+import { isProtectedPath } from "../robots-tag";
 
 const BEGIN = "<!-- cf-webmcp:begin -->";
 const END = "<!-- cf-webmcp:end -->";
@@ -97,17 +98,21 @@ export async function agentsMdResponse(
   });
 }
 
-export function agentsMdRedirect(config: Config): Response {
-  return new Response(null, {
-    status: 301,
-    headers: {
-      location: config.agents_md.path,
-      "cache-control": buildCacheControl({
-        max_age: config.cache.agents_md_redirect_max_age,
-        s_maxage: config.cache.agents_md_redirect_s_maxage,
-      }),
-    },
-  });
+/**
+ * 301 from an [agents_md].aliases path (`pathname`, the alias this request asked for) to the
+ * canonical [agents_md].path. The default aliases sit at the apex and carry no X-Robots-Tag; an
+ * alias placed under the namespace or /.well-known/ carries noindex, like every answer there.
+ */
+export function agentsMdRedirect(config: Config, pathname: string): Response {
+  const headers: Record<string, string> = {
+    location: config.agents_md.path,
+    "cache-control": buildCacheControl({
+      max_age: config.cache.agents_md_redirect_max_age,
+      s_maxage: config.cache.agents_md_redirect_s_maxage,
+    }),
+  };
+  if (isProtectedPath(config, pathname)) headers["x-robots-tag"] = "noindex";
+  return new Response(null, { status: 301, headers });
 }
 
 export function mergeBlock(original: string, block: string): string {

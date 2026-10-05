@@ -1,6 +1,7 @@
 import type { Config } from "../config-types";
 import { buildCacheControl } from "../cache";
 import { appendOriginTrialHeaders } from "../origin-trial";
+import { isProtectedPath } from "../robots-tag";
 
 /**
  * The landing page generated at build time, with its strong ETag: the build-time hash of
@@ -46,10 +47,12 @@ export function landingResponse(
  * it exists only for requests the router gave to the landing, so it varies on Accept. no-store because a browser would
  * otherwise cache a 308 for good and send every later GET on this path, text/event-stream
  * ones included, to the page; the cost of never caching it is one cheap Worker answer.
+ * The redirect's own path is the slash-less form: under the namespace or /.well-known/ it
+ * carries noindex, like every answer there.
  */
-export function landingRedirect(toPath: string): Response {
-  return new Response(null, {
-    status: 308,
-    headers: { location: toPath, "cache-control": "no-store", vary: "accept" },
-  });
+export function landingRedirect(config: Config): Response {
+  const toPath = config.webmcp_landing.path;
+  const headers: Record<string, string> = { location: toPath, "cache-control": "no-store", vary: "accept" };
+  if (isProtectedPath(config, toPath.slice(0, -1))) headers["x-robots-tag"] = "noindex";
+  return new Response(null, { status: 308, headers });
 }
