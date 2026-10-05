@@ -13,7 +13,8 @@ In route-only mode, the Worker only sees requests on Worker-claimed paths.
 By default, **nothing identifying**. The Worker logs nothing about visitors (no client IPs, cookies or request bodies, that is, executor input) and nothing for a request that goes as planned. It writes one error line when something goes wrong, which shows in `wrangler tail` (and in Workers Logs, if you turn them on):
 
 - an origin redirect the Worker refused or could not follow: on an executor every such redirect (a target outside `allowed_origins`, more than 5 hops, an unusable `Location`), on a merge route all but a redirect to an origin outside `allowed_origins`, which is relayed to the client there and not logged. The line holds the origin and path of the start URL and of a refused target, or the unusable `Location` cut at its first `?` or `#`;
-- a failed origin fetch on a merge route: the origin and path, and the error message;
+- a failed origin fetch on a merge route or an executor: the origin and path, and the error message;
+- a tool URL the Worker refused after resolving its `url_template`: for one that does not parse, the URL cut at its first `?` or `#`; for one whose origin is not in `allowed_origins`, that origin. The same for a `sitemap_url` or `feed_url` the Worker cannot use (the origin only);
 - an executor that threw: the tool name and the error message;
 - an `http_json` origin answer that is not valid JSON: the parser's message, which can quote the start of origin's body;
 - an HTML injection error, or a selector that HTMLRewriter rejected: the error message and the selector.

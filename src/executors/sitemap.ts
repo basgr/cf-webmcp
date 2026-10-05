@@ -9,7 +9,7 @@
  */
 
 import type { ExecutorContext } from "./common";
-import { fromErr, mapOriginStatus, originFetch, readFailure, readWithLimit } from "./common";
+import { fromErr, logExecutorProblem, mapOriginStatus, originFetch, readFailure, readWithLimit } from "./common";
 import { err, ok, type Envelope } from "../envelope";
 
 /** Largest sitemap body we will read. The protocol caps a sitemap at 50 MB; this is a deliberate, lower bound for an edge Worker. */
@@ -34,14 +34,18 @@ export async function runSitemapFilter(
   config: SitemapConfig,
   input: SitemapInput,
 ): Promise<Envelope<{ entries: SitemapEntry[] }>> {
+  // The build checks sitemap_url, so neither refusal is expected; their messages name no host all
+  // the same, and the log gets the detail.
   let url: URL;
   try {
     url = new URL(config.sitemap_url);
   } catch {
-    return err("internal", `invalid sitemap_url ${config.sitemap_url}`, false);
+    logExecutorProblem("refused sitemap_url", { reason: "malformed" });
+    return err("internal", "sitemap_url is not a valid URL", false);
   }
   if (!ctx.allowedOrigins.includes(url.origin)) {
-    return err("internal", `sitemap_url ${url.origin} not in allowed_origins`, false);
+    logExecutorProblem("refused sitemap_url", { reason: "origin not in allowed_origins", origin: url.origin });
+    return err("internal", "sitemap_url is not in allowed_origins", false);
   }
 
   const res = await originFetch(ctx, url, { acceptHeader: "application/xml, text/xml, */*" });

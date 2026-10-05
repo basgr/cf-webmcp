@@ -2519,3 +2519,78 @@ describe("worker: pages without a literal <head> or </body>", () => {
     expect(link).toContain('rel="webmcp"');
   });
 });
+
+describe("exec: error messages name no host and carry no runtime text", () => {
+  const tool = (url_template: string, property = "path") =>
+    makeDeps({
+      tools: [
+        {
+          name: "get_page",
+          description: "Fetch a page.",
+          input_schema: { type: "object", properties: { [property]: { type: "string" } } },
+          executor: { type: "http_get", url_template },
+        },
+      ],
+    });
+
+  async function exec(deps: ReturnType<typeof makeDeps>, input: Record<string, unknown>) {
+    const res = await call(createHandler(deps), "https://example.com/_webmcp/exec/get_page", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(input),
+    });
+    return { status: res.status, body: await res.text() };
+  }
+
+  it.each(["@evil.example/x", ".evil.example/x"])(
+    "a path %j that moves the template off its origin is refused with a fixed message; the host goes to the log",
+    async (path) => {
+      const fetchMock = vi.fn(async () => new Response("never", { status: 200 }));
+      vi.stubGlobal("fetch", fetchMock);
+      const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      const { status, body } = await exec(tool("https://example.com{{path}}"), { path });
+
+      expect(status).toBe(400);
+      expect(JSON.parse(body).error.code).toBe("invalid_input");
+      expect(body).not.toContain("example.com");
+      expect(body).not.toContain("evil");
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(errors.mock.calls.map((c) => String(c[0])).join("\n")).toContain("evil.example");
+    },
+  );
+
+  it("a resolved URL the parser refuses answers a fixed message, without the URL", async () => {
+    const fetchMock = vi.fn(async () => new Response("never", { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const { status, body } = await exec(tool("https://{{sub}}.example.com/x", "sub"), { sub: "a b" });
+
+    expect(status).toBe(400);
+    expect(JSON.parse(body).error.code).toBe("invalid_input");
+    expect(body).not.toContain("example.com");
+    expect(body).not.toContain("a%20b");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("a fetch that rejects answers a fixed message; the runtime's message goes to the log", async () => {
+    const runtimeMessage = "connect ECONNREFUSED 10.0.0.7:443 (origin.internal.example.com)";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new TypeError(runtimeMessage);
+      }),
+    );
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const { status, body } = await exec(tool("https://example.com{{path}}"), { path: "/page" });
+
+    expect(status).toBe(502);
+    expect(JSON.parse(body).error).toEqual({ code: "internal", message: "origin request failed", retriable: true });
+    expect(body).not.toContain("example.com");
+    expect(body).not.toContain("ECONNREFUSED");
+    expect(body).not.toContain(runtimeMessage);
+    expect(errors.mock.calls.map((c) => String(c[0])).join("\n")).toContain(runtimeMessage);
+  });
+});

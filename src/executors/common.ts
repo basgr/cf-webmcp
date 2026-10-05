@@ -66,18 +66,22 @@ export function resolveUrl(
   } catch (e) {
     return { ok: false, error: { code: "invalid_input", message: (e as Error).message, retriable: false } };
   }
+  // The two refusals below answer fixed text: the resolved URL holds the caller's value and the
+  // host it names, which can be an internal name. The detail goes to the log (logExecutorProblem).
   let url: URL;
   try {
     url = new URL(resolved);
   } catch {
-    return { ok: false, error: { code: "invalid_input", message: `resolved URL is malformed: ${resolved}`, retriable: false } };
+    logExecutorProblem("refused a resolved URL", { reason: "malformed", url: withoutQuery(resolved) });
+    return { ok: false, error: { code: "invalid_input", message: "resolved URL is malformed", retriable: false } };
   }
   if (!ctx.allowedOrigins.includes(url.origin)) {
+    logExecutorProblem("refused a resolved URL", { reason: "origin not in allowed_origins", origin: url.origin });
     return {
       ok: false,
       error: {
         code: "invalid_input",
-        message: `resolved origin ${url.origin} is not in allowed_origins`,
+        message: "resolved origin is not in allowed_origins",
         retriable: false,
       },
     };
@@ -185,12 +189,33 @@ export async function originFetch(
     logRedirectFailure("executor", url, result.failure);
     return { ok: false, error: redirectFailureError(result.failure) };
   } catch (e) {
-    return isAbortError(e)
-      ? { ok: false, error: timeoutError(ctx.timeoutMs) }
-      : { ok: false, error: { code: "internal", message: (e as Error).message, retriable: true } };
+    if (isAbortError(e)) return { ok: false, error: timeoutError(ctx.timeoutMs) };
+    // The runtime's message can name the host, an address or a TLS detail: the log gets it, the
+    // caller a fixed message.
+    logExecutorProblem("origin fetch failed", {
+      start: url.origin + url.pathname,
+      error: (e as Error | null)?.message ?? String(e),
+    });
+    return { ok: false, error: { code: "internal", message: "origin request failed", retriable: true } };
   } finally {
     if (timer !== undefined) clearTimeout(timer);
   }
+}
+
+/**
+ * Write the detail of an executor failure whose envelope carries fixed text to the Worker log,
+ * as ONE line: a fixed prefix and a JSON object, so control characters in a value are escaped.
+ * Like logRedirectFailure, it holds hosts and paths but no query string; treat the log as
+ * operator-only.
+ */
+export function logExecutorProblem(what: string, detail: Record<string, string>): void {
+  console.error(`cf-webmcp: executor ${what}: ${JSON.stringify(detail)}`);
+}
+
+/** A URL string cut at its first `?` or `#`, and at 200 characters, for the log. */
+function withoutQuery(value: string): string {
+  const cut = value.search(/[?#]/);
+  return (cut === -1 ? value : value.slice(0, cut)).slice(0, 200);
 }
 
 /** A body that can be read as a stream: a Response, or the Request of the exec route. */
