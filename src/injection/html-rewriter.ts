@@ -24,7 +24,8 @@ import type { Config, FormInjectionConfig } from "../config-types";
 import { ARD_REL } from "../ard";
 
 export interface InjectOptions {
-  manifestUrl: string;
+  /** When set, a <link rel="webmcp"> to the manifest is injected. Unset while [features].manifest is off. */
+  manifestUrl?: string;
   bootstrapUrl: string;
   emitLinkTag: boolean;
   /** When set, an additional <link rel="api-catalog"> is injected alongside the webmcp link. */
@@ -77,7 +78,8 @@ export type ConfigLinkOptions = Pick<
 /**
  * Whether the <link> tags go in and where they point: absolute URLs on the site URL
  * ([site].public_url, else https://<[site].domain>), one per discovery document that is
- * served (feature on, not passthrough). The handler uses these for every injected page,
+ * served (feature on, not passthrough; the manifest has no passthrough mode). The handler
+ * uses these for every injected page,
  * and the build hashes them into INJECTION_HASH (scripts/build-config.ts), so the ETag
  * suffix of rewritten pages moves whenever the tags change.
  */
@@ -86,7 +88,7 @@ export function configLinkOptions(config: Config): ConfigLinkOptions {
   const served = (on: boolean, block: { mode: string; path: string }): string | undefined =>
     on && block.mode !== "passthrough" ? `${base}${block.path}` : undefined;
   return {
-    manifestUrl: `${base}${config.manifest.path}`,
+    manifestUrl: config.features.manifest ? `${base}${config.manifest.path}` : undefined,
     emitLinkTag: config.features.link_tag,
     apiCatalogUrl: served(config.features.api_catalog, config.api_catalog),
     aiCatalogUrl: served(config.features.ai_catalog, config.ai_catalog),
@@ -95,11 +97,17 @@ export function configLinkOptions(config: Config): ConfigLinkOptions {
   };
 }
 
+/**
+ * Glob match for [injection].exclude_paths and [[forms]].paths: `*` matches any run of
+ * characters (including none and `/`), and every other character matches itself. The
+ * regex metacharacters, `?` among them, are escaped before `*` is turned into `.*`, so
+ * a path such as /search?x is text, not a quantifier. The pattern must match the whole path.
+ */
 export function matchGlob(pattern: string, input: string): boolean {
   const re = new RegExp(
     "^" +
       pattern
-        .replace(/[.+^${}()|[\]\\]/g, "\\$&")
+        .replace(/[.+?^${}()|[\]\\]/g, "\\$&")
         .replace(/\*/g, ".*") +
       "$",
   );
@@ -170,7 +178,7 @@ export function safeInject(upstream: Response, opts: InjectOptions): { response:
 
 export function injectIntoHtml(response: Response, opts: InjectOptions): Response {
   const state = new State();
-  const webmcpTag = `<link rel="webmcp" href="${escapeAttr(opts.manifestUrl)}">`;
+  const webmcpTag = opts.manifestUrl ? `<link rel="webmcp" href="${escapeAttr(opts.manifestUrl)}">` : "";
   const apiCatalogTag = opts.apiCatalogUrl
     ? `<link rel="api-catalog" href="${escapeAttr(opts.apiCatalogUrl)}">`
     : "";
@@ -220,7 +228,7 @@ export function injectIntoHtml(response: Response, opts: InjectOptions): Respons
     .on("head", {
       element(el) {
         state.isDocument = true;
-        if (state.linkInjected || !opts.emitLinkTag) return;
+        if (state.linkInjected || !opts.emitLinkTag || linkTags === "") return;
         el.append(linkTags, { html: true });
         state.linkInjected = true;
       },

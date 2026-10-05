@@ -1,11 +1,14 @@
 /**
  * GET /robots.txt handler. Same merge model as llms.txt, with a hash-marker
- * pair since robots.txt comments start with `#`.
+ * pair since robots.txt comments start with `#`. Same 1 MiB cap on origin's file too:
+ * a larger one is relayed as origin sent it, and one whose body fails mid-read is
+ * answered with the block alone, cached for a minute only.
  */
 
 import type { Config } from "../config-types";
 import { buildCacheControl } from "../cache";
 import { applyRobotsTagRule } from "../robots-tag";
+import { ORIGIN_FAILURE_CACHE_CONTROL, readTextCapped } from "./read-capped";
 
 const BEGIN = "# cf-webmcp:begin";
 const END = "# cf-webmcp:end";
@@ -16,15 +19,32 @@ export async function robotsTxtResponse(
   proxyToOrigin: (url: URL) => Promise<Response>,
 ): Promise<Response> {
   const block = buildBlock(config);
+  // The document without origin's file: the block between its markers.
+  const standalone = `${BEGIN}\n${block}\n${END}\n`;
   let body: string;
+  let cacheControl = buildCacheControl({
+    max_age: config.cache.robots_txt_max_age,
+    s_maxage: config.cache.robots_txt_s_maxage,
+    swr: config.cache.robots_txt_swr,
+    sie: config.cache.robots_txt_sie,
+  });
 
   const target = new URL(config.robots_txt.path, config.origin.base_url);
   const upstream = await proxyToOrigin(target);
   if (upstream.status === 404) {
-    body = `${BEGIN}\n${block}\n${END}\n`;
+    body = standalone;
   } else if (upstream.status === 200 && isTextish(upstream.headers.get("content-type"))) {
-    const original = await upstream.text();
-    body = mergeBlock(original, block);
+    const read = await readTextCapped(upstream);
+    if (read.kind === "text") {
+      body = mergeBlock(read.text, block);
+    } else if (read.kind === "relay") {
+      // Over the cap: origin's file, not ours to merge into. Same header policy as any answer here.
+      return applyRobotsTagRule(read.upstream, config, config.robots_txt.path);
+    } else {
+      // The body failed mid-read: the block alone, for a minute.
+      body = standalone;
+      cacheControl = ORIGIN_FAILURE_CACHE_CONTROL;
+    }
   } else {
     // Relay origin's answer. At its apex path this route never carries X-Robots-Tag, so
     // the noindex proxyToOrigin puts on its own relays and failures comes off here
@@ -36,12 +56,7 @@ export async function robotsTxtResponse(
     status: 200,
     headers: {
       "content-type": "text/plain; charset=utf-8",
-      "cache-control": buildCacheControl({
-        max_age: config.cache.robots_txt_max_age,
-        s_maxage: config.cache.robots_txt_s_maxage,
-        swr: config.cache.robots_txt_swr,
-        sie: config.cache.robots_txt_sie,
-      }),
+      "cache-control": cacheControl,
       "x-content-type-options": "nosniff",
     },
   });

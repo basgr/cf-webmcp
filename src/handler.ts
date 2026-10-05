@@ -31,6 +31,8 @@ import { buildLinkHeader, mergeLinkHeader } from "./link-header";
 import { appendOriginTrialHeaders } from "./origin-trial";
 import { configLinkOptions, formsForPath, isExcludedPath, safeInject, shouldInject } from "./injection/html-rewriter";
 import { fetchWithManualRedirects, isAbortError, logRedirectFailure, type RedirectFailure } from "./safe-fetch";
+import { widgetEnabled } from "./widget-state";
+import { userAgent } from "./user-agent";
 
 /**
  * One deadline for a whole proxyToOrigin redirect chain, up to the moment the final
@@ -106,6 +108,10 @@ export interface HandlerDeps {
 
 export function createHandler(deps: HandlerDeps): Required<Pick<ExportedHandler<Env>, "fetch">> {
   const { config, assets, meta } = deps;
+  // The one answer to "is the widget on", for every sentence that tells a reader to pair on the
+  // landing page. The same expression decides the widget route (router.ts) and, at build time,
+  // the landing's pairing block and the skills index digest (scripts/build-config.ts).
+  const widget = widgetEnabled(config, meta.WIDGET_ASSET);
 
   return {
     async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -155,11 +161,11 @@ export function createHandler(deps: HandlerDeps): Required<Pick<ExportedHandler<
             envToken: env.CF_WEBMCP_HEALTH_TOKEN,
           });
         case "llms_txt":
-          return llmsTxtResponse(request, config, (u) => proxyToOrigin(u, env), meta.LLMS_TXT_TOKEN_HINTS);
+          return llmsTxtResponse(request, config, (u) => proxyToOrigin(u, env), meta.LLMS_TXT_TOKEN_HINTS, widget);
         case "robots_txt":
           return robotsTxtResponse(request, config, (u) => proxyToOrigin(u, env));
         case "agents_md":
-          return agentsMdResponse(request, config, (u) => proxyToOrigin(u, env));
+          return agentsMdResponse(request, config, (u) => proxyToOrigin(u, env), widget);
         case "agents_md_redirect":
           return agentsMdRedirect(config);
         case "api_catalog":
@@ -169,7 +175,7 @@ export function createHandler(deps: HandlerDeps): Required<Pick<ExportedHandler<
         case "ards_catalog_redirect":
           return ardRedirect(config);
         case "agent_skills":
-          return agentSkillsResponse(request, config, (u) => proxyToOrigin(u, env));
+          return agentSkillsResponse(request, config, (u) => proxyToOrigin(u, env), widget);
         case "agent_skills_redirect":
           return agentSkillsRedirect(config);
         case "agent_skills_index":
@@ -211,7 +217,7 @@ export function createHandler(deps: HandlerDeps): Required<Pick<ExportedHandler<
         { method: "GET" },
         {
           allowedOrigins: config.origin.allowed_origins,
-          headers: { "user-agent": "cf-webmcp/1.0" },
+          headers: { "user-agent": userAgent(meta.CF_WEBMCP_VERSION) },
           secretHeaders,
           signal: deadline.signal,
         },
@@ -371,7 +377,10 @@ export function createHandler(deps: HandlerDeps): Required<Pick<ExportedHandler<
    * Last-Modified. The three touch different headers, so their order does not matter.
    */
   function withProxyHeaders(response: Response, trial: boolean, editValidators?: (headers: Headers) => void): Response {
-    const addLink = config.features.link_header;
+    // "" when [features].link_header is off or no document is left to advertise (the manifest
+    // and every other entry off): then no Link header is added and origin's own stays as it is.
+    const link = config.features.link_header ? buildLinkHeader(config) : "";
+    const addLink = link !== "";
     const addTrial = trial && config.origin_trial.tokens.length > 0;
     if (!addLink && !addTrial && !editValidators) return response;
     // A WebSocket upgrade must be returned as the very object origin gave us:
@@ -380,7 +389,7 @@ export function createHandler(deps: HandlerDeps): Required<Pick<ExportedHandler<
     // 200 to 599"). Same for any status outside the constructible range.
     if (response.webSocket || response.status < 200 || response.status > 599) return response;
     const headers = new Headers(response.headers);
-    if (addLink) headers.set("link", mergeLinkHeader(headers.get("link"), buildLinkHeader(config)));
+    if (addLink) headers.set("link", mergeLinkHeader(headers.get("link"), link));
     if (addTrial) appendOriginTrialHeaders(headers, config.origin_trial.tokens);
     editValidators?.(headers);
     return new Response(response.body, { status: response.status, headers });

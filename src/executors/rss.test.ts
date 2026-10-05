@@ -5,6 +5,7 @@ const ctx = {
   allowedOrigins: ["https://example.com"],
   deployToken: "t",
   timeoutMs: 1000,
+  version: "0.0.0-test",
 };
 
 const rss20 = `<?xml version="1.0" encoding="UTF-8"?>

@@ -147,7 +147,8 @@ export function encodePath(value: string): string {
 }
 
 function resolvePlaceholder(p: Placeholder, input: Record<string, unknown>): ResolvedValue {
-  const raw = input[p.name];
+  // An own property only: `input.constructor` of an input without one is the Object function.
+  const raw = Object.prototype.hasOwnProperty.call(input, p.name) ? input[p.name] : undefined;
   const present = raw !== undefined && raw !== null && raw !== "";
 
   if (p.operator === "required") {

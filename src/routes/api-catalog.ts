@@ -11,13 +11,20 @@
  *                 Kept for parity with the other discovery routes' mode enum.
  *   - passthrough: route not registered (handled at the router/feature toggle)
  *
- * Scope is one entry pointing at config.manifest.path. cf-webmcp does not
- * generate OpenAPI, does not discover other APIs on the publisher's origin,
- * and does not impose any schema on the rest of the linkset.
+ * Scope is one entry pointing at config.manifest.path, while [features].manifest is
+ * on. With the manifest off there is nothing of ours to point at: the synthesized catalog
+ * is an empty linkset and a merge leaves origin's entries as they are. cf-webmcp does
+ * not generate OpenAPI, does not discover other APIs on the publisher's origin, and does
+ * not impose any schema on the rest of the linkset.
+ *
+ * Merge reads origin's catalog through a 1 MiB cap (src/routes/read-capped.ts): a larger one
+ * is relayed as origin sent it, with noindex; one whose body fails mid-read is answered with
+ * the synthesized catalog, as when origin has no file, but cached for a minute only.
  */
 
 import type { Config } from "../config-types";
 import { buildCacheControl } from "../cache";
+import { ORIGIN_FAILURE_CACHE_CONTROL, readTextCapped } from "./read-capped";
 
 interface LinkObject {
   href: string;
@@ -43,24 +50,41 @@ export async function apiCatalogResponse(
   proxyToOrigin: (url: URL) => Promise<Response>,
 ): Promise<Response> {
   const ourEntry = buildOurEntry(config);
+  const ours = ourEntry ? [ourEntry] : [];
   let body: string;
+  let cacheControl = buildCacheControl({
+    max_age: config.cache.api_catalog_max_age,
+    s_maxage: config.cache.api_catalog_s_maxage,
+    swr: config.cache.api_catalog_swr,
+    sie: config.cache.api_catalog_sie,
+  });
 
   if (config.api_catalog.mode === "synthesize" || config.api_catalog.mode === "replace") {
-    body = stringify({ linkset: [ourEntry] });
+    body = stringify({ linkset: ours });
   } else {
     // merge
     const target = new URL(config.api_catalog.path, config.origin.base_url);
     const upstream = await proxyToOrigin(target);
     if (upstream.status === 404) {
-      body = stringify({ linkset: [ourEntry] });
+      body = stringify({ linkset: ours });
     } else if (upstream.status === 200 && isLinksetContentType(upstream.headers.get("content-type"))) {
-      const originText = await upstream.text();
-      const merged = tryMerge(originText, ourEntry);
-      if (merged === null) {
-        // Origin file unparseable or not a linkset; fall back to synthesize.
-        body = stringify({ linkset: [ourEntry] });
+      const read = await readTextCapped(upstream);
+      if (read.kind === "relay") {
+        // Over the 1 MiB cap: origin's catalog, not ours to merge into. Noindex, as every answer here.
+        return withNoindex(read.upstream);
+      }
+      if (read.kind === "failed") {
+        // The body failed mid-read: the catalog without origin's entries, for a minute.
+        body = stringify({ linkset: ours });
+        cacheControl = ORIGIN_FAILURE_CACHE_CONTROL;
       } else {
-        body = merged;
+        const merged = tryMerge(read.text, ourEntry);
+        if (merged === null) {
+          // Origin file unparseable or not a linkset; fall back to synthesize.
+          body = stringify({ linkset: ours });
+        } else {
+          body = merged;
+        }
       }
     } else {
       // Origin returned something we cannot interpret as a catalog (HTML, etc).
@@ -74,12 +98,7 @@ export async function apiCatalogResponse(
     status: 200,
     headers: {
       "content-type": "application/linkset+json",
-      "cache-control": buildCacheControl({
-        max_age: config.cache.api_catalog_max_age,
-        s_maxage: config.cache.api_catalog_s_maxage,
-        swr: config.cache.api_catalog_swr,
-        sie: config.cache.api_catalog_sie,
-      }),
+      "cache-control": cacheControl,
       "x-content-type-options": "nosniff",
       // Agent-discovery surface served under /.well-known/, not search-engine
       // content. See docs/scope.md and the x-robots coverage test.
@@ -88,7 +107,9 @@ export async function apiCatalogResponse(
   });
 }
 
-function buildOurEntry(config: Config): LinksetEntry {
+/** Our entry, or null while the manifest it points at is not served. */
+function buildOurEntry(config: Config): LinksetEntry | null {
+  if (!config.features.manifest) return null;
   const base = config.site.public_url ?? `https://${config.site.domain}`;
   const anchor = `${base}/`;
   const manifestUrl = `${base}${config.manifest.path}`;
@@ -99,10 +120,11 @@ function buildOurEntry(config: Config): LinksetEntry {
 }
 
 /**
- * Parse origin's catalog and merge our entry in. Returns null when the origin
- * document is unparseable or does not look like an RFC 9264 linkset.
+ * Parse origin's catalog and merge our entry in (none, when `ourEntry` is null: origin's
+ * entries come back unchanged). Returns null when the origin document is unparseable or
+ * does not look like an RFC 9264 linkset.
  */
-export function tryMerge(originText: string, ourEntry: LinksetEntry): string | null {
+export function tryMerge(originText: string, ourEntry: LinksetEntry | null): string | null {
   let parsed: unknown;
   try {
     parsed = JSON.parse(originText);
@@ -119,6 +141,7 @@ export function tryMerge(originText: string, ourEntry: LinksetEntry): string | n
   }
 
   const entries = (linkset as LinksetEntry[]).slice();
+  if (ourEntry === null) return stringify({ linkset: entries });
   const ourAnchor = ourEntry.anchor;
   const ourLinks = (ourEntry[WEBMCP_REL] as LinkObject[]) ?? [];
   const ourLink = ourLinks[0];

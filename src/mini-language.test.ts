@@ -112,3 +112,18 @@ describe("compileTemplate", () => {
     expect(() => c.resolver({})).toThrow(/cannot omit/);
   });
 });
+
+describe("placeholders read own properties of the input only", () => {
+  it("a {{constructor}} placeholder is missing, not the Object function, when the input has none", () => {
+    const c = compileTemplate("https://example.com/x/{{constructor}}");
+    expect(() => c.resolver({})).toThrow(/required parameter "constructor" missing/);
+    expect(c.resolver({ constructor: "abc" })).toBe("https://example.com/x/abc");
+  });
+
+  it("an optional or defaulted placeholder named like an inherited member behaves as absent", () => {
+    const optional = compileTemplate("https://example.com/x?a={{constructor|optional}}&b=1");
+    expect(optional.resolver({})).toBe("https://example.com/x?b=1");
+    const defaulted = compileTemplate("https://example.com/x/{{constructor|default:none}}");
+    expect(defaulted.resolver({})).toBe("https://example.com/x/none");
+  });
+});

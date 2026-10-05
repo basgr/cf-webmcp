@@ -4,6 +4,7 @@
  */
 
 import type { Config } from "./config-types";
+import { widgetEnabled } from "./widget-state";
 
 export interface RouteMatch {
   kind:
@@ -108,7 +109,7 @@ export function matchRoute(
   if (pathname.startsWith(assetPrefix)) {
     const name = pathname.slice(assetPrefix.length);
     if (name === bootstrapAsset) return { kind: "bootstrap" };
-    if (config.features.fallback_widget && widgetAsset !== null && name === widgetAsset) {
+    if (widgetEnabled(config, widgetAsset) && name === widgetAsset) {
       return { kind: "widget" };
     }
     if (BOOTSTRAP_ASSET_NAME.test(name) || WIDGET_ASSET_NAME.test(name)) {

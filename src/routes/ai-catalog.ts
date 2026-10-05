@@ -31,15 +31,16 @@
 import type { Config } from "../config-types";
 import { buildCacheControl, sha256Hex } from "../cache";
 import { ARD_PREDECESSOR_PATH, isArdContentType, isArdDocument, type ArdEntryLike } from "../ard";
+import { MERGE_MAX_BYTES, ORIGIN_FAILURE_CACHE_CONTROL, declaredLength, readCapped, type CappedRead } from "./read-capped";
 
-/** Origin documents over this many bytes are relayed, not merged. */
-export const ARD_MERGE_MAX_BYTES = 1024 * 1024;
+/** Origin documents over this many bytes are relayed, not merged (the cap every merge route shares). */
+export const ARD_MERGE_MAX_BYTES = MERGE_MAX_BYTES;
 
 /**
  * Cache-Control of the generated document when it stands in for an origin that
  * failed, so origin's own document is back within a minute once origin is.
  */
-export const ARD_FAILURE_CACHE_CONTROL = "public, max-age=60, s-maxage=60";
+export const ARD_FAILURE_CACHE_CONTROL = ORIGIN_FAILURE_CACHE_CONTROL;
 
 /**
  * `synthesizedEtag` is the strong ETag of `synthesizedBody`, computed at build time
@@ -170,60 +171,6 @@ async function mergeWithOrigin(
     return { kind: "relay", upstream: new Response(read.bytes, init) };
   }
   return { kind: "body", text: merged };
-}
-
-/** The Content-Length origin declared, or 0 when there is none or it is not a number. */
-function declaredLength(res: Response): number {
-  const value = res.headers.get("content-length")?.trim() ?? "";
-  return /^\d+$/.test(value) ? Number(value) : 0;
-}
-
-type CappedRead = { kind: "bytes"; bytes: Uint8Array } | { kind: "too_large"; rest: ReadableStream<Uint8Array> };
-
-/**
- * Read a body up to `limit` bytes. Past the limit, stop and hand back a stream
- * of the bytes read so far followed by the unread rest, so the body can still be
- * relayed whole. A failing stream throws.
- */
-async function readCapped(body: ReadableStream<Uint8Array> | null, limit: number): Promise<CappedRead> {
-  if (!body) return { kind: "bytes", bytes: new Uint8Array(0) };
-  const reader = body.getReader();
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  while (true) {
-    const next = await reader.read();
-    if (next.done) break;
-    if (!next.value) continue;
-    chunks.push(next.value);
-    total += next.value.byteLength;
-    if (total > limit) {
-      const rest = new ReadableStream<Uint8Array>({
-        start(controller) {
-          for (const c of chunks) controller.enqueue(c);
-        },
-        async pull(controller) {
-          try {
-            const more = await reader.read();
-            if (more.done) controller.close();
-            else controller.enqueue(more.value);
-          } catch (e) {
-            controller.error(e);
-          }
-        },
-        cancel(reason) {
-          return reader.cancel(reason);
-        },
-      });
-      return { kind: "too_large", rest };
-    }
-  }
-  const bytes = new Uint8Array(total);
-  let offset = 0;
-  for (const c of chunks) {
-    bytes.set(c, offset);
-    offset += c.byteLength;
-  }
-  return { kind: "bytes", bytes };
 }
 
 /**

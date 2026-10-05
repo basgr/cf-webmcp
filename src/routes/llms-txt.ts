@@ -7,11 +7,17 @@
  *   - synthesize: generate from TOML only, ignore origin
  *   - replace:    generate from TOML, discard any origin content
  *   - passthrough: route not registered (handled by router/feature toggle, not here)
+ *
+ * Merge reads origin's file through a 1 MiB cap (src/routes/read-capped.ts). A larger file is
+ * relayed as origin sent it; one whose body fails mid-read is answered with the block alone,
+ * as when origin has no file, but cached for a minute only. Either way the X-Robots-Tag rule
+ * of the apex files applies (src/robots-tag.ts).
  */
 
 import type { Config } from "../config-types";
 import { buildCacheControl } from "../cache";
 import { applyRobotsTagRule } from "../robots-tag";
+import { ORIGIN_FAILURE_CACHE_CONTROL, readTextCapped } from "./read-capped";
 
 const BEGIN = "<!-- cf-webmcp:begin -->";
 const END = "<!-- cf-webmcp:end -->";
@@ -27,26 +33,50 @@ export interface LlmsTxtTokenHints {
   landing: number;
 }
 
+/**
+ * `widget` says whether the desktop-bridge widget is on (widgetEnabled in src/widget-state.ts:
+ * the feature on and a widget in the build). It decides how the landing page is described:
+ * "Pairing page" when it is, "WebMCP page" when it is not. Without an answer it follows
+ * [features].fallback_widget.
+ */
 export async function llmsTxtResponse(
   _request: Request,
   config: Config,
   proxyToOrigin: (url: URL) => Promise<Response>,
   tokenHints?: LlmsTxtTokenHints,
+  widget: boolean = config.features.fallback_widget,
 ): Promise<Response> {
-  const block = buildBlock(config, tokenHints);
+  const block = buildBlock(config, tokenHints, widget);
+  // The document without origin's file: the block between its markers.
+  const standalone = `${BEGIN}\n${block}\n${END}\n`;
   let body: string;
+  let cacheControl = buildCacheControl({
+    max_age: config.cache.llms_txt_max_age,
+    s_maxage: config.cache.llms_txt_s_maxage,
+    swr: config.cache.llms_txt_swr,
+    sie: config.cache.llms_txt_sie,
+  });
 
   if (config.llms_txt.mode === "synthesize" || config.llms_txt.mode === "replace") {
-    body = `${BEGIN}\n${block}\n${END}\n`;
+    body = standalone;
   } else {
     // merge (passthrough never gets here: the router leaves that path to origin)
     const target = new URL(config.llms_txt.path, config.origin.base_url);
     const upstream = await proxyToOrigin(target);
     if (upstream.status === 404) {
-      body = `${BEGIN}\n${block}\n${END}\n`;
+      body = standalone;
     } else if (upstream.status === 200 && isTextish(upstream.headers.get("content-type"))) {
-      const original = await upstream.text();
-      body = mergeBlock(original, block);
+      const read = await readTextCapped(upstream);
+      if (read.kind === "text") {
+        body = mergeBlock(read.text, block);
+      } else if (read.kind === "relay") {
+        // Over the cap: origin's file, not ours to merge into.
+        return applyRobotsTagRule(read.upstream, config, config.llms_txt.path);
+      } else {
+        // The body failed mid-read: the block alone, for a minute.
+        body = standalone;
+        cacheControl = ORIGIN_FAILURE_CACHE_CONTROL;
+      }
     } else {
       // Pass origin's response through, augmentation is best-effort. At its apex path
       // this route never carries X-Robots-Tag, so the noindex proxyToOrigin puts on its
@@ -59,12 +89,7 @@ export async function llmsTxtResponse(
     status: 200,
     headers: {
       "content-type": "text/plain; charset=utf-8",
-      "cache-control": buildCacheControl({
-        max_age: config.cache.llms_txt_max_age,
-        s_maxage: config.cache.llms_txt_s_maxage,
-        swr: config.cache.llms_txt_swr,
-        sie: config.cache.llms_txt_sie,
-      }),
+      "cache-control": cacheControl,
       "x-content-type-options": "nosniff",
     },
   });
@@ -84,7 +109,7 @@ export function mergeBlock(original: string, block: string): string {
   return `${trimmed}\n${BEGIN}\n${block}\n${END}\n`;
 }
 
-function buildBlock(config: Config, tokenHints?: LlmsTxtTokenHints): string {
+function buildBlock(config: Config, tokenHints: LlmsTxtTokenHints | undefined, widget: boolean): string {
   const base = config.site.public_url ?? `https://${config.site.domain}`;
   const landing = `${base}${config.webmcp_landing.path}`;
   const manifest = `${base}${config.manifest.path}`;
@@ -99,9 +124,15 @@ function buildBlock(config: Config, tokenHints?: LlmsTxtTokenHints): string {
     ``,
     `${config.site.name} exposes structured tools to AI agents via WebMCP.`,
     ``,
-    `- Pairing page: [${landing}](${landing})${landingTokens}`,
-    `- Tool catalogue: [${manifest}](${manifest})${manifestTokens}`,
   ];
+  // Each line exists only while the document it names is served. The landing is called a
+  // pairing page only when the widget that does the pairing is on.
+  if (config.features.webmcp_landing) {
+    lines.push(`- ${widget ? "Pairing page" : "WebMCP page"}: [${landing}](${landing})${landingTokens}`);
+  }
+  if (config.features.manifest) {
+    lines.push(`- Tool catalogue: [${manifest}](${manifest})${manifestTokens}`);
+  }
   if (config.features.agents_md && config.agents_md.mode !== "passthrough") {
     lines.push(`- Agent instructions: [${agentsMd}](${agentsMd})`);
   }

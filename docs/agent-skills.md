@@ -48,6 +48,14 @@ Search is path-based, not full-text.
 
 The frontmatter `name` and `description` derive from `[site].name` and `[site].description`. The name is `[agent_skills].name` when set, which must be lowercase letters and digits in groups joined by single hyphens (`example-site`), at most 64 characters; otherwise it is the slug of `[site].name` (NFKD, accents removed, lowercased, letters such as `ß` and `ø` written as `ss` and `o`, other characters turned into hyphens, cut to 64 characters: `Café` becomes `cafe`, `Grüße Welt` becomes `grusse-welt`). The skills index entry and the ARD entry identifier use the same name, and the build fails when it would be empty (see [`docs/ard.md`](ard.md#the-skill-name)). In `merge` mode with a SKILL.md at origin, origin's frontmatter is kept as it is. The tool list is auto-generated from `[[tools]]` and `[[forms]]`. The "When to use which" and "Common pitfalls" sections come from `[[agent_skills.hints]]` blocks you write in TOML.
 
+The example shows a site with the desktop-bridge widget on (`[features].fallback_widget = true` and a widget pinned in the build). The sentence about the landing page follows the features:
+
+- Widget on: `Desktop MCP clients can pair at <landing> and call the tools through the localhost bridge.`
+- Widget off (the default, or no usable pin in the build): `The tools are also listed at <landing>.` Nothing says a desktop client can pair there.
+- `[features].webmcp_landing = false`: no sentence about the landing page at all.
+
+The closing `## Full machine-readable tool schema` section, which names the manifest, is there only while `[features].manifest` is on.
+
 Hint `body` is rendered into agent-visible markdown - see [`docs/security.md`](security.md) before pasting user-generated content into hint fields.
 
 ## Config
@@ -97,7 +105,7 @@ agent_skills_redirect_s_maxage = 604800
 | Mode | What happens |
 |------|--------------|
 | `synthesize` (default) | Ignore origin. Emit a fresh SKILL.md from TOML alone. |
-| `merge` | Fetch origin's SKILL.md. Splice our auto-generated block into `<!-- cf-webmcp:begin -->` ... `<!-- cf-webmcp:end -->`. Idempotent on re-run. The publisher's frontmatter and surrounding prose are preserved. |
+| `merge` | Fetch origin's SKILL.md. Splice our auto-generated block into `<!-- cf-webmcp:begin -->` ... `<!-- cf-webmcp:end -->`. Idempotent on re-run. The publisher's frontmatter and surrounding prose are preserved. Origin's file is read up to 1 MiB: a larger one is relayed as it came, and one whose body fails mid-read is answered with the synthesized document for a minute (see [Merge routes and the 1 MiB cap](deployment.md#merge-routes-and-the-1-mib-cap)). |
 | `replace` | Same as synthesize. (cf-webmcp emits exactly one skill, so the difference between replace and synthesize would only matter for multi-skill generators; kept for parity with other discovery routes.) |
 | `passthrough` | Route not registered. Origin owns the file entirely. |
 
@@ -115,7 +123,7 @@ Configurable via `[agent_skills].aliases`. Set to `[]` to disable.
 
 When the skill is enabled (`features.agent_skills = true` and mode not `passthrough`), cf-webmcp advertises it through:
 
-- **HTTP `Link` header**: an additional `<...>; rel="agent-skills"` entry alongside the existing `rel="webmcp"` and `rel="api-catalog"` entries, comma-separated per RFC 8288.
+- **HTTP `Link` header**: an additional `<...>; rel="agent-skills"` entry alongside the other entries that are on (`rel="webmcp"` while `[features].manifest` is on, `rel="api-catalog"`), comma-separated per RFC 8288.
 - **`<link>` tag** injected into HTML responses (when `[features].link_tag = true`):
 
   ```html

@@ -449,3 +449,198 @@ describe("exec: every answer carries CORS for a listed origin", () => {
     expect(res.headers.has("vary")).toBe(false);
   });
 });
+
+describe("exec: a POST http_json tool is not cached unless its [tools.cache] asks for it", () => {
+  const SEND_URL = "https://example.com/api/send";
+  const postTool = (cache?: Record<string, number>): ConfigOverrides => ({
+    tools: [
+      {
+        name: "search_pages",
+        description: "d",
+        executor: { type: "http_json", url_template: SEND_URL, method: "POST" },
+        ...(cache ? { cache } : {}),
+      },
+    ],
+  });
+  const getTool = (cache?: Record<string, number>): ConfigOverrides => ({
+    tools: [
+      {
+        name: "search_pages",
+        description: "d",
+        executor: { type: "http_json", url_template: SEND_URL, method: "GET" },
+        ...(cache ? { cache } : {}),
+      },
+    ],
+  });
+
+  /** A fetch that answers every call with a fresh JSON body and counts them. */
+  function originAnswering() {
+    const calls: Array<{ method: string | undefined; body: unknown }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init?: RequestInit) => {
+        calls.push({ method: init?.method, body: init?.body });
+        return new Response(JSON.stringify({ call: calls.length }), { status: 200, headers: { "content-type": "application/json" } });
+      }),
+    );
+    return calls;
+  }
+
+  const storedFor = async (configHash: string) =>
+    caches.default.match(await makeCacheKey("example.com", { version: VERSION, configHash }, { toolName: "search_pages", bodyText: "{}" }));
+
+  it("sends the request body to origin as the POST body", async () => {
+    const calls = originAnswering();
+    const body = '{"email":"a@example.com","n":2}';
+
+    const res = await runAndSettle(fromOrigin(null, body), freshConfigHash(), postTool());
+
+    expect(res.status).toBe(200);
+    expect(calls).toEqual([{ method: "POST", body }]);
+  });
+
+  it("by default neither reads nor writes the cache: every call reaches origin", async () => {
+    const calls = originAnswering();
+    const configHash = freshConfigHash();
+
+    const first = await runAndSettle(fromOrigin(null), configHash, postTool());
+    const second = await runAndSettle(fromOrigin(null), configHash, postTool());
+
+    expect(calls).toHaveLength(2);
+    expect(((await first.json()) as { data: { call: number } }).data.call).toBe(1);
+    expect(((await second.json()) as { data: { call: number } }).data.call).toBe(2);
+    expect(first.headers.get("x-webmcp-cache")).toBe("BYPASS");
+    expect(second.headers.get("x-webmcp-cache")).toBe("BYPASS");
+    expect(await storedFor(configHash)).toBeUndefined();
+  });
+
+  it("answers with Cache-Control: no-store, not the executor defaults", async () => {
+    originAnswering();
+
+    const res = await runAndSettle(fromOrigin(null), freshConfigHash(), postTool());
+
+    expect(res.headers.get("cache-control")).toBe("no-store");
+  });
+
+  it("schedules no cache write", async () => {
+    originAnswering();
+    const waitUntil = vi.fn();
+
+    await execResponse(
+      fromOrigin(null),
+      makeConfig(postTool()),
+      "search_pages",
+      { domain: "example.com", deployToken: "", configHash: freshConfigHash(), version: VERSION },
+      waitUntil,
+    );
+
+    expect(waitUntil).not.toHaveBeenCalled();
+  });
+
+  it("caches a POST tool whose [tools.cache] sets a positive s_maxage, with the tool's own values", async () => {
+    const calls = originAnswering();
+    const configHash = freshConfigHash();
+    const cache = { s_maxage: 60, swr: 10 };
+
+    const first = await runAndSettle(fromOrigin(null), configHash, postTool(cache));
+    const second = await runAndSettle(fromOrigin(null), configHash, postTool(cache));
+
+    expect(calls).toHaveLength(1);
+    expect(first.headers.get("x-webmcp-cache")).toBe("MISS");
+    expect(second.headers.get("x-webmcp-cache")).toBe("HIT");
+    // The tool's s_maxage and swr; the unset max_age and sie come from [cache].executor_defaults.
+    expect(first.headers.get("cache-control")).toBe("public, max-age=0, s-maxage=60, stale-while-revalidate=10, stale-if-error=86400");
+    expect(await storedFor(configHash)).toBeDefined();
+  });
+
+  it("keys a cached POST tool on the body, so another body is a miss", async () => {
+    const calls = originAnswering();
+    const configHash = freshConfigHash();
+    const cache = { s_maxage: 60 };
+
+    await runAndSettle(fromOrigin(null, '{"q":"a"}'), configHash, postTool(cache));
+    await runAndSettle(fromOrigin(null, '{"q":"a"}'), configHash, postTool(cache));
+    await runAndSettle(fromOrigin(null, '{"q":"b"}'), configHash, postTool(cache));
+
+    expect(calls).toHaveLength(2);
+  });
+
+  it.each([
+    ["max_age alone (a browser lifetime: a POST is never cached by the browser)", { max_age: 60 }],
+    ["swr and sie alone (they only qualify a lifetime)", { swr: 60, sie: 60 }],
+    ["s_maxage = 0 (the explicit way to say never)", { s_maxage: 0 }],
+    ["an empty [tools.cache] table", {}],
+  ])("does not cache a POST tool with %s", async (_label, cache) => {
+    const calls = originAnswering();
+    const configHash = freshConfigHash();
+
+    const first = await runAndSettle(fromOrigin(null), configHash, postTool(cache));
+    const second = await runAndSettle(fromOrigin(null), configHash, postTool(cache));
+
+    expect(calls).toHaveLength(2);
+    expect(first.headers.get("x-webmcp-cache")).toBe("BYPASS");
+    expect(second.headers.get("x-webmcp-cache")).toBe("BYPASS");
+    expect(second.headers.get("cache-control")).toBe("no-store");
+  });
+
+  it("does not cache a failed POST either way", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("boom", { status: 500 })));
+    const configHash = freshConfigHash();
+
+    const res = await runAndSettle(fromOrigin(null), configHash, postTool({ s_maxage: 60 }));
+
+    expect(res.status).toBe(502);
+    expect(await storedFor(configHash)).toBeUndefined();
+  });
+
+  it("a GET http_json tool keeps the default cache: second call is a hit with the executor defaults", async () => {
+    const calls = originAnswering();
+    const configHash = freshConfigHash();
+
+    const first = await runAndSettle(fromOrigin(null), configHash, getTool());
+    const second = await runAndSettle(fromOrigin(null), configHash, getTool());
+
+    expect(calls).toHaveLength(1);
+    expect(first.headers.get("x-webmcp-cache")).toBe("MISS");
+    expect(second.headers.get("x-webmcp-cache")).toBe("HIT");
+    expect(first.headers.get("cache-control")).toBe("public, max-age=0, s-maxage=300, stale-while-revalidate=1800, stale-if-error=86400");
+  });
+
+  it("carries CORS and noindex on the uncached answer like any other", async () => {
+    originAnswering();
+
+    const res = await runAndSettle(fromOrigin(APP_A), freshConfigHash(), { ...CORS, ...postTool() });
+
+    expect(res.headers.get("access-control-allow-origin")).toBe(APP_A);
+    expect(varyTokens(res)).toContain("origin");
+    expect(res.headers.get("x-robots-tag")).toContain("noindex");
+  });
+});
+
+describe("exec: the User-Agent names the cf-webmcp version", () => {
+  it("sends cf-webmcp/<version> to origin for every executor type, the version the exec options carry", async () => {
+    const agents: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init?: RequestInit) => {
+        agents.push((init?.headers as Record<string, string>)["user-agent"]!);
+        return new Response("<urlset></urlset>", { status: 200, headers: { "content-type": "application/xml" } });
+      }),
+    );
+    const tools: Record<string, ConfigOverrides["tools"]> = {
+      sitemap_filter: [{ name: "search_pages", description: "d", executor: { type: "sitemap_filter", sitemap_url: SITEMAP_URL } }],
+      rss_feed: [{ name: "search_pages", description: "d", executor: { type: "rss_feed", feed_url: "https://example.com/feed.xml" } }],
+      http_get: [{ name: "search_pages", description: "d", executor: { type: "http_get", url_template: "https://example.com/data.txt" } }],
+      http_json: [{ name: "search_pages", description: "d", executor: { type: "http_json", url_template: "https://example.com/data.json" } }],
+      dom_extract: [{ name: "search_pages", description: "d", executor: { type: "dom_extract", url_template: "https://example.com/page" } }],
+    };
+
+    for (const overrides of Object.values(tools)) {
+      // A config hash of its own each time: one tool name and one body would otherwise be a cache hit.
+      await run(post("{}"), { tools: overrides }, { version: "4.5.6", configHash: freshConfigHash() });
+    }
+
+    expect(agents).toEqual(Array(5).fill("cf-webmcp/4.5.6"));
+  });
+});

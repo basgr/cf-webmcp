@@ -12,35 +12,64 @@
  *   - replace:     generate from TOML and discard any origin content.
  *   - passthrough: route not registered (handled by router/feature toggle).
  *
+ * Merge reads origin's file through a 1 MiB cap (src/routes/read-capped.ts): a larger file is
+ * relayed as origin sent it, with noindex; one whose body fails mid-read is answered with the
+ * block alone, as when origin has no file, but cached for a minute only.
+ *
  * Plus an alias redirect handler: paths in [agents_md].aliases 301 to the
  * canonical [agents_md].path.
  */
 
 import type { Config } from "../config-types";
 import { buildCacheControl } from "../cache";
+import { ORIGIN_FAILURE_CACHE_CONTROL, readTextCapped } from "./read-capped";
 
 const BEGIN = "<!-- cf-webmcp:begin -->";
 const END = "<!-- cf-webmcp:end -->";
 
+/**
+ * `widget` says whether the desktop-bridge widget is on (widgetEnabled in src/widget-state.ts:
+ * the feature on and a widget in the build). Only then does the block tell desktop MCP clients
+ * to pair on the landing page; otherwise the landing is described as the page it is. Without
+ * an answer it follows [features].fallback_widget.
+ */
 export async function agentsMdResponse(
   _request: Request,
   config: Config,
   proxyToOrigin: (url: URL) => Promise<Response>,
+  widget: boolean = config.features.fallback_widget,
 ): Promise<Response> {
-  const block = buildBlock(config);
+  const block = buildBlock(config, widget);
+  // The document without origin's file: the block between its markers.
+  const standalone = `${BEGIN}\n${block}\n${END}\n`;
   let body: string;
+  let cacheControl = buildCacheControl({
+    max_age: config.cache.agents_md_max_age,
+    s_maxage: config.cache.agents_md_s_maxage,
+    swr: config.cache.agents_md_swr,
+    sie: config.cache.agents_md_sie,
+  });
 
   if (config.agents_md.mode === "synthesize" || config.agents_md.mode === "replace") {
-    body = `${BEGIN}\n${block}\n${END}\n`;
+    body = standalone;
   } else {
     // merge (passthrough never gets here: the router leaves that path to origin)
     const target = new URL(config.agents_md.path, config.origin.base_url);
     const upstream = await proxyToOrigin(target);
     if (upstream.status === 404) {
-      body = `${BEGIN}\n${block}\n${END}\n`;
+      body = standalone;
     } else if (upstream.status === 200 && isTextish(upstream.headers.get("content-type"))) {
-      const original = await upstream.text();
-      body = mergeBlock(original, block);
+      const read = await readTextCapped(upstream);
+      if (read.kind === "text") {
+        body = mergeBlock(read.text, block);
+      } else if (read.kind === "relay") {
+        // Over the 1 MiB cap: origin's file, not ours to merge into. Noindex, as every answer here.
+        return withNoindex(read.upstream);
+      } else {
+        // The body failed mid-read: the block alone, for a minute.
+        body = standalone;
+        cacheControl = ORIGIN_FAILURE_CACHE_CONTROL;
+      }
     } else {
       // Origin returned something we cannot interpret (HTML, redirect, 5xx).
       // Relay it but enforce noindex since the path is under /.well-known/*.
@@ -52,12 +81,7 @@ export async function agentsMdResponse(
     status: 200,
     headers: {
       "content-type": "text/markdown; charset=utf-8",
-      "cache-control": buildCacheControl({
-        max_age: config.cache.agents_md_max_age,
-        s_maxage: config.cache.agents_md_s_maxage,
-        swr: config.cache.agents_md_swr,
-        sie: config.cache.agents_md_sie,
-      }),
+      "cache-control": cacheControl,
       "x-content-type-options": "nosniff",
       // Agent-discovery surface served under /.well-known/, not search-engine
       // content. See docs/scope.md and the x-robots coverage test.
@@ -91,7 +115,7 @@ export function mergeBlock(original: string, block: string): string {
   return `${trimmed}\n${BEGIN}\n${block}\n${END}\n`;
 }
 
-function buildBlock(config: Config): string {
+function buildBlock(config: Config, widget: boolean): string {
   const base = config.site.public_url ?? `https://${config.site.domain}`;
   const ns = config.paths.namespace;
   const manifestUrl = `${base}${config.manifest.path}`;
@@ -115,14 +139,28 @@ function buildBlock(config: Config): string {
     lines.push(`- \`${f.name}\` (form): ${f.description}`);
   }
 
+  if (config.features.manifest) {
+    lines.push(``, `Full tool schema: [${manifestUrl}](${manifestUrl})`);
+  }
+
   lines.push(
-    ``,
-    `Full tool schema: [${manifestUrl}](${manifestUrl})`,
     ``,
     `### How agents connect`,
     ``,
     `- **Browser-native agents** (Chrome with WebMCP flag enabled, Cloudflare Browser Run lab sessions): tools auto-register via \`navigator.modelContext\` when the page loads. No setup.`,
-    `- **Desktop MCP clients** (Claude Desktop, Cursor, Claude Code, Windsurf): pair at [${landingUrl}](${landingUrl}). The pairing page hosts the localhost-bridge widget.`,
+  );
+  // The landing page: a pairing page only while the widget is on; with it off the page lists
+  // the tools and says whether the browser exposes WebMCP, and nothing here says to pair. With
+  // the landing off it is not mentioned at all.
+  if (config.features.webmcp_landing) {
+    lines.push(
+      widget
+        ? `- **Desktop MCP clients** (Claude Desktop, Cursor, Claude Code, Windsurf): pair at [${landingUrl}](${landingUrl}). The pairing page hosts the localhost-bridge widget.`
+        : `- **WebMCP page**: [${landingUrl}](${landingUrl}) lists these tools and shows whether your browser exposes WebMCP.`,
+    );
+  }
+
+  lines.push(
     ``,
     `### Operational notes`,
     ``,
@@ -135,8 +173,10 @@ function buildBlock(config: Config): string {
     ``,
     `- Do not call \`${ns}/exec/*\` from cross-origin JS unless the publisher has configured \`[cors].allowed_origins\`.`,
     `- Do not retry on \`rate_limited\` errors faster than \`Retry-After\` indicates.`,
-    `- The fallback widget only initialises on the pairing page above.`,
   );
+  if (widget && config.features.webmcp_landing) {
+    lines.push(`- The fallback widget only initialises on the pairing page above.`);
+  }
 
   return lines.join("\n");
 }

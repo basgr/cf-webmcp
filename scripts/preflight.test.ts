@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { spawnSync } from "node:child_process";
 import { promises as fs, readFileSync } from "node:fs";
 import path from "node:path";
 import os from "node:os";
@@ -657,6 +658,174 @@ describe("preflight: the ARD manifest (ard.json) and its aliases", () => {
   });
 });
 
+describe("preflight: an origin file over the Worker's 1 MiB merge cap", () => {
+  const MIB = 1024 * 1024;
+  const ARD = "https://example.com/.well-known/ard.json";
+  const PREDECESSOR = "https://example.com/.well-known/ai-catalog.json";
+  const ARD_ON = `${MINIMAL}\n[features]\nai_catalog = true\n\n[ai_catalog]\nmode = "merge"\n`;
+  const VALID_ARD = JSON.stringify({
+    entries: [{ identifier: "urn:air:example.com:agent:x", displayName: "X", type: "application/a2a-agent-card+json", url: "https://example.com/x.json" }],
+  });
+  /** `head`, then spaces, to exactly `size` bytes. */
+  const padded = (head: string, size: number): Uint8Array => {
+    const bytes = new Uint8Array(size).fill(0x20);
+    bytes.set(new TextEncoder().encode(head));
+    return bytes;
+  };
+  /** The same bytes as a stream with no Content-Length, in 64 KiB chunks. */
+  const streamed = (bytes: Uint8Array): ReadableStream<Uint8Array> => {
+    let at = 0;
+    return new ReadableStream<Uint8Array>({
+      pull(c) {
+        if (at >= bytes.length) return c.close();
+        c.enqueue(bytes.subarray(at, at + 65536));
+        at += 65536;
+      },
+    });
+  };
+
+  function stubGets(answers: Record<string, () => Response>) {
+    const calls: FetchCall[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string | URL, init: RequestInit = {}) => {
+        calls.push({ url: String(input), init });
+        const answer = init.method === "GET" ? answers[String(input)] : undefined;
+        return answer ? answer() : new Response("not found", { status: 404 });
+      }),
+    );
+    return calls;
+  }
+  const doc = (bytes: Uint8Array | ReadableStream<Uint8Array>, ct: string, headers: Record<string, string> = {}) => () =>
+    new Response(bytes as BodyInit, { status: 200, headers: { "content-type": ct, ...headers } });
+
+  const TOO_LARGE = "too large to merge, relayed unchanged";
+  const rowOf = (lines: string[], label: string) => lines.find((l) => l.trimStart().startsWith(label));
+
+  it("ARD merge: a valid document over 1 MiB is reported as too large to merge, relayed unchanged, a warning", async () => {
+    stubGets({ [ARD]: doc(padded(VALID_ARD, MIB + 1), "application/json") });
+
+    const { code, result, lines } = await run(ARD_ON);
+
+    expect(code).toBe(0);
+    expect(result.collisions).toEqual([]);
+    expect(rowOf(lines, "/.well-known/ard.json")).toContain(`WARNING (${TOO_LARGE})`);
+    expect(rowOf(lines, "/.well-known/ard.json")).not.toMatch(/ merge \(ARD manifest/);
+    expect(result.warnings.filter((w) => w.startsWith("/.well-known/ard.json"))).toEqual([
+      "/.well-known/ard.json: origin's document is over 1 MiB, too large to merge, relayed unchanged; the Worker adds no entry",
+    ]);
+  });
+
+  it("ARD merge: the same when the size is found by reading, with no Content-Length", async () => {
+    stubGets({ [ARD]: doc(streamed(padded(VALID_ARD, MIB + 100_000)), "application/json") });
+
+    const { code, result, lines } = await run(ARD_ON);
+
+    expect(code).toBe(0);
+    expect(rowOf(lines, "/.well-known/ard.json")).toContain(TOO_LARGE);
+    expect(result.warnings.filter((w) => w.includes("too large to merge"))).toHaveLength(1);
+  });
+
+  it("ARD merge: a Content-Length over the cap is enough, the body is not read", async () => {
+    let pulled = false;
+    const body = new ReadableStream<Uint8Array>(
+      {
+        pull() {
+          pulled = true;
+        },
+      },
+      { highWaterMark: 0 },
+    );
+    stubGets({ [ARD]: doc(body, "application/json", { "content-length": String(MIB + 1) }) });
+
+    const { lines } = await run(ARD_ON);
+
+    expect(rowOf(lines, "/.well-known/ard.json")).toContain(TOO_LARGE);
+    expect(pulled).toBe(false);
+  });
+
+  it("ARD merge: a document of exactly 1 MiB is still a merge", async () => {
+    stubGets({ [ARD]: doc(padded(VALID_ARD, MIB), "application/json") });
+
+    const { code, result, lines } = await run(ARD_ON);
+
+    expect(code).toBe(0);
+    expect(rowOf(lines, "/.well-known/ard.json")).toMatch(/ merge \(ARD manifest/);
+    expect(result.warnings.filter((w) => w.startsWith("/.well-known/ard.json"))).toEqual([]);
+  });
+
+  it("ARD merge: size comes first, as in the Worker: an oversize body that is not JSON is relayed, not a collision", async () => {
+    stubGets({ [ARD]: doc(padded("<html>", MIB + 1), "application/json") });
+
+    const { code, result } = await run(ARD_ON);
+
+    expect(code).toBe(0);
+    expect(result.collisions).toEqual([]);
+    expect(result.warnings.filter((w) => w.includes("too large to merge"))).toHaveLength(1);
+  });
+
+  it("ARD merge: an oversize document at the predecessor path, read after a canonical 404, is too large to merge too", async () => {
+    stubGets({ [PREDECESSOR]: doc(padded(VALID_ARD, MIB + 1), "application/ai-catalog+json") });
+
+    const { code, result } = await run(ARD_ON);
+
+    expect(code).toBe(0);
+    expect(result.collisions).toEqual([]);
+    expect(result.warnings.filter((w) => w.startsWith("/.well-known/ai-catalog.json"))).toEqual([
+      "/.well-known/ai-catalog.json: origin's document is over 1 MiB, too large to merge, relayed unchanged; the Worker adds no entry",
+    ]);
+  });
+
+  it("ARD synthesize: an oversize document is still a COLLISION (the Worker shadows it), the cap is a merge matter", async () => {
+    stubGets({ [ARD]: doc(padded(VALID_ARD, MIB + 1), "application/json") });
+
+    const { code, result } = await run(`${MINIMAL}\n[features]\nai_catalog = true\n`);
+
+    expect(code).toBe(1);
+    expect(result.collisions).toEqual(["/.well-known/ard.json: origin already serves content here"]);
+  });
+
+  it.each([
+    ["/llms.txt", "text/plain", "# Origin\n"],
+    ["/robots.txt", "text/plain", "User-agent: *\n"],
+    ["/.well-known/agents.md", "text/markdown", "# Origin\n"],
+    ["/.well-known/agent-skills/site/SKILL.md", "text/markdown", "# Origin\n"],
+  ])(
+    "%s: an origin file over 1 MiB is too large to merge, relayed unchanged: not a merge, not a missing-marker warning",
+    async (route, ct, head) => {
+      stubGets({ [`https://example.com${route}`]: doc(streamed(padded(head, MIB + 5)), ct) });
+
+      const { code, result, lines } = await run(MINIMAL);
+
+      expect(code).toBe(0);
+      expect(result.collisions).toEqual([]);
+      expect(rowOf(lines, route)).toContain(`WARNING (${TOO_LARGE})`);
+      expect(result.warnings.filter((w) => w.startsWith(`${route}:`))).toEqual([
+        `${route}: origin's file is over 1 MiB, too large to merge, relayed unchanged; the Worker adds no block`,
+      ]);
+    },
+  );
+
+  it("a text file of exactly 1 MiB is still a merge, with the marker check", async () => {
+    stubGets({ "https://example.com/llms.txt": doc(padded("# Origin\n<!-- cf-webmcp:begin -->\n", MIB), "text/plain") });
+
+    const { result, lines } = await run(MINIMAL);
+
+    expect(rowOf(lines, "/llms.txt")).toContain("merge (marker present, will replace)");
+    expect(result.warnings.filter((w) => w.startsWith("/llms.txt"))).toEqual([]);
+  });
+
+  it("names the cap only on the file that is over it", async () => {
+    stubGets({ "https://example.com/llms.txt": doc(padded("# Origin\n", MIB + 1), "text/plain") });
+
+    const { code, lines } = await run(MINIMAL);
+
+    expect(code).toBe(0);
+    expect(lines.filter((l) => l.includes(TOO_LARGE))).toHaveLength(1);
+    expect(rowOf(lines, "/robots.txt")).not.toContain("too large");
+  });
+});
+
 describe("preflight: --origin overrides where the probes go, and nothing else", () => {
   const OVERRIDE = "https://origin.internal.example";
   const hostsOf = (calls: FetchCall[]) => [...new Set(calls.map((c) => new URL(c.url).host))];
@@ -769,6 +938,85 @@ describe("preflight: --origin overrides where the probes go, and nothing else", 
     });
     expect(parseArgs([])).toEqual({ configPath: "webmcp.toml", force: false, origin: undefined });
   });
+});
+
+describe("preflight: User-Agent", () => {
+  it("names the package version, on the GET probes and on the MCP POST", async () => {
+    const { calls } = stubOrigin();
+
+    await run(MINIMAL);
+
+    expect(calls.length).toBeGreaterThan(0);
+    for (const c of calls) {
+      expect((c.init.headers as Record<string, string>)["user-agent"], c.url).toBe(`cf-webmcp-preflight/${PKG_VERSION}`);
+    }
+    expect(calls.some((c) => c.init.method === "POST")).toBe(true);
+  });
+});
+
+describe("preflight: command-line arguments", () => {
+  it("accepts --config and --origin written with a space instead of =", () => {
+    expect(parseArgs(["--config", "a.toml", "--origin", "https://o.example", "--force"])).toEqual({
+      configPath: "a.toml",
+      force: true,
+      origin: "https://o.example",
+    });
+    expect(parseArgs(["--config", "a.toml"])).toEqual({ configPath: "a.toml", force: false, origin: undefined });
+  });
+
+  it("accepts the two forms side by side, in any order", () => {
+    expect(parseArgs(["--force", "--origin=https://o.example", "--config", "dir/a.toml"])).toEqual({
+      configPath: "dir/a.toml",
+      force: true,
+      origin: "https://o.example",
+    });
+  });
+
+  it("keeps a value that contains = after the first one", () => {
+    expect(parseArgs(["--config=a=b.toml"]).configPath).toBe("a=b.toml");
+  });
+
+  it.each([
+    ["an unknown flag", ["--bogus"], /unknown argument "--bogus"/],
+    ["an unknown flag with a value", ["--bogus=1"], /unknown argument "--bogus=1"/],
+    ["a misspelled flag", ["--Origin=https://o.example"], /unknown argument "--Origin=https:\/\/o\.example"/],
+    ["a short flag", ["-f"], /unknown argument "-f"/],
+    ["--force given a value", ["--force=true"], /unknown argument "--force=true"/],
+    ["a positional argument (the config path needs --config)", ["webmcp.toml"], /unknown argument "webmcp\.toml"/],
+    ["a bare --origin", ["--origin"], /--origin needs a value/],
+    ["a bare --config", ["--config"], /--config needs a value/],
+    ["a bare --origin before another flag", ["--origin", "--force"], /--origin needs a value/],
+    ["a bare --config before another flag", ["--config", "--origin=https://o.example"], /--config needs a value/],
+    ["--origin= with nothing after it", ["--origin="], /--origin needs a value/],
+    ["--config= with nothing after it", ["--config="], /--config needs a value/],
+    ["--origin given twice", ["--origin=https://a.example", "--origin", "https://b.example"], /--origin was given more than once/],
+    ["--config given twice", ["--config=a.toml", "--config=b.toml"], /--config was given more than once/],
+  ])("refuses %s", (_label, argv, message) => {
+    expect(() => parseArgs(argv)).toThrow(message);
+  });
+
+  it("names the accepted arguments in the error", () => {
+    expect(() => parseArgs(["--bogus"])).toThrow(/--config=<path>.*--origin=<url>.*--force/s);
+  });
+
+  it("exits with 2 and prints the error to stderr, nothing to stdout, for a bad argument", () => {
+    const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+    const run = (args: string[]) =>
+      spawnSync(process.execPath, [path.join(root, "node_modules", "tsx", "dist", "cli.mjs"), "scripts/preflight.ts", ...args], {
+        cwd: root,
+        encoding: "utf8",
+        // No deploy token, and no result written: the run stops before it reads a config.
+        env: { ...process.env, CF_WEBMCP_DEPLOY_TOKEN: "" },
+        timeout: 60_000,
+      });
+
+    for (const args of [["--origin"], ["--config"], ["--bogus"], ["--origin", "https://o.example", "stray.toml"]]) {
+      const result = run(args);
+      expect(result.status, `exit code for ${args.join(" ")}`).toBe(2);
+      expect(result.stdout).toBe("");
+      expect(result.stderr).toMatch(/--config=<path>/);
+    }
+  }, 120_000);
 });
 
 describe("probeUrl: a probe never leaves the host it was aimed at", () => {

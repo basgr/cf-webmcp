@@ -177,6 +177,11 @@ const Executor = z.discriminatedUnion("type", [
 
 // ---------- Tool ----------
 
+/**
+ * Per-tool cache lifetimes for the exec route; an unset field falls back to
+ * [cache].executor_defaults. An http_json POST tool is cached only when s_maxage is greater
+ * than 0 (src/tool-cache.ts).
+ */
 const ToolCache = z
   .object({
     max_age: z.number().int().nonnegative().optional(),
@@ -269,6 +274,11 @@ const Site = z.object({
 const Origin = z.object({
   base_url: HttpsUrl,
   allowed_origins: z.array(HttpsUrl).min(1, "[origin].allowed_origins must contain at least one origin"),
+  /**
+   * No effect, kept so that old configs still parse. Executors and the Worker's other origin
+   * fetches never send the visitor's cookies; the build warns when this is true
+   * (deadConfigWarnings in scripts/build-config.ts).
+   */
   forward_cookies: z.boolean().default(false),
 });
 
@@ -551,6 +561,7 @@ const HealthBlock = z.object({
   token: z.string().default(""),
 });
 
+/** No effect, kept so that old configs still parse: nothing reads [dev].origin. */
 const DevBlock = z.object({
   origin: z.string().default("http://localhost:8080"),
 });

@@ -6,7 +6,8 @@
  * Subset:
  *   - type: object only at the top level
  *   - properties: keyed by name, each with type string|integer|number|boolean|array
- *   - per-property: pattern (string), enum, minimum, maximum, items (for array)
+ *   - per-property: pattern (string), enum (any scalar type), minimum, maximum (integer and
+ *     number), items (for array)
  *   - required: list of property names that must be present
  *
  * Returns { ok: true, value } or { ok: false, message } so callers can
@@ -19,15 +20,25 @@ export type ValidationResult =
   | { ok: true; value: Record<string, unknown> }
   | { ok: false; message: string };
 
+/**
+ * Own-property test. `in` and a plain `obj[key]` read also see what every object inherits
+ * (constructor, toString, hasOwnProperty, __proto__ ...), so an input or a schema that
+ * names one of those would satisfy a required check it never met, or be typed against
+ * Object.prototype. Every lookup by a name from the request or the schema goes through here.
+ */
+function hasOwn(obj: object, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(obj, key);
+}
+
 export function validateInput(schema: InputSchemaConfig, raw: unknown): ValidationResult {
   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
     return { ok: false, message: "input must be an object" };
   }
   const input = raw as Record<string, unknown>;
 
-  // Required keys present.
+  // Required keys present, as own properties of the input.
   for (const r of schema.required ?? []) {
-    if (!(r in input)) {
+    if (!hasOwn(input, r)) {
       return { ok: false, message: `missing required field "${r}"` };
     }
   }
@@ -35,7 +46,7 @@ export function validateInput(schema: InputSchemaConfig, raw: unknown): Validati
   // Validate each provided property against its schema (if declared).
   const props = schema.properties ?? {};
   for (const [key, value] of Object.entries(input)) {
-    const propSchema = props[key];
+    const propSchema = hasOwn(props, key) ? props[key] : undefined;
     if (!propSchema) {
       // Unknown properties are tolerated (passed through). Tools that want
       // strictness can use a regex or specific schema constraint on input.
@@ -73,9 +84,6 @@ function validateProperty(
           return { ok: false, message: `"${key}" has malformed pattern in schema` };
         }
       }
-      if (s.enum && !s.enum.includes(value)) {
-        return { ok: false, message: `"${key}" must be one of ${s.enum.join(", ")}` };
-      }
       break;
     case "integer":
       if (typeof value !== "number" || !Number.isInteger(value)) {
@@ -109,6 +117,13 @@ function validateProperty(
       break;
     default:
       return { ok: false, message: `"${key}" has unsupported schema type "${s.type}"` };
+  }
+  // enum holds for every scalar type, after the type (and range) checks: the value must be
+  // one of the listed values by strict equality, so "20" is not 20 and "true" is not true.
+  // An array is not a scalar and matches no listed value; the enum of its entries sits on
+  // `items`, checked in the recursive call above.
+  if (s.type !== "array" && s.enum && !s.enum.includes(value as string | number | boolean)) {
+    return { ok: false, message: `"${key}" must be one of ${s.enum.join(", ")}` };
   }
   return { ok: true, value: { [key]: value } };
 }

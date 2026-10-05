@@ -10,6 +10,13 @@
  *   npm run preflight -- --config=templates/example-site/webmcp.toml
  *   npm run preflight -- --config=webmcp.toml --force   # do not exit non-zero
  *   npm run preflight -- --config=webmcp.toml --origin=https://origin.example.com
+ *   npm run preflight -- --config webmcp.toml --origin https://origin.example.com   # same, with spaces
+ *
+ * Arguments: --config, --origin and --force, nothing else. --config and --origin take a
+ * value, written `--flag=value` or `--flag value`. An unknown flag, a stray argument, a flag
+ * without a value and a flag given twice are usage errors: the message goes to stderr and the
+ * exit code is 2, before any config is read or request sent. Exit codes: 0 OK (or --force),
+ * 1 hard collisions, 2 usage or config error.
  *
  * Where it is valid:
  *   Preflight requests [origin].base_url as an ordinary client. It sees the
@@ -39,6 +46,7 @@ import { fileURLToPath } from "node:url";
 import TOML from "@iarna/toml";
 import { ConfigSchema, type Config } from "../src/config-types.js";
 import { ARD_PREDECESSOR_PATH, isArdContentType, isArdDocument } from "../src/ard.js";
+import { MERGE_MAX_BYTES, declaredLength, readCapped } from "../src/routes/read-capped.js";
 import { configHashOf, resolveInherits } from "./build-config.js";
 
 interface Args {
@@ -70,21 +78,58 @@ type Outcome =
   | { kind: "merge_json"; status: number; contentType: string; valid: boolean }
   /** merge_json path answering neither 200, 404 nor 3xx: the Worker serves its generated document. */
   | { kind: "fallback"; status: number; contentType: string }
+  /**
+   * A mergeable 200 over the Worker's 1 MiB merge cap (MERGE_MAX_BYTES): the Worker relays it
+   * unchanged and adds nothing, whatever it holds. `what` names it in the warning.
+   */
+  | { kind: "too_large"; status: number; contentType: string; what: "document" | "file" }
   /** The ARD predecessor path, not read because origin answers at the canonical path. */
   | { kind: "not_merged"; status: number; contentType: string; canonical: string; redirected: boolean }
   | { kind: "collision"; status: number; contentType: string; reason: string }
   | { kind: "error"; reason: string };
 
+/** The accepted arguments, named in every usage error. */
+const USAGE = "usage: preflight [--config=<path> | --config <path>] [--origin=<url> | --origin <url>] [--force]";
+
+/**
+ * The command line: `--config`, `--origin` and `--force`, and nothing else. A value is
+ * written `--flag=value` or `--flag value`; a next argument that starts with `--` is never
+ * taken as a value, so a flag left without one is an error and not a swallowed neighbour.
+ * An unknown flag, a positional argument, an empty value and a flag given twice all throw
+ * (the CLI exits 2 on any throw): a mistyped flag must not run a preflight against the
+ * default config or origin and report that as the answer.
+ */
 export function parseArgs(argv: string[]): Args {
-  let configPath = "webmcp.toml";
+  let configPath: string | undefined;
   let force = false;
   let origin: string | undefined;
-  for (const a of argv) {
-    if (a === "--force") force = true;
-    else if (a.startsWith("--config=")) configPath = a.slice("--config=".length);
-    else if (a.startsWith("--origin=")) origin = a.slice("--origin=".length);
+  const fail = (message: string): never => {
+    throw new Error(`${message}\n${USAGE}`);
+  };
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i]!;
+    if (arg === "--force") {
+      force = true;
+      continue;
+    }
+    const flag = arg === "--config" || arg.startsWith("--config=") ? "--config" : arg === "--origin" || arg.startsWith("--origin=") ? "--origin" : null;
+    if (flag === null) return fail(`unknown argument ${JSON.stringify(arg)}`);
+    let value: string | undefined;
+    if (arg.startsWith(`${flag}=`)) {
+      value = arg.slice(flag.length + 1);
+    } else {
+      const next = argv[i + 1];
+      if (next !== undefined && !next.startsWith("--")) {
+        value = next;
+        i++;
+      }
+    }
+    if (value === undefined || value === "") return fail(`${flag} needs a value: ${flag}=<value> or ${flag} <value>`);
+    if ((flag === "--config" ? configPath : origin) !== undefined) return fail(`${flag} was given more than once`);
+    if (flag === "--config") configPath = value;
+    else origin = value;
   }
-  return { configPath, force, origin };
+  return { configPath: configPath ?? "webmcp.toml", force, origin };
 }
 
 /**
@@ -200,9 +245,12 @@ function pathsToCheck(config: Config, base: URL): PathCheck[] {
 const MARKER_LLMS = "<!-- cf-webmcp:begin -->";
 const MARKER_ROBOTS = "# cf-webmcp:begin";
 
-/** Request headers for every preflight probe: a User-Agent, plus the token pair when a token is set. */
-function originHeaders(deployToken: string | undefined): Record<string, string> {
-  const headers: Record<string, string> = { "user-agent": "cf-webmcp-preflight/1.0" };
+/**
+ * Request headers for every preflight probe: a User-Agent naming cf-webmcp's package version
+ * (the Worker's own is cf-webmcp/<version>), plus the token pair when a token is set.
+ */
+function originHeaders(deployToken: string | undefined, version: string): Record<string, string> {
+  const headers: Record<string, string> = { "user-agent": `cf-webmcp-preflight/${version}` };
   if (deployToken) {
     headers["cf-webmcp-bypass"] = "1";
     headers["cf-webmcp-deploy-token"] = deployToken;
@@ -210,8 +258,27 @@ function originHeaders(deployToken: string | undefined): Record<string, string> 
   return headers;
 }
 
-async function probe(check: PathCheck, deployToken: string | undefined): Promise<Outcome> {
-  const headers = originHeaders(deployToken);
+/**
+ * A 200 body for a merge row: its bytes, or "too_large" when it is over the Worker's cap. The
+ * test is the Worker's own (declaredLength, then readCapped from src/routes/read-capped.ts):
+ * a Content-Length over the cap decides without reading, otherwise the body is read until it
+ * passes the cap. Either way the rest of an oversize body is cancelled unread.
+ */
+async function readForMerge(res: Response): Promise<Uint8Array | "too_large"> {
+  if (declaredLength(res) > MERGE_MAX_BYTES) {
+    await res.body?.cancel().catch(() => {});
+    return "too_large";
+  }
+  const read = await readCapped(res.body, MERGE_MAX_BYTES);
+  if (read.kind === "too_large") {
+    await read.rest.cancel().catch(() => {});
+    return "too_large";
+  }
+  return read.bytes;
+}
+
+async function probe(check: PathCheck, deployToken: string | undefined, version: string): Promise<Outcome> {
+  const headers = originHeaders(deployToken, version);
   try {
     const res = await fetch(check.url.toString(), {
       method: "GET",
@@ -230,9 +297,12 @@ async function probe(check: PathCheck, deployToken: string | undefined): Promise
       // merged into when it is an ARD document and relayed unchanged when it is
       // not; any other 200 is relayed. Text or HTML here is a collision.
       if (res.status === 200 && isArdContentType(ct)) {
+        // Size first, as in the Worker: a document over the cap is relayed whatever it holds.
+        const bytes = await readForMerge(res);
+        if (bytes === "too_large") return { kind: "too_large", status: 200, contentType: ct, what: "document" };
         let parsed: unknown;
         try {
-          parsed = JSON.parse(await res.text());
+          parsed = JSON.parse(new TextDecoder().decode(bytes));
         } catch {
           return {
             kind: "collision",
@@ -258,7 +328,9 @@ async function probe(check: PathCheck, deployToken: string | undefined): Promise
     if (check.expect === "merge") {
       // For mergeable paths: 200 text is a merge, anything else is a collision.
       if (res.status === 200 && /^text\/(plain|markdown)/i.test(ct)) {
-        const body = await res.text();
+        const bytes = await readForMerge(res);
+        if (bytes === "too_large") return { kind: "too_large", status: 200, contentType: ct, what: "file" };
+        const body = new TextDecoder().decode(bytes);
         // Markdown markers used by both llms.txt and agents.md; hash markers for robots.txt.
         const marker = check.label.endsWith("robots.txt") ? MARKER_ROBOTS : MARKER_LLMS;
         return { kind: "merge", status: 200, contentType: ct, hasMarker: body.includes(marker) };
@@ -344,7 +416,7 @@ async function packageVersion(): Promise<string> {
  */
 async function probeMcpServer(url: URL, deployToken: string | undefined, version: string): Promise<McpOutcome> {
   const headers = {
-    ...originHeaders(deployToken),
+    ...originHeaders(deployToken, version),
     "content-type": "application/json",
     accept: "application/json, text/event-stream",
   };
@@ -400,6 +472,8 @@ function formatRow(check: PathCheck, outcome: Outcome): string {
       return `  ${label} 200 ${outcome.contentType.padEnd(28)} → ${outcome.valid ? "merge (ARD manifest, our entry is added unless origin lists its identifier or url)" : "merge refused (not an ARD manifest, relayed unchanged)"}`;
     case "fallback":
       return `  ${label} ${String(outcome.status).padEnd(3)} ${outcome.contentType.padEnd(28)} → WARNING (the Worker serves the generated document)`;
+    case "too_large":
+      return `  ${label} ${String(outcome.status).padEnd(3)} ${outcome.contentType.padEnd(28)} → WARNING (too large to merge, relayed unchanged)`;
     case "not_merged":
       return `  ${label} ${String(outcome.status).padEnd(3)} ${outcome.contentType.padEnd(28)} → ${
         outcome.redirected
@@ -439,6 +513,7 @@ export async function runPreflight(configPath: string, force: boolean, opts: Pre
   // eslint-disable-next-line no-console
   const log = opts.log ?? ((line: string) => console.log(line));
 
+  const version = await packageVersion();
   log(`preflight  ${base.host}  (token: ${deployToken ? "present" : "absent"})`);
   if (override) {
     log(`  --origin: probing ${override.origin} instead of [origin].base_url (${new URL(config.origin.base_url).origin}); the config hash is unchanged`);
@@ -451,7 +526,7 @@ export async function runPreflight(configPath: string, force: boolean, opts: Pre
   // path; the canonical check comes first in `checks`.
   let ardCanonicalStatus: number | null = null;
   for (const check of checks) {
-    let outcome = await probe(check, deployToken);
+    let outcome = await probe(check, deployToken, version);
     if (check.ard?.role === "canonical") {
       ardCanonicalStatus = outcome.kind === "error" ? null : outcome.status;
     } else if (check.ard?.role === "predecessor" && ardCanonicalStatus !== null && isAnswerTheMergeKeeps(ardCanonicalStatus)) {
@@ -467,6 +542,11 @@ export async function runPreflight(configPath: string, force: boolean, opts: Pre
       warnings.push(
         `${check.label}: origin's JSON is not an ARD manifest (an object with an entries array of objects with a string identifier); ` +
           `the Worker relays it unchanged and adds no entry`,
+      );
+    } else if (outcome.kind === "too_large") {
+      warnings.push(
+        `${check.label}: origin's ${outcome.what} is over 1 MiB, too large to merge, relayed unchanged; ` +
+          `the Worker adds no ${outcome.what === "document" ? "entry" : "block"}`,
       );
     } else if (outcome.kind === "fallback") {
       warnings.push(`${check.label}: origin answers ${outcome.status}; in merge mode the Worker serves the generated document instead`);
@@ -485,7 +565,6 @@ export async function runPreflight(configPath: string, force: boolean, opts: Pre
   // every other method goes to origin, so the server stays reachable for MCP clients.
   // It is worth a warning, because that is a change from the days the landing answered
   // every method.
-  const version = await packageVersion();
   for (const landingPath of mcpProbePaths(config)) {
     const outcome = await probeMcpServer(probeUrl(base, landingPath), deployToken, version);
     log(formatMcpRow(landingPath, outcome));

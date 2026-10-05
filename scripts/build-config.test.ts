@@ -15,7 +15,7 @@ import {
 } from "./build-config";
 import { ARD_REL } from "../src/ard";
 import { ConfigSchema } from "../src/config-types";
-import { buildFrontmatter } from "../src/routes/agent-skills";
+import { buildFrontmatter, buildSkillBody } from "../src/routes/agent-skills";
 import { agentSkillsIndexResponse } from "../src/routes/agent-skills-index";
 import { LICENSE_PREAMBLE } from "../src/widget-preamble";
 import { es5Violations, inlineScripts } from "../src/test-support/es5";
@@ -996,15 +996,73 @@ describe("INJECTION_HASH", () => {
     );
   });
 
-  it("covers every value html-rewriter.ts imports from another module", async () => {
-    const source = await fs.readFile(path.join(repoRoot, "src", "injection", "html-rewriter.ts"), "utf8");
-    // Value imports only: `import type` brings nothing into the injected HTML.
-    const imported = [...source.matchAll(/^import\s+(?!type\b)\{([^}]*)\}\s+from\s+"[^"]+";/gm)]
+  /**
+   * The value imports of a module source, read the way the INJECTION_HASH guard reads them.
+   * `lines` counts every `import` line that is not `import type` (named, default, namespace,
+   * side-effect, either quote); `parsedLines` and `names` are what the named-import pattern
+   * made of them. A form the pattern cannot read shows as lines > parsedLines, so it fails
+   * loudly instead of being skipped. `import type` brings nothing into the injected HTML.
+   */
+  function valueImports(source: string): { lines: number; parsedLines: number; names: string[] } {
+    const lines = (source.match(/^import\s+(?!type\b)/gm) ?? []).length;
+    const named = [...source.matchAll(/^import\s+(?!type\b)\{([^}]*)\}\s+from\s+(["'])[^"'\r\n]+\2/gm)];
+    const names = named
       .flatMap((m) => m[1]!.split(","))
       .map((name) => name.trim())
-      .filter((name) => name !== "");
-    expect(imported.sort()).toEqual(Object.keys(REWRITER_IMPORTS).sort());
+      // `{ type X }` is a type-only entry; `{ X as Y }` brings in the value X.
+      .filter((name) => name !== "" && !/^type\s/.test(name))
+      .map((name) => name.split(/\s+as\s+/)[0]!.trim());
+    return { lines, parsedLines: named.length, names };
+  }
+
+  const rewriterSource = () => fs.readFile(path.join(repoRoot, "src", "injection", "html-rewriter.ts"), "utf8");
+
+  it("covers every value html-rewriter.ts imports from another module", async () => {
+    const found = valueImports(await rewriterSource());
+    // Every value import line was read: none is a default, namespace or side-effect import.
+    expect(found.parsedLines).toBe(found.lines);
+    expect(found.names.sort()).toEqual(Object.keys(REWRITER_IMPORTS).sort());
     expect(REWRITER_IMPORTS).toEqual({ ARD_REL });
+  });
+
+  describe("the import guard, run on scratch copies of html-rewriter.ts", () => {
+    /** The real source with `extra` import lines added: a scratch copy, the repo file is never written. */
+    const withImports = async (...extra: string[]) => `${extra.join("\n")}\n${await rewriterSource()}`;
+
+    it("accepts the real source, and ignores `import type` in any spelling", async () => {
+      const base = valueImports(await rewriterSource());
+      const copy = valueImports(
+        await withImports('import type { Foo } from "../foo";', "import type { Bar } from '../bar';", 'import { type Baz } from "../baz";'),
+      );
+      expect(copy.parsedLines).toBe(copy.lines);
+      // `{ type Baz }` is a value import line with no value in it.
+      expect(copy.lines).toBe(base.lines + 1);
+      expect(copy.names).toEqual(base.names);
+    });
+
+    it.each([
+      ["a namespace import", 'import * as ard from "../ard";'],
+      ["a default import", 'import ard from "../ard";'],
+      ["a default import next to a named one", 'import ard, { ARD_PATH } from "../ard";'],
+      ["a namespace import in single quotes", "import * as ard from '../ard';"],
+      ["a side-effect import", 'import "../polyfill";'],
+    ])("notices %s, which the named-import pattern cannot read", async (_label, line) => {
+      const found = valueImports(await withImports(line));
+      expect(found.lines).toBeGreaterThan(found.parsedLines);
+    });
+
+    it("reads a single-quoted named import, so its name is compared with REWRITER_IMPORTS", async () => {
+      const found = valueImports(await withImports("import { ARD_PATH } from '../ard';"));
+      expect(found.parsedLines).toBe(found.lines);
+      expect(found.names.sort()).toEqual(["ARD_PATH", "ARD_REL"]);
+      expect(found.names.sort()).not.toEqual(Object.keys(REWRITER_IMPORTS).sort());
+    });
+
+    it("reads a multi-line named import and a renamed one", async () => {
+      const found = valueImports(await withImports('import {\n  ARD_PATH,\n  ARD_PREDECESSOR_PATH as OLD,\n} from "../ard";'));
+      expect(found.parsedLines).toBe(found.lines);
+      expect(found.names.sort()).toEqual(["ARD_PATH", "ARD_PREDECESSOR_PATH", "ARD_REL"]);
+    });
   });
 
   it("hashes the rewriter source the same with CRLF and LF line endings", () => {
@@ -2190,6 +2248,136 @@ describe("bootstrap.js: consequentialHint", () => {
         consequentialHint: true,
       });
     });
+
+    it("an http_json POST is writable and consequential (its effects at origin are unknown), still untrusted", () => {
+      expect(defaultAnnotationsFor("http_json", "POST")).toEqual({
+        readOnlyHint: false,
+        untrustedContentHint: true,
+        consequentialHint: true,
+      });
+    });
+
+    it("an http_json GET, or one without a method, keeps the read-only defaults", () => {
+      const readOnly = { readOnlyHint: true, untrustedContentHint: true, consequentialHint: false };
+      expect(defaultAnnotationsFor("http_json", "GET")).toEqual(readOnly);
+      expect(defaultAnnotationsFor("http_json")).toEqual(readOnly);
+      expect(defaultAnnotationsFor("http_json", undefined)).toEqual(readOnly);
+    });
+
+    it("the method matters for http_json only", () => {
+      for (const type of ["sitemap_filter", "rss_feed", "dom_extract", "http_get"]) {
+        expect(defaultAnnotationsFor(type, "POST"), type).toEqual(defaultAnnotationsFor(type));
+      }
+    });
+  });
+});
+
+describe("bootstrap.js: annotations of an http_json tool follow its method", () => {
+  const TOOL = (name: string, method: string | null, extra = ""): string => `
+[[tools]]
+name        = "${name}"
+description = "Tool ${name}."
+  [tools.input_schema]
+  type = "object"
+  [tools.executor]
+  type         = "http_json"
+  url_template = "https://example.com/api/${name}"
+${method ? `  method       = "${method}"
+` : ""}${extra}`;
+
+  const annotationsOf = (files: Record<string, string>, name: string) =>
+    toolsIn(files["bootstrap.js"]!).find((t) => t.name === name)!.annotations;
+
+  it("a POST tool defaults to readOnlyHint false and consequentialHint true; a GET tool next to it does not", async () => {
+    const toml = `${MINIMAL}${TOOL("send_form", "POST")}${TOOL("read_json", "GET")}${TOOL("read_default", null)}`;
+    const { files } = await runBuild(await writeToml("ann-post.toml", toml));
+
+    expect(annotationsOf(files, "send_form")).toEqual({ readOnlyHint: false, untrustedContentHint: true, consequentialHint: true });
+    expect(annotationsOf(files, "read_json")).toEqual({ readOnlyHint: true, untrustedContentHint: true, consequentialHint: false });
+    expect(annotationsOf(files, "read_default")).toEqual({ readOnlyHint: true, untrustedContentHint: true, consequentialHint: false });
+    // The exact bytes the registerTool call is built from.
+    expect(files["bootstrap.js"]).toContain('"name":"send_form"');
+    expect(files["bootstrap.js"]).toContain('"annotations":{"readOnlyHint":false,"untrustedContentHint":true,"consequentialHint":true}');
+  });
+
+  it("[tools.annotations] overrides each default of a POST tool, one field at a time", async () => {
+    const overrides = `  [tools.annotations]
+  read_only_hint = true
+  consequential_hint = false
+`;
+    const partial = `  [tools.annotations]
+  consequential_hint = false
+`;
+    const toml = `${MINIMAL}${TOOL("both", "POST", overrides)}${TOOL("one", "POST", partial)}`;
+    const { files } = await runBuild(await writeToml("ann-post-override.toml", toml));
+
+    expect(annotationsOf(files, "both")).toEqual({ readOnlyHint: true, untrustedContentHint: true, consequentialHint: false });
+    // Only consequentialHint was overridden: readOnlyHint keeps the POST default.
+    expect(annotationsOf(files, "one")).toEqual({ readOnlyHint: false, untrustedContentHint: true, consequentialHint: false });
+  });
+
+  it("a GET tool's bootstrap bytes do not depend on a POST tool existing elsewhere in the file", async () => {
+    const getOnly = await runBuild(await writeToml("ann-get-only.toml", `${MINIMAL}${TOOL("read_json", "GET")}`));
+    const bytesOf = (files: Record<string, string>) =>
+      JSON.stringify(toolsIn(files["bootstrap.js"]!).find((t) => t.name === "read_json"));
+    const expected = bytesOf(getOnly.files);
+    await fs.rm(getOnly.outDir, { recursive: true });
+
+    const mixed = await runBuild(await writeToml("ann-mixed.toml", `${MINIMAL}${TOOL("read_json", "GET")}${TOOL("send_form", "POST")}`));
+    expect(bytesOf(mixed.files)).toBe(expected);
+  });
+
+  it("adds no schema default: a config without a POST tool keeps its CONFIG_HASH inputs", async () => {
+    const { files } = await runBuild(await writeToml("ann-nodefault.toml", `${MINIMAL}${TOOL("send_form", "POST")}`));
+    expect(files["config.ts"]).not.toContain("consequential_hint");
+    expect(files["config.ts"]).not.toContain("read_only_hint");
+  });
+});
+
+describe("a POST tool's [tools.cache] without a positive s_maxage", () => {
+  const POST = (cache: string): string => `${MINIMAL}
+[[tools]]
+name        = "send_form"
+description = "Send the form."
+  [tools.input_schema]
+  type = "object"
+  [tools.executor]
+  type         = "http_json"
+  url_template = "https://example.com/api/send"
+  method       = "POST"
+${cache}`;
+  /** A [tools.cache] table of the tool above, one line per field. */
+  const CACHE = (...fields: string[]): string => ["  [tools.cache]", ...fields.map((f) => `  ${f}`), ""].join("\n");
+  const warnings = () => (console.warn as unknown as { mock: { calls: unknown[][] } }).mock.calls.map((c) => String(c[0]));
+
+  it.each([
+    ["max_age alone", CACHE("max_age = 60")],
+    ["swr alone", CACHE("swr = 60")],
+    ["s_maxage = 0", CACHE("s_maxage = 0")],
+  ])("warns that it does not cache the tool (%s)", async (_label, cache) => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    await runBuild(await writeToml("pc-warn.toml", POST(cache)));
+    const hits = warnings().filter((m) => m.includes("send_form") && /s_maxage/.test(m));
+    expect(hits).toHaveLength(1);
+    expect(hits[0]).toContain("POST");
+    expect(hits[0]).toContain("not cached");
+  });
+
+  it.each([
+    ["no [tools.cache]", ""],
+    ["a positive s_maxage", CACHE("s_maxage = 60")],
+    ["a positive s_maxage next to max_age", CACHE("max_age = 10", "s_maxage = 60")],
+  ])("does not warn for %s", async (_label, cache) => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    await runBuild(await writeToml("pc-quiet.toml", POST(cache)));
+    expect(warnings().filter((m) => m.includes("send_form"))).toEqual([]);
+  });
+
+  it("does not warn about a GET tool's [tools.cache]", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const toml = POST(CACHE("max_age = 60")).replace('method       = "POST"', 'method       = "GET"');
+    await runBuild(await writeToml("pc-get.toml", toml));
+    expect(warnings().filter((m) => m.includes("send_form"))).toEqual([]);
   });
 });
 
@@ -2358,5 +2546,126 @@ describe("landing: diagnostic and copy", () => {
     expect(callout).toContain("document.modelContext");
     expect(callout).toContain("navigator.modelContext");
     expect(callout).toContain("Chrome 149");
+  });
+});
+
+describe("advertisements follow the features and the widget", () => {
+  const missingPin = () => path.join(tmpDir, "no-such-pin.json");
+  const manifestOf = (files: Record<string, string>) => JSON.parse(files["manifest.json"]!);
+
+  it("manifest links.landing names the landing while [features].webmcp_landing is on", async () => {
+    const { files } = await runBuild(await writeToml("adv-landing-on.toml", MINIMAL));
+    expect(manifestOf(files).links.landing).toBe("https://example.com/mcp");
+  });
+
+  it("manifest has no links.landing when [features].webmcp_landing = false, and keeps its other links", async () => {
+    const off = `${MINIMAL}\n[features]\nwebmcp_landing = false\n`;
+    const { files } = await runBuild(await writeToml("adv-landing-off.toml", off));
+    const links = manifestOf(files).links;
+    expect(links).not.toHaveProperty("landing");
+    expect(Object.keys(links)).toEqual(
+      expect.arrayContaining(["self", "bootstrap", "health", "api_catalog", "agent_skills", "agent_skills_index"]),
+    );
+  });
+
+  it("manifest links keep their order and bytes with the landing on (the key sits second)", async () => {
+    const { files } = await runBuild(await writeToml("adv-order.toml", MINIMAL));
+    expect(Object.keys(manifestOf(files).links).slice(0, 4)).toEqual(["self", "landing", "bootstrap", "health"]);
+  });
+
+  describe("AGENT_SKILLS_DIGEST covers the SKILL.md the Worker serves", () => {
+    /** sha256: digest of what the SKILL.md route serves in synthesize mode, for a given widget answer. */
+    const digestOf = (toml: string, widget: boolean) => {
+      const config = ConfigSchema.parse(TOML.parse(toml));
+      return `sha256:${sha256(buildFrontmatter(config) + buildSkillBody(config, widget))}`;
+    };
+
+    it("differs between the pairing and the neutral wording, so this test can tell them apart", () => {
+      expect(digestOf(widgetOn(MINIMAL), true)).not.toBe(digestOf(widgetOn(MINIMAL), false));
+    });
+
+    it("uses the pairing wording only when the feature is on and the build has a usable pin", async () => {
+      const pin = await writePin("adv-pin.json", fakePin("widget A", { version: "v0.1.13" }));
+      const cases: Array<[string, string, string, boolean]> = [
+        ["feature on, usable pin", "adv-on-pin", widgetOn(MINIMAL), true],
+        ["feature on, no pin file", "adv-on-nopin", widgetOn(MINIMAL), false],
+        ["feature off, usable pin", "adv-off-pin", MINIMAL, false],
+      ];
+      for (const [label, name, toml, widget] of cases) {
+        const pinPath = label.endsWith("no pin file") ? missingPin() : pin;
+        const { files } = await runBuild(await writeToml(`${name}.toml`, toml), { widgetPinPath: pinPath });
+        expect(exportedConst(files["config.ts"]!, "AGENT_SKILLS_DIGEST"), label).toBe(digestOf(toml, widget));
+        await fs.rm(path.join(tmpDir, "out"), { recursive: true, force: true });
+      }
+    });
+
+    it("is taken over a body without the landing when the landing is off", async () => {
+      const toml = `${MINIMAL}\n[features]\nwebmcp_landing = false\n`;
+      const { files } = await runBuild(await writeToml("adv-digest-landing.toml", toml), { widgetPinPath: missingPin() });
+      expect(exportedConst(files["config.ts"]!, "AGENT_SKILLS_DIGEST")).toBe(digestOf(toml, false));
+    });
+
+    it("is taken over a body without the manifest section when [features].manifest = false", async () => {
+      const toml = `${MINIMAL}\n[features]\nmanifest = false\n`;
+      const { files } = await runBuild(await writeToml("adv-digest-manifest.toml", toml), { widgetPinPath: missingPin() });
+      expect(exportedConst(files["config.ts"]!, "AGENT_SKILLS_DIGEST")).toBe(digestOf(toml, false));
+    });
+  });
+
+  it("warns that the synthesized API catalog is empty when it is on and the manifest is off", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    await runBuild(await writeToml("adv-catalog-warn.toml", `${MINIMAL}\n[features]\nmanifest = false\n`));
+    const messages = warn.mock.calls.map((c) => String(c[0]));
+    expect(messages.filter((m) => /api_catalog/.test(m) && /manifest/.test(m))).toHaveLength(1);
+    expect(messages.join("\n")).toContain("empty");
+  });
+
+  it.each([
+    ["the manifest is on", `${MINIMAL}\n`],
+    ["the catalog is off", `${MINIMAL}\n[features]\nmanifest = false\napi_catalog = false\n`],
+    ["the catalog is left to origin", `${MINIMAL}\n[features]\nmanifest = false\n[api_catalog]\nmode = "passthrough"\n`],
+  ])("does not warn about the API catalog when %s", async (_label, toml) => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    await runBuild(await writeToml("adv-catalog-quiet.toml", toml));
+    expect(warn.mock.calls.map((c) => String(c[0])).filter((m) => /api_catalog/.test(m))).toEqual([]);
+  });
+});
+
+describe("[origin].forward_cookies is a setting that does nothing, and the build says so", () => {
+  const withCookies = (value: string) =>
+    MINIMAL.replace('allowed_origins = ["https://example.com"]', `allowed_origins = ["https://example.com"]
+forward_cookies = ${value}`);
+  const cookieWarnings = () =>
+    (console.warn as unknown as { mock: { calls: unknown[][] } }).mock.calls.map((c) => String(c[0])).filter((m) => m.includes("forward_cookies"));
+
+  it("warns once when it is true, still builds, and says what really happens to cookies", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { files } = await runBuild(await writeToml("fc-true.toml", withCookies("true")));
+
+    expect(files).toHaveProperty("config.ts");
+    const warnings = cookieWarnings();
+    expect(warnings).toHaveLength(1);
+    const text = warnings[0]!;
+    expect(text).toMatch(/^\[build-config\] \[origin\]\.forward_cookies = true has no effect/);
+    // Accurate about both paths: the tool executors and the discovery routes never send the visitor's cookies...
+    expect(text).toMatch(/tool executors and the routes that fetch from origin never send the visitor's cookies/);
+    // ...and the proxy is not governed by it either: proxied requests keep their cookies.
+    expect(text).toMatch(/proxied requests reach origin exactly as the visitor sent them, cookies included/);
+    expect(text).toContain("Remove the line");
+  });
+
+  it.each([
+    ["false", withCookies("false")],
+    ["not set", MINIMAL],
+  ])("is silent when it is %s", async (_label, toml) => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    await runBuild(await writeToml("fc-quiet.toml", toml));
+    expect(cookieWarnings()).toEqual([]);
+  });
+
+  it("stays out of the hash inputs it was already in: the parsed value is unchanged", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const on = await runBuild(await writeToml("fc-hash-on.toml", withCookies("true")));
+    expect(on.files["config.ts"]).toContain('"forward_cookies": true');
   });
 });

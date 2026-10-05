@@ -41,6 +41,8 @@ import {
   urnAir,
 } from "../src/ard.js";
 import { LICENSE_PREAMBLE } from "../src/widget-preamble.js";
+import { widgetEnabled } from "../src/widget-state.js";
+import { cachesResults } from "../src/tool-cache.js";
 import { configLinkOptions } from "../src/injection/html-rewriter.js";
 import { bridgeNpmVersion, sha256Hex, widgetAssetName } from "./widget-pin.js";
 
@@ -319,7 +321,8 @@ interface Manifest {
   tools: ManifestTool[];
   links: {
     self: string;
-    landing: string;
+    /** Absent while [features].webmcp_landing is off: there is no landing page to point at. */
+    landing?: string;
     bootstrap: string;
     health: string;
     api_catalog?: string;
@@ -354,7 +357,7 @@ function buildManifest(config: Config, configHash: string, bootstrapName: string
     })),
     links: {
       self: `${base}${config.manifest.path}`,
-      landing: `${base}${config.webmcp_landing.path}`,
+      ...(config.features.webmcp_landing ? { landing: `${base}${config.webmcp_landing.path}` } : {}),
       bootstrap: `${base}${ns}/${bootstrapName}`,
       health: `${base}${ns}/health`,
       ...(config.features.api_catalog && config.api_catalog.mode !== "passthrough"
@@ -377,9 +380,11 @@ function buildManifest(config: Config, configHash: string, bootstrapName: string
 /**
  * Per-executor-type defaults for the WebMCP ToolAnnotations dictionary.
  *
- * All five executor types are read-only (none mutate origin state), so
- * readOnlyHint defaults to true and consequentialHint (Chrome's "this call may not
- * be undoable") to false across the board. untrustedContentHint
+ * The executors read: sitemap_filter, rss_feed, dom_extract, http_get and an http_json
+ * GET do not mutate origin state, so readOnlyHint defaults to true and consequentialHint
+ * (Chrome's "this call may not be undoable") to false for them. An http_json POST sends the
+ * tool input to origin as a request body, and what origin does with it is unknown: it
+ * defaults to readOnlyHint false and consequentialHint true. untrustedContentHint
  * varies: sitemap_filter returns URL + lastmod strings (structurally
  * constrained, low free-form-content risk), the other four surface
  * origin-fetched content that an agent should treat with the usual
@@ -389,7 +394,10 @@ function buildManifest(config: Config, configHash: string, bootstrapName: string
  * Publishers can override each field per-tool via `[tools.annotations]`.
  * Exported for the build tests.
  */
-export function defaultAnnotationsFor(executorType: string): {
+export function defaultAnnotationsFor(
+  executorType: string,
+  method?: string,
+): {
   readOnlyHint: boolean;
   untrustedContentHint: boolean;
   consequentialHint: boolean;
@@ -397,9 +405,13 @@ export function defaultAnnotationsFor(executorType: string): {
   switch (executorType) {
     case "sitemap_filter":
       return { readOnlyHint: true, untrustedContentHint: false, consequentialHint: false };
+    case "http_json":
+      // `method` is the executor's: GET (the default) reads, POST sends a body.
+      return method === "POST"
+        ? { readOnlyHint: false, untrustedContentHint: true, consequentialHint: true }
+        : { readOnlyHint: true, untrustedContentHint: true, consequentialHint: false };
     case "rss_feed":
     case "dom_extract":
-    case "http_json":
     case "http_get":
       return { readOnlyHint: true, untrustedContentHint: true, consequentialHint: false };
     default:
@@ -512,7 +524,7 @@ const EXEC_CLIENT_JS = `  // The exec endpoints are paths. They are called on th
 function buildBootstrap(config: Config): string {
   const ns = config.paths.namespace;
   const toolPayload = config.tools.map((t) => {
-    const defaults = defaultAnnotationsFor(t.executor.type);
+    const defaults = defaultAnnotationsFor(t.executor.type, "method" in t.executor ? t.executor.method : undefined);
     const override = t.annotations ?? {};
     const annotations = {
       readOnlyHint: override.read_only_hint ?? defaults.readOnlyHint,
@@ -1005,7 +1017,7 @@ async function buildLanding(
   // The widget is shown only when the feature is on AND this build has a usable
   // pin; otherwise block, enabled flag and the Worker's widget route all agree on "off".
   const widgetBlock =
-    config.features.fallback_widget && widget.asset !== null && widget.cliVersion !== null
+    widgetEnabled(config, widget.asset) && widget.cliVersion !== null
       ? buildWidgetBlock(config, `${ns}/${widget.asset}`, widget.sri, widget.cliVersion)
       : "";
   const showWidget = widgetBlock !== "";
@@ -1347,11 +1359,16 @@ function computeBootstrapSri(config: Config, bootstrap: string): string | null {
   return `sha384-${b64}`;
 }
 
-async function computeAgentSkillsDigest(config: Config): Promise<string | null> {
+/**
+ * `widget` is the Worker's own answer to "is the widget on" (widgetEnabled over the build's
+ * widget asset): the SKILL.md wording depends on it, and the digest must cover the bytes the
+ * Worker serves, which it renders with the same value.
+ */
+async function computeAgentSkillsDigest(config: Config, widget: boolean): Promise<string | null> {
   if (!config.features.agent_skills_index) return null;
   if (config.agent_skills_index.mode === "passthrough") return null;
   if (config.agent_skills.mode === "merge" || config.agent_skills.mode === "passthrough") return null;
-  const body = buildFrontmatter(config) + buildSkillBody(config);
+  const body = buildFrontmatter(config) + buildSkillBody(config, widget);
   const hex = createHash("sha256").update(body).digest("hex");
   return `sha256:${hex}`;
 }
@@ -1451,6 +1468,60 @@ export function ardWarnings(config: Config): string[] {
     }
   }
   return out;
+}
+
+/**
+ * [origin].forward_cookies is accepted for old configs and does nothing. It was meant to let
+ * tool executors pass the visitor's cookies on to origin, and nothing ever did: an executor, and
+ * every route that fetches from origin for the Worker's own purposes (llms.txt, robots.txt,
+ * agents.md, the catalogs, SKILL.md), builds its own request with its own headers and no
+ * visitor cookies, so cached executor answers stay the same for every visitor. The proxy is a
+ * different path, which the setting never governed: a proxied request reaches origin exactly
+ * as the visitor sent it, cookies included, whatever the value. Say so when it is true, so
+ * that nobody relies on it.
+ */
+export function deadConfigWarnings(config: Config): string[] {
+  const out: string[] = [];
+  if (config.origin.forward_cookies) {
+    out.push(
+      `[build-config] [origin].forward_cookies = true has no effect: tool executors and the routes that fetch from origin never send ` +
+        `the visitor's cookies, whatever this says (they build their own requests, so a cached tool answer is the same for every visitor), ` +
+        `and proxied requests reach origin exactly as the visitor sent them, cookies included. Remove the line.`,
+    );
+  }
+  return out;
+}
+
+/**
+ * A `[tools.cache]` on a POST http_json tool that does not turn caching on: the tool is not
+ * cached unless s_maxage is greater than 0 (src/tool-cache.ts), so a max_age, swr or sie
+ * alone, or s_maxage = 0, is ignored. Say so once per tool.
+ */
+export function toolCacheWarnings(config: Config): string[] {
+  return config.tools
+    .filter((t) => t.cache !== undefined && !cachesResults(t))
+    .map(
+      (t) =>
+        `[build-config] tool "${t.name}" is an http_json POST tool with a [tools.cache] but no s_maxage greater than 0, so it is not cached: ` +
+        `a POST tool is cached only when [tools.cache].s_maxage is set (max_age, swr and sie alone do not turn caching on). ` +
+        `Set s_maxage to cache it, or remove [tools.cache].`,
+    );
+}
+
+/**
+ * The API catalog's only entry of ours points at the WebMCP manifest. With [features].manifest
+ * off a served catalog (feature on, not passthrough) has nothing of ours in it: a synthesized
+ * one is an empty linkset, a merged one is origin's unchanged. Say so, so that the choice to
+ * keep an empty catalog is made on purpose.
+ */
+export function apiCatalogWarnings(config: Config): string[] {
+  if (config.features.manifest || !config.features.api_catalog || config.api_catalog.mode === "passthrough") return [];
+  return [
+    `[build-config] [features].api_catalog is on but [features].manifest is off: the only entry cf-webmcp puts in the API catalog ` +
+      `points at the manifest, so the catalog at ${config.api_catalog.path} is empty` +
+      `${config.api_catalog.mode === "merge" ? " apart from origin's own entries" : ""}. ` +
+      `Turn api_catalog off or set [api_catalog].mode = "passthrough" if you do not want an empty catalog.`,
+  ];
 }
 
 /**
@@ -1809,13 +1880,18 @@ export async function buildConfig(opts: BuildOptions): Promise<void> {
   );
   const aiCatalog = config.features.ai_catalog ? buildAiCatalog(config) : null;
   const aiCatalogStr = aiCatalog ? stringifyCanonical(aiCatalog) : "";
-  for (const warning of ardWarnings(config)) {
+  for (const warning of [
+    ...ardWarnings(config),
+    ...apiCatalogWarnings(config),
+    ...toolCacheWarnings(config),
+    ...deadConfigWarnings(config),
+  ]) {
     // eslint-disable-next-line no-console
     console.warn(warning);
   }
   const buildAt = new Date().toISOString();
   const preflight = await loadPreflightResult(opts.outDir, configHash);
-  const agentSkillsDigest = await computeAgentSkillsDigest(config);
+  const agentSkillsDigest = await computeAgentSkillsDigest(config, widgetEnabled(config, widget.asset));
   const manifestStr = JSON.stringify(manifest, null, 2);
   // Token-budget hints for the /llms.txt links, computed over the exact
   // bodies the worker serves at those paths.

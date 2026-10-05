@@ -6,6 +6,7 @@ const ctx: ExecutorContext = {
   allowedOrigins: ["https://example.com"],
   deployToken: "test-token",
   timeoutMs: 1000,
+  version: "0.0.0-test",
 };
 
 const fakeSitemap = `<?xml version="1.0" encoding="UTF-8"?>

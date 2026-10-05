@@ -27,7 +27,7 @@ If you enable `logpush = true` in your `wrangler.toml`, you opt in to Cloudflare
 
 ## What is forwarded to origin
 
-Executor fetches to the publisher's origin **never forward visitor cookies**. Default `[origin].forward_cookies = false`, with no v1 path to flip it on. Cached executor responses are therefore non-personalized by definition.
+Executor fetches to the publisher's origin **never forward visitor cookies**, and neither do the Worker's other fetches to origin (the merge routes). `[origin].forward_cookies` is accepted for old configs and does nothing: setting it to `true` changes no request, and the build says so. Cached executor responses are therefore non-personalized by definition. The proxy is a different path: a proxied page request reaches origin exactly as the visitor sent it, cookies included.
 
 Executor fetches send:
 

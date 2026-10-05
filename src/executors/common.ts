@@ -4,7 +4,7 @@
  * Responsibilities:
  *   - Resolve a url_template against input via the compiled mini-language.
  *   - Reject any resolved URL outside [origin].allowed_origins.
- *   - Strip visitor cookies, set a stable User-Agent, attach the deploy-token
+ *   - Strip visitor cookies, set a stable User-Agent (cf-webmcp/<package version>), attach the deploy-token
  *     bypass header so the publisher's Bot Management can allow our traffic.
  *   - Follow redirects by hand (src/safe-fetch.ts): every hop is checked against
  *     allowed_origins before it is requested, so the deploy token never goes to a
@@ -17,15 +17,16 @@
 import { compileTemplate } from "../mini-language";
 import { err, type ErrorPayload } from "../envelope";
 import { fetchWithManualRedirects, isAbortError, logRedirectFailure, type RedirectFailure } from "../safe-fetch";
+import { userAgent } from "../user-agent";
 
 // Lives in safe-fetch (the handler needs it too); re-exported for the executors.
 export { isAbortError };
 
-const VERSION = "1.0";
-
 export interface ExecutorContext {
   allowedOrigins: string[];
   deployToken: string;
+  /** cf-webmcp's version from package.json (CF_WEBMCP_VERSION): the User-Agent of every origin fetch names it. */
+  version: string;
   /** Deadline for the whole run (fetch plus body reads), used in timeout messages. */
   timeoutMs: number;
   /**
@@ -90,6 +91,8 @@ export interface OriginFetchOptions {
    * 302 or 303; see src/safe-fetch.ts) drops it.
    */
   body?: string;
+  /** Content-Type of `body`. Sent on every hop that still carries the body, dropped with it when a redirect turns the request into a GET. */
+  contentType?: string;
   /** Set to false to send neither the bypass nor the deploy-token header. */
   bypassEnabled?: boolean;
 }
@@ -145,9 +148,10 @@ export async function originFetch(
   const signal = ctx.signal ?? local!.signal;
 
   const headers: Record<string, string> = {
-    "user-agent": `cf-webmcp/${VERSION}`,
+    "user-agent": userAgent(ctx.version),
   };
   if (opts.acceptHeader) headers["accept"] = opts.acceptHeader;
+  if (opts.contentType && opts.body !== undefined) headers["content-type"] = opts.contentType;
   const secretHeaders: Record<string, string> = {};
   if (opts.bypassEnabled !== false && ctx.deployToken) {
     secretHeaders["cf-webmcp-bypass"] = "1";

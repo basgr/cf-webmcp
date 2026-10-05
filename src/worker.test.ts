@@ -2324,3 +2324,64 @@ describe("validators on rewritten HTML (a deploy that changes the injection must
     });
   });
 });
+
+describe("worker: the User-Agent of the Worker's own origin fetches", () => {
+  it("names the version from the build (CF_WEBMCP_VERSION) on the merge routes, not a fixed one", async () => {
+    const seen: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        seen.push((init?.headers as Record<string, string>)["user-agent"]!);
+        return new Response("not found", { status: 404 });
+      }),
+    );
+    const handler = createHandler(makeDeps({}, { meta: { CF_WEBMCP_VERSION: "7.8.9" } }));
+
+    await call(handler, "https://example.com/llms.txt");
+    await call(handler, "https://example.com/robots.txt");
+
+    expect(seen).toEqual(["cf-webmcp/7.8.9", "cf-webmcp/7.8.9"]);
+  });
+});
+
+// docs/limitations.md: pages without a literal <head> get no <link> tags (the Link header is
+// there regardless), and pages without </body> get the script at the end of the document.
+describe("worker: pages without a literal <head> or </body>", () => {
+  async function load(html: string) {
+    stubOrigin({ "https://example.com/p": () => htmlResponse(html) });
+    const res = await call(createHandler(makeDeps()), "https://example.com/p");
+    return { body: await res.text(), link: res.headers.get("link") };
+  }
+  const SCRIPT = /<script src="https:\/\/example\.com\/_webmcp\/bootstrap\.test\.js"[^>]*><\/script>/;
+
+  it("no <head>: no <link> tags, the script before </body>, and the Link header still names the documents", async () => {
+    const { body, link } = await load("<!doctype html><html><body><p>hi</p></body></html>");
+
+    expect(body).not.toContain("<link");
+    expect(body).toMatch(new RegExp(`<p>hi</p>${SCRIPT.source}</body>`));
+    expect(link).toContain('rel="webmcp"');
+    expect(link).toContain('rel="api-catalog"');
+  });
+
+  it("no </body>: the script goes at the very end of the document, the <link> tags still go in <head>", async () => {
+    const { body } = await load("<!doctype html><html><head><title>t</title></head><body><p>hi");
+
+    expect(body).toMatch(new RegExp(`<p>hi${SCRIPT.source}$`));
+    expect(body).toContain('<link rel="webmcp"');
+  });
+
+  it("neither <head> nor </body>: no <link> tags, the script at the end of the document, the Link header present", async () => {
+    const { body, link } = await load("<!doctype html><html><body><p>hi");
+
+    expect(body).not.toContain("<link");
+    expect(body).toMatch(new RegExp(`<p>hi${SCRIPT.source}$`));
+    expect(link).toContain('rel="webmcp"');
+  });
+
+  it("a bare fragment is passed through untouched, with the Link header", async () => {
+    const { body, link } = await load("<div>plain fragment</div>");
+
+    expect(body).toBe("<div>plain fragment</div>");
+    expect(link).toContain('rel="webmcp"');
+  });
+});

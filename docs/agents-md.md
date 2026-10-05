@@ -10,8 +10,8 @@ The canonical file is generated from your TOML and merged into origin content (o
 
 - A `## WebMCP on this site` heading and a one-line site description
 - Available tools - both imperative (`[[tools]]` from TOML) and form-injected (`[[forms]]` from TOML), with descriptions
-- Manifest URL for programmatic consumers
-- How agents connect (native API vs desktop bridge)
+- Manifest URL for programmatic consumers (only while `[features].manifest` is on)
+- How agents connect: browser-native registration, and the landing page. With the desktop-bridge widget on (`[features].fallback_widget = true` and a widget pinned in the build) the block tells desktop MCP clients to pair at the landing page and notes that the widget only starts there. With the widget off, the default, it links the landing page as the "WebMCP page" that lists the tools, and nothing says to pair. With `[features].webmcp_landing = false` the landing page is not mentioned.
 - Operational notes: response envelope shape, rate-limit honour, health endpoint
 - What to avoid: cross-origin executor calls without CORS config, ignoring `Retry-After`, etc.
 
@@ -42,7 +42,7 @@ aliases = ["/AGENTS.md", "/agents.md"]
 
 ### Modes
 
-- **`merge`** (default). Fetch origin's file, splice the cf-webmcp block inside `<!-- cf-webmcp:begin -->` / `<!-- cf-webmcp:end -->` markers (or append if marker absent). Idempotent on re-run: subsequent deploys replace the block content cleanly, never duplicating.
+- **`merge`** (default). Fetch origin's file, splice the cf-webmcp block inside `<!-- cf-webmcp:begin -->` / `<!-- cf-webmcp:end -->` markers (or append if marker absent). Idempotent on re-run: subsequent deploys replace the block content cleanly, never duplicating. Origin's file is read up to 1 MiB: a larger one is relayed as it came, and one whose body fails mid-read is answered with the block alone for a minute (see [Merge routes and the 1 MiB cap](deployment.md#merge-routes-and-the-1-mib-cap)).
 - **`synthesize`**. Ignore origin entirely. The published file is purely the cf-webmcp block. Use this when you have no origin file and want the Worker to be the single source.
 - **`replace`**. Same shape as synthesize, semantically different intent: "I know origin has something, replace it". Build behaviour is identical to synthesize today; the distinction lives in the doc for clarity.
 - **`passthrough`**. Route not registered. Origin owns the file outright. Use when you want full control of `/AGENTS.md` from your own template/CMS.

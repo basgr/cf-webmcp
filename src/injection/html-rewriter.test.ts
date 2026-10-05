@@ -63,6 +63,44 @@ describe("matchGlob", () => {
     expect(matchGlob("/a.b", "/a.b")).toBe(true);
     expect(matchGlob("/a.b", "/axb")).toBe(false);
   });
+
+  // One row per regex metacharacter: the pattern must match the path that holds the
+  // character itself, and none of the paths the character would match as a regex.
+  const literal: Array<[name: string, pattern: string, same: string, notSame: string[]]> = [
+    ["?", "/a?b", "/a?b", ["/ab", "/b", "/axb", "/a"]],
+    [".", "/a.b", "/a.b", ["/axb"]],
+    ["+", "/a+b", "/a+b", ["/ab", "/aab"]],
+    ["(", "/a(b", "/a(b", ["/ab", "/a"]],
+    [")", "/a)b", "/a)b", ["/ab"]],
+    ["()", "/(x)", "/(x)", ["/x", "/"]],
+    ["[", "/a[b", "/a[b", ["/ab"]],
+    ["[]", "/[xy]", "/[xy]", ["/x", "/y"]],
+    ["]", "/a]b", "/a]b", ["/ab"]],
+    ["$", "/a$", "/a$", ["/a"]],
+    ["^", "/^a", "/^a", ["/a", "^/a"]],
+    ["{}", "/a{2}", "/a{2}", ["/aa", "/a"]],
+    ["{", "/a{b", "/a{b", ["/ab"]],
+    ["}", "/a}b", "/a}b", ["/ab"]],
+    ["|", "/a|b", "/a|b", ["/a", "b", "/b", "a"]],
+    ["\\", "/a\\b", "/a\\b", ["/ab", "/a/b"]],
+  ];
+
+  it.each(literal)("matches %s literally", (_name, pattern, same, notSame) => {
+    expect(matchGlob(pattern, same)).toBe(true);
+    for (const other of notSame) expect(matchGlob(pattern, other), `${pattern} must not match ${other}`).toBe(false);
+  });
+
+  it("anchors the whole path: a pattern is not a substring or a prefix match", () => {
+    expect(matchGlob("/blog", "/blog/post")).toBe(false);
+    expect(matchGlob("/blog", "/x/blog")).toBe(false);
+    expect(matchGlob("blog", "/blog")).toBe(false);
+  });
+
+  it("keeps * as the only wildcard, and it still matches ? and the other specials in the input", () => {
+    expect(matchGlob("/search*", "/search?q=1")).toBe(true);
+    expect(matchGlob("/a*z", "/a.+(b)z")).toBe(true);
+    expect(matchGlob("/a*z", "/b-z")).toBe(false);
+  });
 });
 
 describe("escapeAttr", () => {
@@ -414,9 +452,10 @@ describe("safeInject (outer guard for synchronous rewriter errors)", () => {
     const errors = vi.spyOn(console, "error").mockImplementation(() => {});
     const upstream = response();
 
-    // A manifestUrl that is not a string makes escapeAttr throw before the rewriter exists:
-    // a stand-in for any unexpected synchronous failure that no per-selector guard covers.
-    const out = safeInject(upstream, { ...opts, manifestUrl: undefined as unknown as string });
+    // A URL that is not a string makes escapeAttr throw before the rewriter exists: a stand-in
+    // for any unexpected synchronous failure that no per-selector guard covers. (Not the
+    // manifestUrl: an unset one is how the manifest feature being off reads, and is no failure.)
+    const out = safeInject(upstream, { ...opts, apiCatalogUrl: 42 as unknown as string });
 
     expect(out.failedOpen).toBe(true);
     expect(out.response).toBe(upstream);

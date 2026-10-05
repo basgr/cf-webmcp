@@ -53,7 +53,7 @@ api_catalog_sie      = 86400
 
 | Mode | What happens | When to use |
 |------|--------------|-------------|
-| `merge` (default) | Fetch origin's `/.well-known/api-catalog`. If it returns valid Linkset JSON, splice our entry in (idempotent: re-running produces byte-identical output). On 404, unparseable JSON, or non-linkset JSON, fall back to synthesize. | You may already publish other APIs (OpenAPI, AsyncAPI, etc.) in the same catalog. cf-webmcp adds itself without overwriting them. |
+| `merge` (default) | Fetch origin's `/.well-known/api-catalog`. If it returns valid Linkset JSON, splice our entry in (idempotent: re-running produces byte-identical output). On 404, unparseable JSON, or non-linkset JSON, fall back to synthesize. Origin's catalog is read up to 1 MiB: a larger one is relayed as it came, and one whose body fails mid-read is answered with the synthesized catalog for a minute (see [Merge routes and the 1 MiB cap](deployment.md#merge-routes-and-the-1-mib-cap)). | You may already publish other APIs (OpenAPI, AsyncAPI, etc.) in the same catalog. cf-webmcp adds itself without overwriting them. |
 | `synthesize` | Ignore origin. Emit a fresh catalog with only our entry. | You don't publish other APIs in a catalog. Simplest setup. |
 | `replace` | Same as `synthesize`. (cf-webmcp emits exactly one entry, so the difference between replace and synthesize would only matter for multi-entry generators; kept for parity with other discovery routes.) | Use `synthesize` for clarity. |
 | `passthrough` | The route is not registered. Origin owns the file 100%. | You want to manage the catalog entirely outside cf-webmcp. |
@@ -72,6 +72,10 @@ When `mode = "merge"`:
 5. If origin returns **valid JSON that is not a linkset** (no `linkset` array, or malformed entries), the Worker falls back to synthesize.
 
 Output is canonicalised: 2-space indent, object keys sorted alphabetically, trailing newline. Byte-stable across re-runs.
+
+## The entry follows the manifest
+
+The one entry cf-webmcp adds points at the WebMCP manifest (`rel="webmcp"`). With `[features].manifest = false` there is no manifest to point at: a synthesized catalog is an empty `{"linkset": []}`, and a merged one is origin's entries unchanged. The build warns when the catalog is on and the manifest is off; turn `api_catalog` off or set `[api_catalog].mode = "passthrough"` if you do not want an empty catalog.
 
 ## Advertised on every response
 

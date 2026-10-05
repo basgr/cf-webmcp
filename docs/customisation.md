@@ -1,6 +1,6 @@
 # Customising the landing page
 
-The Worker auto-generates a small HTML page at `/mcp` (or whatever path you set in `[webmcp_landing].path`). It is the page humans and desktop MCP clients land on to pair, and the page browser-native agents see when they follow a `<link rel="webmcp">` reference.
+The Worker auto-generates a small HTML page at `/mcp` (or whatever path you set in `[webmcp_landing].path`). It is the page humans land on (desktop MCP clients pair there when the opt-in fallback widget is on), and the page browser-native agents see when they follow a `<link rel="webmcp">` reference. llms.txt, agents.md and SKILL.md call it a pairing page only while the widget is on, and name it at all only while `[features].webmcp_landing` is on.
 
 You can replace it with your own HTML template per deploy, with no code changes to the Worker.
 

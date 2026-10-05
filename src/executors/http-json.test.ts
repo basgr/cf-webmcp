@@ -5,6 +5,7 @@ const ctx = {
   allowedOrigins: ["https://example.com"],
   deployToken: "t",
   timeoutMs: 1000,
+  version: "0.0.0-test",
 };
 
 afterEach(() => vi.unstubAllGlobals());
@@ -200,5 +201,120 @@ describe("runHttpJson", () => {
 
     if (r.ok) throw new Error("expected error");
     expect(r.error.code).toBe("timeout");
+  });
+});
+
+describe("runHttpJson: POST", () => {
+  const post = { url_template: "https://example.com/wp-json/contact/v1/send", method: "POST" as const };
+
+  /** One stubbed fetch that records every request it receives. */
+  function recordFetch(answer: () => Response = () => new Response('{"sent":true}', { status: 200, headers: { "content-type": "application/json" } })) {
+    const calls: Array<{ url: string; method: string | undefined; body: unknown; headers: Record<string, string> }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        calls.push({
+          url: String(url),
+          method: init?.method,
+          body: init?.body,
+          headers: Object.fromEntries(new Headers(init?.headers).entries()),
+        });
+        return answer();
+      }),
+    );
+    return calls;
+  }
+
+  it("sends the validated input as a JSON body with content-type application/json", async () => {
+    const calls = recordFetch();
+
+    const r = await runHttpJson(ctx, post, { email: "a@example.com", topics: ["x", "y"], count: 3 });
+
+    if (!r.ok) throw new Error(JSON.stringify(r));
+    expect(r.data).toEqual({ sent: true });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.method).toBe("POST");
+    expect(calls[0]!.url).toBe("https://example.com/wp-json/contact/v1/send");
+    expect(calls[0]!.headers["content-type"]).toBe("application/json");
+    expect(calls[0]!.headers["accept"]).toBe("application/json, */*");
+    expect(JSON.parse(calls[0]!.body as string)).toEqual({ email: "a@example.com", topics: ["x", "y"], count: 3 });
+  });
+
+  it("sends an empty object, not an empty body, when the input has no fields", async () => {
+    const calls = recordFetch();
+
+    await runHttpJson(ctx, post, {});
+
+    expect(calls[0]!.body).toBe("{}");
+    expect(calls[0]!.headers["content-type"]).toBe("application/json");
+  });
+
+  it("resolves the URL from the input and also sends that input in the body", async () => {
+    const calls = recordFetch();
+
+    await runHttpJson(ctx, { ...post, url_template: "https://example.com/api/{{kind}}" }, { kind: "news", n: 2 });
+
+    expect(calls[0]!.url).toBe("https://example.com/api/news");
+    expect(JSON.parse(calls[0]!.body as string)).toEqual({ kind: "news", n: 2 });
+  });
+
+  it("still applies the allow-list: no request, no body, for a template that leaves allowed_origins", async () => {
+    const calls = recordFetch();
+
+    const r = await runHttpJson(ctx, { ...post, url_template: "https://other.example.com/x" }, { a: 1 });
+
+    if (r.ok) throw new Error("expected error");
+    expect(r.error.code).toBe("invalid_input");
+    expect(calls).toEqual([]);
+  });
+
+  it("a GET sends no body and no content-type", async () => {
+    const calls = recordFetch();
+
+    await runHttpJson(ctx, { url_template: "https://example.com/x", method: "GET" }, { a: 1 });
+
+    expect(calls[0]!.method).toBe("GET");
+    expect(calls[0]!.body).toBeUndefined();
+    expect(calls[0]!.headers["content-type"]).toBeUndefined();
+  });
+
+  it("replays the body and the content-type on a 307 and a 308", async () => {
+    for (const status of [307, 308]) {
+      const calls: Array<{ method: string | undefined; body: unknown; contentType: string | undefined }> = [];
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (url: string, init?: RequestInit) => {
+          calls.push({ method: init?.method, body: init?.body, contentType: new Headers(init?.headers).get("content-type") ?? undefined });
+          return calls.length === 1
+            ? new Response(null, { status, headers: { location: "https://example.com/elsewhere" } })
+            : new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+        }),
+      );
+
+      const r = await runHttpJson(ctx, post, { a: 1 });
+
+      expect(r.ok, String(status)).toBe(true);
+      expect(calls).toEqual([
+        { method: "POST", body: '{"a":1}', contentType: "application/json" },
+        { method: "POST", body: '{"a":1}', contentType: "application/json" },
+      ]);
+    }
+  });
+
+  it("a 303 turns the follow-up into a GET without the body or its content-type", async () => {
+    const calls: Array<{ method: string | undefined; body: unknown; contentType: string | undefined }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        calls.push({ method: init?.method, body: init?.body, contentType: new Headers(init?.headers).get("content-type") ?? undefined });
+        return calls.length === 1
+          ? new Response(null, { status: 303, headers: { location: "https://example.com/done" } })
+          : new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+      }),
+    );
+
+    await runHttpJson(ctx, post, { a: 1 });
+
+    expect(calls[1]).toEqual({ method: "GET", body: undefined, contentType: undefined });
   });
 });

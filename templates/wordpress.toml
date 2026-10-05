@@ -18,7 +18,7 @@ locale      = "en"
 [origin]
 base_url        = "https://example.com"
 allowed_origins = ["https://example.com"]
-forward_cookies = false
+forward_cookies = false   # no effect (executors never forward visitor cookies, whatever this says); the build warns when it is true
 
 [features]
 inject_html      = true
@@ -161,6 +161,7 @@ public = true
 token  = ""
 
 [dev]
+# No effect: nothing reads it. `npm run dev:origin` takes its port from ORIGIN_PORT.
 origin = "http://localhost:8080"
 
 # ---------- Tools ----------

@@ -6,31 +6,43 @@
  * `description`) followed by:
  *   - an auto-generated list of `[[tools]]` and `[[forms]]`,
  *   - optional publisher-written `[[agent_skills.hints]]` sections,
- *   - a closing pointer at the WebMCP manifest.
+ *   - a closing pointer at the WebMCP manifest (only while [features].manifest is on).
  *
  * Modes match the other discovery routes: merge | replace | passthrough |
  * synthesize. Aliases 301-redirect to the canonical path; defaults cover
  * the common case-variants (SKILLS.md, skill.md, skills.md).
+ *
+ * Merge reads origin's file through a 1 MiB cap (src/routes/read-capped.ts): a larger file is
+ * relayed as origin sent it, with noindex; one whose body fails mid-read is answered with the
+ * synthesized document, as when origin has no file, but cached for a minute only.
  */
 
 import type { Config } from "../config-types";
 import { buildCacheControl } from "../cache";
 import { SKILL_NAME_MAX, slugify } from "../ard";
+import { ORIGIN_FAILURE_CACHE_CONTROL, readTextCapped } from "./read-capped";
 
 const BEGIN = "<!-- cf-webmcp:begin -->";
 const END = "<!-- cf-webmcp:end -->";
 
+/**
+ * `widget` says whether the desktop-bridge widget is on (widgetEnabled in src/widget-state.ts),
+ * and must be the value the build computed the skills index digest with (buildSkillBody).
+ * Without an answer it follows [features].fallback_widget.
+ */
 export async function agentSkillsResponse(
   _request: Request,
   config: Config,
   proxyToOrigin: (url: URL) => Promise<Response>,
+  widget: boolean = config.features.fallback_widget,
 ): Promise<Response> {
-  const built = await buildBody(config, proxyToOrigin);
+  const built = await buildBody(config, proxyToOrigin, widget);
   if (built.kind === "relay") {
     // Origin returned something that is not markdown (or not a 200/404) in merge
     // mode; pass that same response through unchanged rather than overwrite
     // publisher content, and without asking origin a second time. The path is under
-    // /.well-known/* so enforce the noindex tag even on the relayed response.
+    // /.well-known/* so enforce the noindex tag even on the relayed response. That also
+    // holds for a file over the 1 MiB cap (read-capped.ts), which is relayed whole.
     return withNoindex(built.upstream);
   }
   const body = built.text;
@@ -39,12 +51,15 @@ export async function agentSkillsResponse(
     status: 200,
     headers: {
       "content-type": "text/markdown; charset=utf-8",
-      "cache-control": buildCacheControl({
-        max_age: config.cache.agent_skills_max_age,
-        s_maxage: config.cache.agent_skills_s_maxage,
-        swr: config.cache.agent_skills_swr,
-        sie: config.cache.agent_skills_sie,
-      }),
+      // A file whose body failed mid-read is stood in for by the synthesized one, for a minute.
+      "cache-control": built.originFailed
+        ? ORIGIN_FAILURE_CACHE_CONTROL
+        : buildCacheControl({
+            max_age: config.cache.agent_skills_max_age,
+            s_maxage: config.cache.agent_skills_s_maxage,
+            swr: config.cache.agent_skills_swr,
+            sie: config.cache.agent_skills_sie,
+          }),
       "x-content-type-options": "nosniff",
       // Agent-discovery surface served under /.well-known/, not search-engine
       // content. See docs/scope.md and the x-robots coverage test.
@@ -70,13 +85,17 @@ export function agentSkillsRedirect(config: Config): Response {
 }
 
 /** What the merge step produced: the document to serve, or the origin response to relay as it came. */
-type BuiltBody = { kind: "body"; text: string } | { kind: "relay"; upstream: Response };
+type BuiltBody =
+  /** `originFailed`: origin's body failed mid-read and `text` is the synthesized document standing in for it. */
+  | { kind: "body"; text: string; originFailed?: boolean }
+  | { kind: "relay"; upstream: Response };
 
 async function buildBody(
   config: Config,
   proxyToOrigin: (url: URL) => Promise<Response>,
+  widget: boolean,
 ): Promise<BuiltBody> {
-  const skillBody = buildSkillBody(config);
+  const skillBody = buildSkillBody(config, widget);
 
   if (config.agent_skills.mode === "synthesize" || config.agent_skills.mode === "replace") {
     return { kind: "body", text: buildFrontmatter(config) + skillBody };
@@ -89,8 +108,11 @@ async function buildBody(
     return { kind: "body", text: buildFrontmatter(config) + skillBody };
   }
   if (upstream.status === 200 && isMarkdownish(upstream.headers.get("content-type"))) {
-    const original = await upstream.text();
-    return { kind: "body", text: mergeBlock(original, skillBody) };
+    const read = await readTextCapped(upstream);
+    if (read.kind === "text") return { kind: "body", text: mergeBlock(read.text, skillBody) };
+    // Over the 1 MiB cap: origin's file, relayed whole.
+    if (read.kind === "relay") return { kind: "relay", upstream: read.upstream };
+    return { kind: "body", text: buildFrontmatter(config) + skillBody, originFailed: true };
   }
   // Non-markdown / non-200: hand the response itself back for the caller to relay.
   return { kind: "relay", upstream };
@@ -143,20 +165,31 @@ export function buildFrontmatter(config: Config): string {
  * modes produce deterministic output from config; merge mode does not (origin
  * content is part of the served body), which is why the index handler returns
  * 404 when agent_skills.mode = "merge".
+ *
+ * `widget`: whether the desktop-bridge widget is on (widgetEnabled in src/widget-state.ts). The
+ * build passes the answer it resolved from the widget pin and the handler the one it resolved
+ * from WIDGET_ASSET, the same value, so the digest covers the bytes that are served. Without an
+ * answer it follows [features].fallback_widget.
+ *
+ * The landing page and the manifest are named only while their features are on. The landing
+ * is a place to pair only while the widget is on; otherwise it is the page that lists the tools.
  */
-export function buildSkillBody(config: Config): string {
+export function buildSkillBody(config: Config, widget: boolean = config.features.fallback_widget): string {
   const base = config.site.public_url ?? `https://${config.site.domain}`;
   const manifestUrl = `${base}${config.manifest.path}`;
   const landingUrl = `${base}${config.webmcp_landing.path}`;
 
-  const lines: string[] = [
-    `# ${config.site.name}`,
-    ``,
-    `## Tools available on this site`,
-    ``,
-    `Browser-native agents register these automatically via \`navigator.modelContext\` when the WebMCP runtime is present. Desktop MCP clients can pair at <${landingUrl}> and call the tools through the localhost bridge.`,
-    ``,
+  const intro = [
+    `Browser-native agents register these automatically via \`navigator.modelContext\` when the WebMCP runtime is present.`,
   ];
+  if (config.features.webmcp_landing) {
+    intro.push(
+      widget
+        ? `Desktop MCP clients can pair at <${landingUrl}> and call the tools through the localhost bridge.`
+        : `The tools are also listed at <${landingUrl}>.`,
+    );
+  }
+  const lines: string[] = [`# ${config.site.name}`, ``, `## Tools available on this site`, ``, intro.join(" "), ``];
 
   if (config.tools.length === 0 && config.forms.length === 0) {
     lines.push(`_No tools currently exposed._`);
@@ -174,7 +207,11 @@ export function buildSkillBody(config: Config): string {
     lines.push(``, `## ${hint.heading}`, ``, hint.body.trimEnd());
   }
 
-  lines.push(``, `## Full machine-readable tool schema`, ``, `<${manifestUrl}>`, ``);
+  if (config.features.manifest) {
+    lines.push(``, `## Full machine-readable tool schema`, ``, `<${manifestUrl}>`, ``);
+  } else {
+    lines.push(``);
+  }
 
   return lines.join("\n");
 }

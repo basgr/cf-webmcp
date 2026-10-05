@@ -8,6 +8,14 @@
  *   - "raw"   : return the raw parsed JSON (default)
  *
  * `fields` maps agent-facing names to dotted paths into the response.
+ *
+ * method:
+ *   - "GET"  : no body.
+ *   - "POST" : the validated tool input goes to origin as the JSON body (content-type
+ *              application/json), whole: `{}` for a tool without input. The URL is resolved
+ *              from the same input. A 307 or 308 replays the body; a 301, 302 or 303 turns
+ *              the follow-up into a bodyless GET (src/safe-fetch.ts). The exec route does not
+ *              cache a POST tool unless [tools.cache] sets a positive s_maxage (src/routes/exec.ts).
  */
 
 import type { ExecutorContext } from "./common";
@@ -37,6 +45,7 @@ export async function runHttpJson(
   const res = await originFetch(ctx, resolved.url, {
     method: config.method,
     acceptHeader: "application/json, */*",
+    ...(config.method === "POST" ? { body: JSON.stringify(input), contentType: "application/json" } : {}),
   });
   if ("error" in res) return fromErr(res.error);
   const mapped = mapOriginStatus(res.status);

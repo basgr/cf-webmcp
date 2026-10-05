@@ -2,8 +2,9 @@
  * Build the value of the HTTP `Link` header advertising cf-webmcp's
  * discovery surfaces. RFC 8288 format, comma-separated entries.
  *
- * Always advertises the WebMCP manifest as rel="webmcp" (our private rel,
- * matches the `<link rel="webmcp">` injected into HTML).
+ * Advertises the WebMCP manifest as rel="webmcp" (our private rel, matches the
+ * `<link rel="webmcp">` injected into HTML) while [features].manifest is on. With
+ * the manifest off there is no document to point at, so there is no entry.
  *
  * When the api_catalog feature is enabled and not in passthrough mode,
  * additionally advertises rel="api-catalog" (IANA-registered, RFC 9727)
@@ -19,11 +20,16 @@
 import type { Config } from "./config-types";
 import { ARD_REL } from "./ard";
 
+/**
+ * The header value, or "" when no document is advertised at all (the manifest off and
+ * every other entry off or left to origin): the caller then sets no Link header.
+ */
 export function buildLinkHeader(config: Config): string {
   const base = config.site.public_url ?? `https://${config.site.domain}`;
-  const entries: string[] = [
-    `<${base}${config.manifest.path}>; rel="webmcp"; title="WebMCP tool catalogue"`,
-  ];
+  const entries: string[] = [];
+  if (config.features.manifest) {
+    entries.push(`<${base}${config.manifest.path}>; rel="webmcp"; title="WebMCP tool catalogue"`);
+  }
   if (config.features.api_catalog && config.api_catalog.mode !== "passthrough") {
     entries.push(
       `<${base}${config.api_catalog.path}>; rel="api-catalog"; title="API catalogue (RFC 9727 Linkset)"`,

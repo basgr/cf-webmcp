@@ -30,9 +30,9 @@ Workaround: configure the origin to serve UTF-8.
 
 ## Pages without a literal `<head>` get no `<link>` tags
 
-The Worker adds its `<link rel="webmcp">` (and the other discovery `<link>` tags) by appending to the `<head>` element. HTML that omits the `<head>` tag entirely, which the HTML spec allows, has no element for the rewriter to append to, so those pages get no `<link>` tags. The same discovery data is sent in the HTTP `Link` response header (on by default, `features.link_header`), which does not depend on the page markup, so agents that read headers still find the manifest.
+The Worker adds its `<link rel="webmcp">` (and the other discovery `<link>` tags) by appending to the `<head>` element. HTML that omits the `<head>` tag entirely, which the HTML spec allows, has no element for the rewriter to append to, so those pages get no `<link>` tags. The same discovery data is sent in the HTTP `Link` response header, which does not depend on the page markup: it is on every proxied response (HTML or not, a page without a literal `<head>` included) while `features.link_header` is on, so agents that read headers still find the documents. (With every discovery surface off there is nothing to advertise, and no header is added.)
 
-The bootstrap `<script>` does not depend on `<head>`. It goes before `</body>`, or at the very end of the document when the page omits `</body>` (minified HTML often does). Bare fragments with no doctype, `<html>`, `<head>` or `<body>` tag, such as an AJAX partial, are passed through untouched.
+The bootstrap `<script>` does not depend on `<head>`. It goes before `</body>`, and a page without `</body>` gets it at the very end of the document (minified HTML often omits `</body>`). That includes a page with no `<body>` at all, as long as it has a doctype, an `<html>` or a `<head>` tag. Bare fragments with no doctype, `<html>`, `<head>` or `<body>` tag, such as an AJAX partial, are passed through untouched, with only the `Link` header added.
 
 ## HTML injection fails open only on setup errors
 

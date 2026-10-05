@@ -9,7 +9,7 @@ For the security boundary cf-webmcp does and does not enforce, see [`docs/securi
 - **WebMCP manifest** at `/.well-known/webmcp`
 - **In-page tool registration** via injected `<script>` and `<link rel="webmcp">`
 - **HTTP `Link` header** with `rel="webmcp"` on every response
-- **`/mcp` landing page** for desktop MCP client pairing
+- **`/mcp` landing page**: the tool list and the connection state, with desktop MCP client pairing when the opt-in fallback widget is on
 - **Fallback widget** (`jasonjmcghee/WebMCP`) for desktop bridge clients
 - **Five executor types** for server-side tool calls: `sitemap_filter`, `rss_feed`, `dom_extract`, `http_json`, `http_get`
 - **Form attribute injection** stamping W3C declarative form attributes onto matching `<form>` elements via TOML config

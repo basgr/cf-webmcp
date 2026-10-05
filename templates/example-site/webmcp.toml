@@ -16,7 +16,7 @@ public_url  = "http://localhost:8787"
 [origin]
 base_url        = "http://localhost:8081"
 allowed_origins = ["http://localhost:8081"]
-forward_cookies = false
+forward_cookies = false   # no effect (executors never forward visitor cookies, whatever this says); the build warns when it is true
 
 [features]
 inject_html      = true
@@ -112,6 +112,7 @@ public = true
 token  = ""
 
 [dev]
+# No effect: nothing reads it. `npm run dev:origin` takes its port from ORIGIN_PORT.
 origin = "http://localhost:8081"
 
 [[tools]]

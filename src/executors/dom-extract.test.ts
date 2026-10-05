@@ -6,6 +6,7 @@ const ctx: ExecutorContext = {
   allowedOrigins: ["https://example.com"],
   deployToken: "",
   timeoutMs: 1000,
+  version: "0.0.0-test",
 };
 
 const config: DomExtractConfig = {
@@ -35,6 +36,54 @@ describe("runDomExtract", () => {
     if (!r.ok) throw new Error(JSON.stringify(r));
     expect(r.data.text).toBe("Hello big world");
     expect(r.data.truncated).toBe(false);
+  });
+
+  it("keeps the text after a nested <article> inside <main>", async () => {
+    stubPage("<html><body><main>Intro <article>Nested story</article> Outro</main><footer>f</footer></body></html>");
+
+    const r = await runDomExtract(ctx, { ...config, selector: "main, article, [role=main]" }, {});
+
+    if (!r.ok) throw new Error(JSON.stringify(r));
+    expect(r.data.text).toBe("Intro Nested story Outro");
+  });
+
+  it("keeps the text after any nested element the selector also matches, at every depth", async () => {
+    stubPage("<html><body><section>a<section>b<section>c</section>d</section>e</section>f</body></html>");
+
+    const r = await runDomExtract(ctx, { ...config, selector: "section" }, {});
+
+    if (!r.ok) throw new Error(JSON.stringify(r));
+    // "f" is outside the outermost match.
+    expect(r.data.text).toBe("abcde");
+  });
+
+  it("stops at the end of the outermost match, and starts again at the next one", async () => {
+    stubPage("<html><body>x<main>a<article>b</article>c</main>y<article>d</article>z</body></html>");
+
+    const r = await runDomExtract(ctx, { ...config, selector: "main, article" }, {});
+
+    if (!r.ok) throw new Error(JSON.stringify(r));
+    expect(r.data.text).toBe("abcd");
+  });
+
+  it("does not throw on void tags in strip, and keeps the text after them", async () => {
+    stubPage(
+      '<html><body><main>Hello<br>world <img src="x.png"> and <input type="text"> more<hr> end</main></body></html>',
+    );
+
+    const r = await runDomExtract(ctx, { ...config, strip: ["img", "br", "input", "hr", "nav"] }, {});
+
+    if (!r.ok) throw new Error(JSON.stringify(r));
+    expect(r.data.text).toBe("Helloworld and more end");
+  });
+
+  it("still strips the content of a non-void tag listed next to void ones", async () => {
+    stubPage("<html><body><main>a<br>b<nav>menu</nav>c<img src=x>d</main></body></html>");
+
+    const r = await runDomExtract(ctx, { ...config, strip: ["br", "nav", "img"] }, {});
+
+    if (!r.ok) throw new Error(JSON.stringify(r));
+    expect(r.data.text).toBe("abcd");
   });
 
   it("clamps to max_chars and reports truncation", async () => {

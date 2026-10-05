@@ -64,3 +64,111 @@ describe("validateInput", () => {
     expect(validateInput(schema, [1, 2, 3]).ok).toBe(false);
   });
 });
+
+describe("validateInput: enum on every scalar type", () => {
+  const enums: InputSchemaConfig = {
+    type: "object",
+    required: [],
+    properties: {
+      kind: { type: "string", enum: ["a", "b"] },
+      size: { type: "integer", enum: [10, 20, 50] },
+      ratio: { type: "number", enum: [0.5, 1.5] },
+      live: { type: "boolean", enum: [true] },
+      sizes: { type: "array", items: { type: "integer", enum: [1, 2] } },
+    },
+  };
+
+  it("still enforces a string enum", () => {
+    expect(validateInput(enums, { kind: "a" }).ok).toBe(true);
+    const r = validateInput(enums, { kind: "c" });
+    expect(r).toEqual({ ok: false, message: '"kind" must be one of a, b' });
+  });
+
+  it("enforces an integer enum", () => {
+    expect(validateInput(enums, { size: 20 }).ok).toBe(true);
+    expect(validateInput(enums, { size: 30 })).toEqual({ ok: false, message: '"size" must be one of 10, 20, 50' });
+  });
+
+  it("enforces a number enum", () => {
+    expect(validateInput(enums, { ratio: 1.5 }).ok).toBe(true);
+    expect(validateInput(enums, { ratio: 2 })).toEqual({ ok: false, message: '"ratio" must be one of 0.5, 1.5' });
+  });
+
+  it("enforces a boolean enum", () => {
+    expect(validateInput(enums, { live: true }).ok).toBe(true);
+    expect(validateInput(enums, { live: false })).toEqual({ ok: false, message: '"live" must be one of true' });
+  });
+
+  it("enforces an enum on array items", () => {
+    expect(validateInput(enums, { sizes: [1, 2, 1] }).ok).toBe(true);
+    expect(validateInput(enums, { sizes: [1, 3] })).toEqual({ ok: false, message: '"sizes[1]" must be one of 1, 2' });
+  });
+
+  it("does not coerce: the string \"20\" is not the integer 20, and \"true\" is not true", () => {
+    expect(validateInput(enums, { size: "20" }).ok).toBe(false);
+    expect(validateInput(enums, { live: "true" }).ok).toBe(false);
+  });
+
+  it("checks the type before the enum, so a wrong type keeps its own message", () => {
+    expect(validateInput(enums, { size: "x" })).toEqual({ ok: false, message: '"size" must be an integer' });
+  });
+});
+
+describe("validateInput: names that exist on every object", () => {
+  /** The body as the exec route parses it: JSON.parse makes "__proto__" an own property. */
+  const parse = (text: string): unknown => JSON.parse(text);
+
+  const requiring = (name: string): InputSchemaConfig => ({
+    type: "object",
+    required: [name],
+    properties: { [name]: { type: "string" } },
+  });
+
+  it.each(["constructor", "toString", "hasOwnProperty", "valueOf", "__proto__", "isPrototypeOf"])(
+    "a required %s is not satisfied by the name Object.prototype carries",
+    (name) => {
+      expect(validateInput(requiring(name), {})).toEqual({ ok: false, message: `missing required field "${name}"` });
+      expect(validateInput(requiring(name), parse("{}"))).toEqual({ ok: false, message: `missing required field "${name}"` });
+    },
+  );
+
+  it("a required constructor is satisfied by an own constructor", () => {
+    expect(validateInput(requiring("constructor"), parse('{"constructor":"x"}')).ok).toBe(true);
+  });
+
+  it("a required __proto__ is satisfied by an own __proto__ from JSON, and typed like any property", () => {
+    expect(validateInput(requiring("__proto__"), parse('{"__proto__":"x"}')).ok).toBe(true);
+    expect(validateInput(requiring("__proto__"), parse('{"__proto__":5}'))).toEqual({
+      ok: false,
+      message: '"__proto__" must be a string',
+    });
+  });
+
+  it.each(["constructor", "__proto__", "toString", "hasOwnProperty"])(
+    "an undeclared %s in the input is an unknown property: tolerated, not checked against Object.prototype",
+    (name) => {
+      const input = parse(`{"query":"x","${name}":{"deep":1}}`);
+      const r = validateInput(schema, input);
+      expect(r.ok).toBe(true);
+    },
+  );
+
+  it("an undeclared __proto__ does not change what the validated value inherits", () => {
+    const r = validateInput(schema, parse('{"query":"x","__proto__":{"polluted":true}}'));
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(Object.getPrototypeOf(r.value)).toBe(Object.prototype);
+      expect(({} as Record<string, unknown>)["polluted"]).toBeUndefined();
+    }
+  });
+
+  it("a declared property that shares such a name is validated against its own schema", () => {
+    const declared: InputSchemaConfig = { type: "object", required: [], properties: { constructor: { type: "integer" } } };
+    expect(validateInput(declared, parse('{"constructor":"x"}'))).toEqual({
+      ok: false,
+      message: '"constructor" must be an integer',
+    });
+    expect(validateInput(declared, parse('{"constructor":3}')).ok).toBe(true);
+    expect(validateInput(declared, parse("{}")).ok).toBe(true);
+  });
+});

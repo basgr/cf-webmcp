@@ -6,6 +6,9 @@
  * CORS is computed per request, for every answer: a cache hit, a miss, and every
  * error (405, 404, 400, 413, 429, 5xx). The cache stores results without any CORS
  * header, so a hit never replays the headers of the caller that filled it.
+ *
+ * A POST http_json tool sends its input to origin as a request body and may change
+ * something there, so its result is not cached unless the tool says so (src/tool-cache.ts).
  */
 
 import type { Config, ToolConfig } from "../config-types";
@@ -15,6 +18,7 @@ import { validateInput } from "../validate";
 import { jsonResponse, err, type Envelope } from "../envelope";
 import { buildCacheControl, makeCacheKey } from "../cache";
 import { checkGlobalRateLimit, checkPerToolRateLimit, clientIp } from "../rate-limit";
+import { cachesResults } from "../tool-cache";
 
 export interface ExecOptions {
   domain: string;
@@ -111,14 +115,13 @@ async function execAnswer(
     return jsonResponse(err("invalid_input", validation.message));
   }
 
-  // Cache check.
-  const cacheKey = await makeCacheKey(
-    opts.domain,
-    { version: opts.version, configHash: opts.configHash },
-    { toolName, bodyText },
-  );
+  // Cache check, for the tools that use the cache at all.
+  const useCache = cachesResults(tool);
+  const cacheKey = useCache
+    ? await makeCacheKey(opts.domain, { version: opts.version, configHash: opts.configHash }, { toolName, bodyText })
+    : null;
   const cache = caches.default;
-  const cached = await cache.match(cacheKey);
+  const cached = cacheKey ? await cache.match(cacheKey) : undefined;
   if (cached) {
     const headers = new Headers(cached.headers);
     headers.set("x-webmcp-cache", "HIT");
@@ -128,28 +131,32 @@ async function execAnswer(
   const ctx: ExecutorContext = {
     allowedOrigins: config.origin.allowed_origins.map((u) => new URL(u).origin),
     deployToken: opts.deployToken,
+    version: opts.version,
     timeoutMs: opts.timeoutMs ?? DEFAULT_TIMEOUT_MS,
   };
 
   const envelope = await runWithDeadline(ctx, tool as ToolConfig, validation.value);
 
   const ttl = tool.cache ?? {};
-  const cc = buildCacheControl({
-    max_age: ttl.max_age ?? config.cache.executor_defaults.max_age,
-    s_maxage: ttl.s_maxage ?? config.cache.executor_defaults.s_maxage,
-    swr: ttl.swr ?? config.cache.executor_defaults.swr,
-    sie: ttl.sie ?? config.cache.executor_defaults.sie,
-  });
+  // A tool that does not use the cache says so to everything downstream as well: no-store.
+  const cc = useCache
+    ? buildCacheControl({
+        max_age: ttl.max_age ?? config.cache.executor_defaults.max_age,
+        s_maxage: ttl.s_maxage ?? config.cache.executor_defaults.s_maxage,
+        swr: ttl.swr ?? config.cache.executor_defaults.swr,
+        sie: ttl.sie ?? config.cache.executor_defaults.sie,
+      })
+    : "no-store";
   const response = jsonResponse(envelope, {
     headers: {
       "cache-control": cc,
-      "x-webmcp-cache": "MISS",
+      "x-webmcp-cache": useCache ? "MISS" : "BYPASS",
     },
   });
 
   // Only cache successful envelopes. Stored without CORS: those headers belong to
   // one caller, and execResponse adds them for each request, hits included.
-  if (envelope.ok) {
+  if (cacheKey && envelope.ok) {
     waitUntil(cache.put(cacheKey, withoutCors(response.clone())));
   }
 

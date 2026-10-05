@@ -38,24 +38,21 @@ export async function runDomExtract(
   let truncated = false;
   const wantSelector = config.selector;
   const stripSelectors = new Set(config.strip);
-  let inMatched = false;
-  let depthInsideMatched = 0;
+  // How many matched elements are open right now. A counter, not a flag: the selector can
+  // match an element inside another match (`main, article` on <main><article>..</article>
+  // more</main>), and the text after the inner one's end tag still belongs to the outer one.
+  let matchedDepth = 0;
+  // How many stripped elements are open right now.
   let suppressDepth = 0;
 
   const rewriter = new HTMLRewriter()
     .on(wantSelector, {
       element(el) {
-        inMatched = true;
-        depthInsideMatched = 1;
-        // Whenever we encounter the matched element, push a small marker.
-        el.onEndTag(() => {
-          depthInsideMatched--;
-          if (depthInsideMatched <= 0) inMatched = false;
-        });
+        if (enter(el, () => matchedDepth--)) matchedDepth++;
       },
       text(chunk) {
         if (truncated) return;
-        if (!inMatched || suppressDepth > 0) return;
+        if (matchedDepth <= 0 || suppressDepth > 0) return;
         const left = config.max_chars - text.length;
         if (left <= 0) {
           truncated = true;
@@ -70,10 +67,7 @@ export async function runDomExtract(
   for (const tag of stripSelectors) {
     rewriter.on(tag, {
       element(el) {
-        suppressDepth++;
-        el.onEndTag(() => {
-          suppressDepth--;
-        });
+        if (enter(el, () => suppressDepth--)) suppressDepth++;
       },
     });
   }
@@ -89,6 +83,22 @@ export async function runDomExtract(
   // Collapse whitespace.
   text = text.replace(/\s+/g, " ").trim();
   return ok({ url: resolved.url.toString(), text, truncated });
+}
+
+/**
+ * Registers `onClose` to run at the element's end tag. Returns false, registering nothing,
+ * for an element that has no end tag: a void element (br, img, input, hr ...) or a
+ * self-closing one. HTMLRewriter refuses onEndTag there ("Parser error: No end tag") and the
+ * element has no content to keep or to strip, so the caller must not count it as open: a
+ * count that nothing ever decrements would hide every text after it.
+ */
+function enter(el: Element, onClose: () => void): boolean {
+  try {
+    el.onEndTag(onClose);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**

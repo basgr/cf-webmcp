@@ -6,6 +6,7 @@ const ctx = {
   allowedOrigins: ["https://example.com"],
   deployToken: "deploy-token-x",
   timeoutMs: 1000,
+  version: "0.0.0-test",
 };
 
 afterEach(() => {
@@ -70,7 +71,23 @@ describe("originFetch", () => {
     expect(seen.headers["cookie"]).toBeUndefined();
     expect(seen.headers["cf-webmcp-bypass"]).toBe("1");
     expect(seen.headers["cf-webmcp-deploy-token"]).toBe("deploy-token-x");
-    expect(seen.headers["user-agent"]).toMatch(/^cf-webmcp\//);
+    expect(seen.headers["user-agent"]).toBe("cf-webmcp/0.0.0-test");
+  });
+
+  it("names the version of the context in the User-Agent, whatever it is, and not a fixed one", async () => {
+    const agents: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init: RequestInit) => {
+        agents.push((init.headers as Record<string, string>)["user-agent"]!);
+        return new Response("ok", { status: 200 });
+      }),
+    );
+    for (const version of ["0.6.0", "0.6.1-rc.1", "12.0.3"]) {
+      await originFetch({ ...ctx, version }, new URL("https://example.com/x"), {});
+    }
+    expect(agents).toEqual(["cf-webmcp/0.6.0", "cf-webmcp/0.6.1-rc.1", "cf-webmcp/12.0.3"]);
+    expect(agents).not.toContain("cf-webmcp/1.0");
   });
 
   it("maps timeout to envelope error", async () => {
@@ -453,7 +470,7 @@ describe("originFetch redirects", () => {
       expect(init.headers["cf-webmcp-bypass"]).toBeUndefined();
       expect(init.headers["cf-webmcp-deploy-token"]).toBeUndefined();
       expect(JSON.stringify(init.headers)).not.toContain("deploy-token-x");
-      expect(init.headers["user-agent"]).toMatch(/^cf-webmcp\//);
+      expect(init.headers["user-agent"]).toBe("cf-webmcp/0.0.0-test");
     }
   });
 

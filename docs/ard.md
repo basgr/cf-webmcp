@@ -200,7 +200,8 @@ v0.91 requires a consumer to fetch `/.well-known/ard.json` and to honour `rel="a
 
 `npm run preflight` probes the canonical path and every alias. In `synthesize` mode a 200 at any of them is a collision, because the Worker answers there instead. In `merge` mode it also probes `/.well-known/ai-catalog.json`, and judges both paths the way the merge does:
 
-- A 200 JSON document is reported as a merge. JSON that fails the structural check is a warning (the Worker relays it unchanged). Text or HTML is a collision.
+- A 200 JSON document of at most 1 MiB is reported as a merge. JSON that fails the structural check is a warning (the Worker relays it unchanged). Text or HTML is a collision.
+- A 200 JSON document over 1 MiB is reported as "too large to merge, relayed unchanged", a warning: the Worker relays it as it came and adds no entry, whatever it holds, so this is judged before the content.
 - A 404 or a redirect is fine.
 - Any other answer (a 4xx, a 5xx) is a warning, not a collision: the Worker serves its generated document there.
 - The merge reads the predecessor path only after a 404 at the canonical path. When origin answers anything but a 404 or a redirect at the canonical path (a valid `ard.json`, say), the predecessor's row says "redirected to /.well-known/ard.json, not merged", with a warning if origin has a document there that the redirect hides.
