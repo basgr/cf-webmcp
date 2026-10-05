@@ -33,6 +33,7 @@ import { buildFrontmatter, buildSkillBody, skillName } from "../src/routes/agent
 import {
   ARD_PATH,
   ARD_PREDECESSOR_PATH,
+  ARD_REL,
   didWeb,
   publisherProblem,
   siteHost,
@@ -207,10 +208,23 @@ export interface InjectionHashInputs {
    * changes the rewritten pages even when the version is not bumped.
    */
   rewriterSha256: string;
+  /**
+   * The values html-rewriter.ts imports from other modules, by name (REWRITER_IMPORTS):
+   * its source hash does not see them, but they are written into the injected tags.
+   */
+  rewriterImports: Record<string, string>;
 }
 
 /** The rewriter source the build hashes into INJECTION_HASH. */
 const REWRITER_SOURCE = path.join(ROOT, "src", "injection", "html-rewriter.ts");
+
+/**
+ * Every value html-rewriter.ts imports from another module (a test keeps this list in
+ * step with its import lines). ARD_REL is the rel of the ARD <link> tag. The other rel
+ * values and media types of the injected tags are literals in html-rewriter.ts itself,
+ * covered by its source hash.
+ */
+export const REWRITER_IMPORTS: Record<string, string> = { ARD_REL };
 
 /**
  * sha256 (64 hex) of a source text with CRLF line endings read as LF, so a Windows
@@ -224,7 +238,8 @@ export function rewriterSourceHash(text: string): string {
  * INJECTION_HASH: the first 16 hex of the sha256 over everything that shapes what the
  * Worker does to a proxied page, so the ETag suffix of rewritten pages moves exactly
  * when the rewritten output can:
- *   - the inputs above (version, script src and integrity, rewriter source);
+ *   - the inputs above (version, script src and integrity, rewriter source and the
+ *     values it imports);
  *   - [features].inject_html and [injection].exclude_paths: whether a page is rewritten;
  *   - [paths].namespace: the script src path;
  *   - the <link> tags as configLinkOptions builds them for the handler: [features].link_tag,
@@ -246,6 +261,7 @@ export function injectionHashOf(config: Config, inputs: InjectionHashInputs): st
       bootstrap_asset: inputs.bootstrapAsset,
       bootstrap_sri: inputs.bootstrapSri,
       rewriter_sha256: inputs.rewriterSha256,
+      rewriter_imports: inputs.rewriterImports,
       inject_html: config.features.inject_html,
       exclude_paths: config.injection.exclude_paths,
       namespace: config.paths.namespace,
@@ -1818,6 +1834,7 @@ export async function buildConfig(opts: BuildOptions): Promise<void> {
       bootstrapAsset: bootstrapName,
       bootstrapSri,
       rewriterSha256: rewriterSourceHash(await fs.readFile(REWRITER_SOURCE, "utf8")),
+      rewriterImports: REWRITER_IMPORTS,
     }),
     version,
   };

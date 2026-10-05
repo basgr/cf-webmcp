@@ -82,7 +82,7 @@ function checkBucket(
   // hammering stays tracked instead of drifting towards eviction.
   if (existing) store.delete(key);
   if (!existing || existing.resetAt <= now) {
-    makeRoom(store, now);
+    makeRoom(store);
     store.set(key, { count: 1, resetAt: now + windowMs });
     return { allowed: true };
   }
@@ -96,31 +96,21 @@ function checkBucket(
 }
 
 /**
- * Before a new bucket goes in.
+ * Before a new bucket goes in. Below capacity nothing happens: admitting a key costs
+ * one Map insert. An expired bucket is not looked for; it is reset when its key comes
+ * back (checkBucket), and the cap bounds the memory such buckets can hold.
  *
  * A full Map drops its EVICT_BATCH least recently used buckets in one pass; their
  * clients start a fresh window if they come back. One pass of 1024 deletes per 1024
- * new keys, instead of a delete per key: walking a Map from its front also steps over
- * the slots earlier deletes left behind until the engine compacts the table, so a walk
- * per key can cost far more than the one entry it removes.
- *
- * Otherwise expired buckets at the least recently used end are dropped, and the walk
- * stops at the first live one. A bucket is deleted at most once, so these deletes add
- * up to no more than the buckets ever created; each call still pays for reaching the
- * first live entry, which is one step unless deletes have left a run of empty slots
- * at the front.
+ * new keys, not a walk per key: walking a Map from its front also steps over the slots
+ * earlier deletes left behind until the engine compacts the table, so a walk on every
+ * insert would pay for those slots again and again.
  */
-function makeRoom(store: Map<string, Bucket>, now: number): void {
-  if (store.size >= MAX_BUCKETS) {
-    let dropped = 0;
-    for (const k of store.keys()) {
-      if (dropped++ >= EVICT_BATCH) break;
-      store.delete(k);
-    }
-    return;
-  }
-  for (const [k, v] of store) {
-    if (v.resetAt > now) return;
+function makeRoom(store: Map<string, Bucket>): void {
+  if (store.size < MAX_BUCKETS) return;
+  let dropped = 0;
+  for (const k of store.keys()) {
+    if (dropped++ >= EVICT_BATCH) break;
     store.delete(k);
   }
 }
@@ -140,12 +130,19 @@ export function _bucketCountsForTests(): { global: number; perTool: number } {
  * The rate-limit key of a request, from the headers Cloudflare sets at its edge.
  * X-Forwarded-For is whatever the client chose to send, so it is never read.
  *
- * CF-Connecting-IPv6 comes first. With Pseudo IPv4 set to "Overwrite headers",
- * Cloudflare puts a made-up Class E IPv4 address, hashed from the client's IPv6
- * address, into CF-Connecting-IP and keeps the real address in CF-Connecting-IPv6
- * (developers.cloudflare.com/network/pseudo-ipv4/). Keying on the pseudo address
- * would give every address of one /64 its own bucket. A missing or malformed
- * CF-Connecting-IPv6 falls back to CF-Connecting-IP.
+ * CF-Connecting-IP decides, and CF-Connecting-IPv6 is read only when CF-Connecting-IP
+ * holds a Class E address (240.0.0.0/4). With Pseudo IPv4 set to "Overwrite headers",
+ * Cloudflare puts a made-up address, hashed from the client's IPv6 address, into
+ * CF-Connecting-IP and keeps the real address in CF-Connecting-IPv6. Cloudflare's page
+ * (developers.cloudflare.com/network/pseudo-ipv4/) says Pseudo IPv4 "uses the Class E
+ * IPv4 address space"; it does not spell out the range, which is RFC 1112 section 4's
+ * (first four bits 1111). No real client connects from it. The page also does not say
+ * that Cloudflare removes a CF-Connecting-IPv6 a client sends on a zone without that
+ * mode, so the header is not trusted next to an ordinary address: otherwise a client
+ * could send a new one with every request and get a fresh bucket each time. Behind
+ * Pseudo IPv4, keying on the pseudo address would give every address of one /64 its own
+ * bucket, so the real one is used; a missing or malformed CF-Connecting-IPv6 there
+ * leaves the pseudo address as the key.
  *
  *   - IPv4: the address itself.
  *   - IPv6: its /64, as "<first four hextets>::/64". A subscriber usually gets a
@@ -155,12 +152,17 @@ export function _bucketCountsForTests(): { global: number; perTool: number } {
  *     (local development without the headers, mostly).
  */
 export function clientIp(request: Request): string {
-  const v6Header = parseIpv6(request.headers.get("cf-connecting-ipv6")?.trim() ?? "");
-  if (v6Header !== null) return ipv6Key(v6Header);
   const raw = request.headers.get("cf-connecting-ip")?.trim() ?? "";
   if (raw === "") return UNKNOWN_CLIENT;
   const v4 = parseIpv4(raw);
-  if (v4 !== null) return v4.join(".");
+  if (v4 !== null) {
+    if (v4[0]! >= 240) {
+      // Class E: a Pseudo IPv4 address. The real client is in CF-Connecting-IPv6.
+      const real = parseIpv6(request.headers.get("cf-connecting-ipv6")?.trim() ?? "");
+      if (real !== null) return ipv6Key(real);
+    }
+    return v4.join(".");
+  }
   const v6 = parseIpv6(raw);
   return v6 === null ? UNKNOWN_CLIENT : ipv6Key(v6);
 }

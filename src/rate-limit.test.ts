@@ -111,6 +111,20 @@ describe("a full bucket map", () => {
     expect(_bucketCountsForTests().global).toBe(RATE_LIMIT_MAX_BUCKETS - RATE_LIMIT_EVICT_BATCH + 1);
   });
 
+  it("admits a new key below capacity without sweeping: an expired bucket stays until its key returns or a batch evicts it", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-01-01T00:00:00Z"));
+    checkGlobalRateLimit("old", 1);
+    vi.setSystemTime(new Date("2026-01-01T00:02:00Z"));
+
+    checkGlobalRateLimit("new", 1);
+
+    expect(_bucketCountsForTests().global).toBe(2);
+    // The expired bucket is reset when its key comes back.
+    expect(checkGlobalRateLimit("old", 1).allowed).toBe(true);
+    expect(_bucketCountsForTests().global).toBe(2);
+  });
+
   it("never holds more buckets than the capacity", () => {
     for (let i = 0; i < RATE_LIMIT_MAX_BUCKETS * 2 + 100; i++) {
       checkGlobalRateLimit(`g-${i}`, 5);
@@ -189,24 +203,37 @@ describe("clientIp", () => {
     expect(clientIp(withHeaders({ "cf-connecting-ip": "::FFFF:0102:0304" }))).toBe("1.2.3.4");
   });
 
-  describe("Pseudo IPv4 (CF-Connecting-IP holds a made-up IPv4, CF-Connecting-IPv6 the real address)", () => {
-    it("prefers CF-Connecting-IPv6 when both are present, keyed by /64", () => {
-      const req = withHeaders({ "cf-connecting-ip": "240.12.34.56", "cf-connecting-ipv6": "2001:db8:1:2:3:4:5:6" });
-      expect(clientIp(req)).toBe("2001:db8:1:2::/64");
+  describe("Pseudo IPv4 (CF-Connecting-IP holds a Class E address, CF-Connecting-IPv6 the real one)", () => {
+    it.each(["240.12.34.56", "240.16.0.1", "255.255.255.254"])(
+      "keys by the CF-Connecting-IPv6 /64 when CF-Connecting-IP is the Class E address %s",
+      (pseudo) => {
+        const req = withHeaders({ "cf-connecting-ip": pseudo, "cf-connecting-ipv6": "2001:db8:1:2:3:4:5:6" });
+        expect(clientIp(req)).toBe("2001:db8:1:2::/64");
+      },
+    );
+
+    it.each(["203.0.113.7", "239.255.255.255", "10.0.0.1"])(
+      "ignores a CF-Connecting-IPv6 the client may have forged when CF-Connecting-IP is %s, not Class E",
+      (real) => {
+        const req = withHeaders({ "cf-connecting-ip": real, "cf-connecting-ipv6": "2001:db8:dead:beef::1" });
+        expect(clientIp(req)).toBe(real);
+      },
+    );
+
+    it("cannot get a fresh bucket per request by rotating a forged CF-Connecting-IPv6", () => {
+      const forged = (n: number) =>
+        clientIp(withHeaders({ "cf-connecting-ip": "203.0.113.7", "cf-connecting-ipv6": `2001:db8:${n.toString(16)}::1` }));
+      expect(new Set([forged(1), forged(2), forged(3)])).toEqual(new Set(["203.0.113.7"]));
     });
 
-    it("uses CF-Connecting-IPv6 alone", () => {
-      expect(clientIp(withHeaders({ "cf-connecting-ipv6": "2001:db8:1:2::9" }))).toBe("2001:db8:1:2::/64");
-    });
-
-    it("uses CF-Connecting-IP when only it is present", () => {
-      expect(clientIp(withHeaders({ "cf-connecting-ip": "203.0.113.7" }))).toBe("203.0.113.7");
+    it("ignores CF-Connecting-IPv6 without CF-Connecting-IP", () => {
+      expect(clientIp(withHeaders({ "cf-connecting-ipv6": "2001:db8:1:2::9" }))).toBe("unknown");
     });
 
     it.each(["not-an-ip", "203.0.113.7", "2001:db8:::1", ""])(
-      "falls back to CF-Connecting-IP when CF-Connecting-IPv6 is %j",
+      "keys by the Class E address when CF-Connecting-IPv6 is %j",
       (v6) => {
-        expect(clientIp(withHeaders({ "cf-connecting-ip": "203.0.113.7", "cf-connecting-ipv6": v6 }))).toBe("203.0.113.7");
+        expect(clientIp(withHeaders({ "cf-connecting-ip": "240.16.0.1", "cf-connecting-ipv6": v6 }))).toBe("240.16.0.1");
       },
     );
   });

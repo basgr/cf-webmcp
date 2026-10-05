@@ -10,8 +10,10 @@ import {
   CLOUDFLARE_WEBMCP_LABS_TOOL_NAMES,
   defaultAnnotationsFor,
   injectionHashOf,
+  REWRITER_IMPORTS,
   rewriterSourceHash,
 } from "./build-config";
+import { ARD_REL } from "../src/ard";
 import { ConfigSchema } from "../src/config-types";
 import { buildFrontmatter } from "../src/routes/agent-skills";
 import { agentSkillsIndexResponse } from "../src/routes/agent-skills-index";
@@ -964,6 +966,7 @@ describe("INJECTION_HASH", () => {
     bootstrapAsset: "bootstrap.0123456789abcdef.js",
     bootstrapSri: null,
     rewriterSha256: "0".repeat(64),
+    rewriterImports: { ARD_REL: "ard" },
   };
   const hashFor = (toml: string) => injectionHashOf(ConfigSchema.parse(TOML.parse(toml)), FIXED);
   const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -988,8 +991,20 @@ describe("INJECTION_HASH", () => {
         bootstrapSri: exportedConst(config, "BOOTSTRAP_SRI") as string | null,
         // Line endings normalised: a CRLF checkout must hash like an LF one.
         rewriterSha256: sha256(rewriter.replace(/\r\n/g, "\n")),
+        rewriterImports: { ARD_REL },
       }),
     );
+  });
+
+  it("covers every value html-rewriter.ts imports from another module", async () => {
+    const source = await fs.readFile(path.join(repoRoot, "src", "injection", "html-rewriter.ts"), "utf8");
+    // Value imports only: `import type` brings nothing into the injected HTML.
+    const imported = [...source.matchAll(/^import\s+(?!type\b)\{([^}]*)\}\s+from\s+"[^"]+";/gm)]
+      .flatMap((m) => m[1]!.split(","))
+      .map((name) => name.trim())
+      .filter((name) => name !== "");
+    expect(imported.sort()).toEqual(Object.keys(REWRITER_IMPORTS).sort());
+    expect(REWRITER_IMPORTS).toEqual({ ARD_REL });
   });
 
   it("hashes the rewriter source the same with CRLF and LF line endings", () => {
@@ -1015,6 +1030,7 @@ describe("INJECTION_HASH", () => {
     ["the bootstrap file name", { bootstrapAsset: "bootstrap.fedcba9876543210.js" }],
     ["the bootstrap integrity", { bootstrapSri: `sha384-${"A".repeat(64)}` }],
     ["the rewriter source (a code change without a version bump)", { rewriterSha256: "1".repeat(64) }],
+    ["a value the rewriter imports (ARD_REL, the rel of the ARD <link> tag)", { rewriterImports: { ARD_REL: "ai-catalog" } }],
   ])("changes with %s", (_label, change) => {
     const config = ConfigSchema.parse(TOML.parse(MINIMAL));
     expect(injectionHashOf(config, { ...FIXED, ...change })).not.toBe(injectionHashOf(config, FIXED));
