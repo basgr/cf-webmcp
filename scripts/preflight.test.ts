@@ -470,6 +470,130 @@ describe("preflight: GET probes for a directory-form landing path", () => {
   });
 });
 
+describe("preflight: the ARD manifest (ard.json) and its aliases", () => {
+  const ARD = "https://example.com/.well-known/ard.json";
+  const PREDECESSOR = "https://example.com/.well-known/ai-catalog.json";
+  const ON = `${MINIMAL}\n[features]\nai_catalog = true\n`;
+  const withMode = (mode: string, extra = "") => `${ON}\n[ai_catalog]\nmode = "${mode}"\n${extra}`;
+  const getUrls = (calls: FetchCall[]) => calls.filter((c) => c.init.method === "GET").map((c) => c.url);
+  const json = (body: unknown, ct = "application/json") => () =>
+    new Response(JSON.stringify(body), { status: 200, headers: { "content-type": ct } });
+  const html = () => new Response("<html></html>", { status: 200, headers: { "content-type": "text/html" } });
+  const text = () => new Response("hello", { status: 200, headers: { "content-type": "text/plain" } });
+  const VALID = { entries: [{ identifier: "urn:air:example.com:agent:x", displayName: "X", type: "application/a2a-agent-card+json", url: "https://example.com/x.json" }] };
+
+  /** GET answers keyed by URL; everything else 404, POST included. */
+  function stubGets(answers: Record<string, () => Response>) {
+    const calls: FetchCall[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string | URL, init: RequestInit = {}) => {
+        calls.push({ url: String(input), init });
+        const answer = init.method === "GET" ? answers[String(input)] : undefined;
+        return answer ? answer() : new Response("not found", { status: 404 });
+      }),
+    );
+    return calls;
+  }
+
+  it("probes neither path when the feature is off or in passthrough", async () => {
+    const off = stubGets({});
+    await run(MINIMAL);
+    expect(getUrls(off)).not.toContain(ARD);
+    expect(getUrls(off)).not.toContain(PREDECESSOR);
+
+    vi.unstubAllGlobals();
+    const pt = stubGets({});
+    await run(withMode("passthrough"));
+    expect(getUrls(pt)).not.toContain(ARD);
+    expect(getUrls(pt)).not.toContain(PREDECESSOR);
+  });
+
+  it("probes the canonical path and the predecessor alias", async () => {
+    const calls = stubGets({});
+    const { code, result } = await run(ON);
+    expect(getUrls(calls)).toContain(ARD);
+    expect(getUrls(calls)).toContain(PREDECESSOR);
+    expect(code).toBe(0);
+    expect(result.collisions).toEqual([]);
+  });
+
+  it("synthesize: a 200 at the canonical path or at the alias is a COLLISION (the Worker shadows it)", async () => {
+    stubGets({ [ARD]: json(VALID), [PREDECESSOR]: json(VALID) });
+    const { code, result } = await run(ON);
+    expect(code).toBe(1);
+    expect(result.collisions).toEqual([
+      "/.well-known/ard.json: origin already serves content here",
+      "/.well-known/ai-catalog.json: origin already serves content here",
+    ]);
+  });
+
+  it("merge: a 200 JSON ARD document at the canonical path is reported as a merge, not a collision", async () => {
+    stubGets({ [ARD]: json(VALID) });
+    const { code, result, lines } = await run(withMode("merge"));
+    expect(code).toBe(0);
+    expect(result.collisions).toEqual([]);
+    expect(result.warnings.filter((w) => w.includes("ard.json"))).toEqual([]);
+    expect(lines.find((l) => l.includes("/.well-known/ard.json"))).toMatch(/merge/);
+  });
+
+  it("merge: a 200 JSON document at the predecessor path is a merge too, in either JSON type", async () => {
+    for (const ct of ["application/json", "application/ai-catalog+json"]) {
+      vi.unstubAllGlobals();
+      stubGets({ [PREDECESSOR]: json(VALID, ct) });
+      const { code, result, lines } = await run(withMode("merge"));
+      expect(code, ct).toBe(0);
+      expect(result.collisions).toEqual([]);
+      expect(lines.find((l) => l.includes("/.well-known/ai-catalog.json"))).toMatch(/merge/);
+    }
+  });
+
+  it("merge: HTML or text at either path is a COLLISION", async () => {
+    stubGets({ [ARD]: html, [PREDECESSOR]: text });
+    const { code, result } = await run(withMode("merge"));
+    expect(code).toBe(1);
+    expect(result.collisions).toHaveLength(2);
+    expect(result.collisions[0]).toMatch(/^\/\.well-known\/ard\.json: .*text\/html/);
+    expect(result.collisions[1]).toMatch(/^\/\.well-known\/ai-catalog\.json: .*text\/plain/);
+  });
+
+  it("merge: a body declared as JSON that does not parse is a COLLISION", async () => {
+    stubGets({ [ARD]: () => new Response("<html>", { status: 200, headers: { "content-type": "application/json" } }) });
+    const { code, result } = await run(withMode("merge"));
+    expect(code).toBe(1);
+    expect(result.collisions).toEqual(["/.well-known/ard.json: origin answers 200 application/json but the body is not JSON"]);
+  });
+
+  it("merge: JSON that is not an ARD v0.91 document is not a collision, but warns that it is relayed unchanged", async () => {
+    stubGets({ [ARD]: json({ specVersion: "1.0", entries: [{ displayName: "no identifier" }] }) });
+    const { code, result } = await run(withMode("merge"));
+    expect(code).toBe(0);
+    expect(result.collisions).toEqual([]);
+    expect(result.warnings.filter((w) => w.startsWith("/.well-known/ard.json"))).toEqual([
+      "/.well-known/ard.json: origin's JSON is not an ARD manifest (an object with an entries array of objects with a string identifier); the Worker relays it unchanged and adds no entry",
+    ]);
+  });
+
+  it("merge: probes the predecessor path even when aliases is empty, because the merge reads it", async () => {
+    const calls = stubGets({});
+    await run(withMode("merge", "aliases = []\n"));
+    expect(getUrls(calls)).toContain(PREDECESSOR);
+  });
+
+  it("merge: a custom alias is a claim, so a 200 there is a COLLISION", async () => {
+    stubGets({ "https://example.com/.well-known/ard": json(VALID) });
+    const { result } = await run(withMode("merge", 'aliases = ["/.well-known/ai-catalog.json", "/.well-known/ard"]\n'));
+    expect(result.collisions).toEqual(["/.well-known/ard: origin already serves content here"]);
+  });
+
+  it("probes an alias equal to the canonical path once", async () => {
+    const calls = stubGets({});
+    await run(withMode("synthesize", 'aliases = ["/.well-known/ard.json"]\n'));
+    expect(getUrls(calls).filter((u) => u === ARD)).toHaveLength(1);
+    expect(getUrls(calls)).not.toContain(PREDECESSOR);
+  });
+});
+
 describe("preflight: --origin overrides where the probes go, and nothing else", () => {
   const OVERRIDE = "https://origin.internal.example";
   const hostsOf = (calls: FetchCall[]) => [...new Set(calls.map((c) => new URL(c.url).host))];

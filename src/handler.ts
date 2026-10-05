@@ -24,7 +24,7 @@ import { llmsTxtResponse, type LlmsTxtTokenHints } from "./routes/llms-txt";
 import { robotsTxtResponse } from "./routes/robots-txt";
 import { agentsMdResponse, agentsMdRedirect } from "./routes/agents-md";
 import { apiCatalogResponse } from "./routes/api-catalog";
-import { aiCatalogResponse } from "./routes/ai-catalog";
+import { aiCatalogResponse, ardRedirect } from "./routes/ai-catalog";
 import { agentSkillsResponse, agentSkillsRedirect } from "./routes/agent-skills";
 import { agentSkillsIndexResponse } from "./routes/agent-skills-index";
 import { buildLinkHeader, mergeLinkHeader } from "./link-header";
@@ -147,6 +147,8 @@ export function createHandler(deps: HandlerDeps): Required<Pick<ExportedHandler<
           return apiCatalogResponse(request, config, (u) => proxyToOrigin(u, env));
         case "ards_catalog":
           return aiCatalogResponse(request, config, assets.aiCatalogJson, (u) => proxyToOrigin(u, env));
+        case "ards_catalog_redirect":
+          return ardRedirect(config);
         case "agent_skills":
           return agentSkillsResponse(request, config, (u) => proxyToOrigin(u, env));
         case "agent_skills_redirect":

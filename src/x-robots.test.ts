@@ -41,7 +41,7 @@ import { agentsMdResponse, agentsMdRedirect } from "./routes/agents-md";
 import { apiCatalogResponse } from "./routes/api-catalog";
 import { agentSkillsResponse, agentSkillsRedirect } from "./routes/agent-skills";
 import { agentSkillsIndexResponse } from "./routes/agent-skills-index";
-import { aiCatalogResponse } from "./routes/ai-catalog";
+import { aiCatalogResponse, ardRedirect } from "./routes/ai-catalog";
 
 const PROTECTED_PREFIXES = ["/_webmcp/", "/.well-known/"] as const;
 
@@ -74,7 +74,8 @@ const CLASSIFICATION: Record<RouteMatch["kind"], Classification> = {
   agent_skills: "noindex_required",             // /.well-known/agent-skills/<slug>/SKILL.md
   agent_skills_redirect: "noindex_required",    // aliases under /.well-known/agent-skills/
   agent_skills_index: "noindex_required",       // /.well-known/agent-skills/index.json
-  ards_catalog: "noindex_required",             // /.well-known/ai-catalog.json
+  ards_catalog: "noindex_required",             // /.well-known/ard.json
+  ards_catalog_redirect: "noindex_required",    // alias /.well-known/ai-catalog.json (301) under a protected prefix
   proxy: "exempt",                              // origin content; cf-webmcp does not own the response
 };
 
@@ -101,6 +102,7 @@ function samplePath(kind: RouteMatch["kind"], config: Config): string {
     case "agent_skills_redirect": return config.agent_skills.aliases[0] ?? "/.well-known/agent-skills/site/SKILLS.md";
     case "agent_skills_index": return config.agent_skills_index.path;
     case "ards_catalog": return config.ai_catalog.path;
+    case "ards_catalog_redirect": return config.ai_catalog.aliases[0] ?? "/.well-known/ai-catalog.json";
     case "proxy": return "/";
   }
 }
@@ -133,7 +135,7 @@ function makeConfig(): Config {
       hints: [],
     },
     agent_skills_index: { path: "/.well-known/agent-skills/index.json", mode: "synthesize" },
-    ai_catalog: { path: "/.well-known/ai-catalog.json", mode: "synthesize", host_identifier: "", representative_queries: [], tags: [] },
+    ai_catalog: { path: "/.well-known/ard.json", aliases: ["/.well-known/ai-catalog.json"], mode: "synthesize", host_identifier: "", representative_queries: [], tags: [] },
     origin_trial: { tokens: [] },
     paths: { namespace: "/_webmcp" },
     injection: { exclude_paths: [] },
@@ -247,9 +249,11 @@ async function responseFor(kind: RouteMatch["kind"], config: Config): Promise<Re
       return aiCatalogResponse(
         new Request("https://example.com" + config.ai_catalog.path),
         config,
-        JSON.stringify({ specVersion: "1.0", host: { displayName: "x", identifier: "did:web:example.com" }, entries: [] }, null, 2) + "\n",
+        JSON.stringify({ host: { displayName: "x", identifier: "did:web:example.com" }, entries: [] }, null, 2) + "\n",
         async (_url: URL) => new Response(null, { status: 404 }),
       );
+    case "ards_catalog_redirect":
+      return ardRedirect(config);
     case "proxy":
       // cf-webmcp does not own the response on the proxy path; the test verifies
       // only that the kind is classified "exempt", so a stub response suffices.
@@ -381,7 +385,11 @@ describe("a path in passthrough mode is origin's, not a route cf-webmcp serves",
       paths: [base.agents_md.path, ...base.agents_md.aliases],
     },
     { name: "api_catalog", config: { ...base, api_catalog: { ...base.api_catalog, mode: "passthrough" } }, paths: [base.api_catalog.path] },
-    { name: "ai_catalog", config: { ...base, ai_catalog: { ...base.ai_catalog, mode: "passthrough" } }, paths: [base.ai_catalog.path] },
+    {
+      name: "ai_catalog",
+      config: { ...base, ai_catalog: { ...base.ai_catalog, mode: "passthrough" } },
+      paths: [base.ai_catalog.path, ...base.ai_catalog.aliases],
+    },
     {
       name: "agent_skills",
       config: { ...base, agent_skills: { ...base.agent_skills, mode: "passthrough" } },

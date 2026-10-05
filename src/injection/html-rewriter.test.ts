@@ -19,7 +19,7 @@ const baseConfig: Config = {
   manifest: { path: "/.well-known/webmcp.json", aliases: ["/.well-known/webmcp"] },
   webmcp_landing: { path: "/mcp/" },
   llms_txt: { path: "/llms.txt", mode: "merge" },
-  robots_txt: { path: "/robots.txt", mode: "merge" }, agents_md: { path: "/.well-known/agents.md", mode: "merge", aliases: ["/AGENTS.md", "/agents.md"] }, api_catalog: { path: "/.well-known/api-catalog", mode: "merge" }, ai_catalog: { path: "/.well-known/ai-catalog.json", mode: "synthesize", host_identifier: "", representative_queries: [], tags: [] }, agent_skills: { path: "/.well-known/agent-skills/site/SKILL.md", mode: "synthesize", name: "", description: "", aliases: ["/.well-known/agent-skills/site/SKILLS.md", "/.well-known/agent-skills/site/skill.md", "/.well-known/agent-skills/site/skills.md"], hints: [] }, agent_skills_index: { path: "/.well-known/agent-skills/index.json", mode: "synthesize" },
+  robots_txt: { path: "/robots.txt", mode: "merge" }, agents_md: { path: "/.well-known/agents.md", mode: "merge", aliases: ["/AGENTS.md", "/agents.md"] }, api_catalog: { path: "/.well-known/api-catalog", mode: "merge" }, ai_catalog: { path: "/.well-known/ard.json", aliases: ["/.well-known/ai-catalog.json"], mode: "synthesize", host_identifier: "", representative_queries: [], tags: [] }, agent_skills: { path: "/.well-known/agent-skills/site/SKILL.md", mode: "synthesize", name: "", description: "", aliases: ["/.well-known/agent-skills/site/SKILLS.md", "/.well-known/agent-skills/site/skill.md", "/.well-known/agent-skills/site/skills.md"], hints: [] }, agent_skills_index: { path: "/.well-known/agent-skills/index.json", mode: "synthesize" },
   origin_trial: { tokens: [] },
   paths: { namespace: "/_webmcp" },
   injection: { exclude_paths: ["/wp-admin/*", "/checkout/*"] },
@@ -184,20 +184,21 @@ describe("injectIntoHtml", () => {
     expect(out).not.toContain('rel="agent-skills"');
   });
 
-  it("adds <link rel=ai-catalog> when aiCatalogUrl set", async () => {
+  it("adds <link rel=ard> (ARD v0.91) when aiCatalogUrl set, and no rel=ai-catalog", async () => {
     const res = new Response("<html><head></head><body>x</body></html>", { status: 200, headers: { "content-type": "text/html" } });
     const out = await injectIntoHtml(res, {
       ...opts,
-      aiCatalogUrl: "https://example.com/.well-known/ai-catalog.json",
+      aiCatalogUrl: "https://example.com/.well-known/ard.json",
     }).text();
     expect(out).toContain('<link rel="webmcp"');
-    expect(out).toContain('<link rel="ai-catalog" href="https://example.com/.well-known/ai-catalog.json">');
+    expect(out).toContain('<link rel="ard" href="https://example.com/.well-known/ard.json">');
+    expect(out).not.toContain('rel="ai-catalog"');
   });
 
-  it("omits the ai-catalog link tag when aiCatalogUrl is undefined", async () => {
+  it("omits the ARD link tag when aiCatalogUrl is undefined", async () => {
     const res = new Response("<html><head></head><body>x</body></html>", { status: 200, headers: { "content-type": "text/html" } });
     const out = await injectIntoHtml(res, opts).text();
-    expect(out).not.toContain('rel="ai-catalog"');
+    expect(out).not.toContain('rel="ard"');
   });
 
   it("adds integrity + crossorigin attributes when bootstrapIntegrity is set", async () => {

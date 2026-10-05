@@ -16,7 +16,7 @@ For each request, the Worker does one of two things:
 |------|------------------|
 | `/.well-known/webmcp` (+ `/.well-known/webmcp.json` 301 alias) | Tool-catalogue manifest, machine-readable JSON |
 | `/.well-known/api-catalog` | RFC 9727 Linkset (RFC 9264) pointing at the manifest |
-| `/.well-known/ai-catalog.json` | ARD publisher catalog (v0.9 draft) listing the site's Agent Skill; default OFF |
+| `/.well-known/ard.json` (+ `/.well-known/ai-catalog.json` 301 alias) | ARD v0.91 manifest listing the site's Agent Skill; default OFF |
 | `/.well-known/agents.md` (+ `/AGENTS.md`, `/agents.md` 301 aliases) | AGENTS.md augmentation block for acting agents |
 | `/.well-known/agent-skills/<slug>/SKILL.md` (+ case-variant 301 aliases) | Anthropic-format Agent Skill, auto-generated from `[[tools]]` plus publisher hints |
 | `/.well-known/agent-skills/index.json` | Cloudflare Agent Skills Discovery RFC v0.2.0 index with build-time SHA-256 digest |
@@ -53,13 +53,13 @@ cf-webmcp publishes the same tool catalogue through multiple complementary surfa
 - `/.well-known/api-catalog` ([RFC 9727](https://www.rfc-editor.org/rfc/rfc9727.html)) Linkset entry pointing at the WebMCP manifest. Also advertised in the `Link` header and as `<link rel="api-catalog">` on every response.
 - `/.well-known/agent-skills/<slug>/SKILL.md` Anthropic-format Agent Skill with auto-generated tool list + publisher-written hints. Also advertised via `rel="agent-skills"` in the `Link` header and as a `<link>` tag.
 - `/.well-known/agent-skills/index.json` ([Cloudflare Agent Skills Discovery RFC](https://github.com/cloudflare/agent-skills-discovery-rfc) v0.2.0) wraps the SKILL.md in a spec-compliant index with a build-time SHA-256 digest for integrity verification. `links.agent_skills_index` field added to the manifest.
-- `/.well-known/ai-catalog.json` ([ARD](https://github.com/ards-project/ard-spec) v0.9 draft) publisher catalog with one entry derived from the Agent Skill. Default OFF (spec not yet stable). Advertised via `robots.txt` Agentmap directive, `rel="ai-catalog"` Link header and link tag, and llms.txt when enabled. Publisher half only: no registry REST API, no signing, no DNS discovery. See [`docs/ai-catalog.md`](docs/ai-catalog.md).
+- `/.well-known/ard.json` ([ARD](https://github.com/ards-project/ard-spec) v0.91 proposal) manifest with one entry derived from the Agent Skill; the predecessor path `/.well-known/ai-catalog.json` 301-redirects to it. Default OFF (spec not yet stable). Advertised via `robots.txt` Agentmap directive, `rel="ard"` Link header and link tag, and llms.txt when enabled. Publisher half only: no registry REST API, no signing, no DNS discovery. See [`docs/ard.md`](docs/ard.md).
 - `/mcp` landing page that branches at runtime between native, pair, and disabled states
 
 Plus five executor types (`sitemap_filter`, `rss_feed`, `dom_extract`, `http_json`, `http_get`) for the imperative tool path, and a `[[forms]]` block for the declarative form path.
 
 > [!NOTE]
-> **Every surface above is opt-in.** Each one maps to a single boolean in your `[features]` block. If you disagree with a convention or do not want to publish it, flip the flag off and the route disappears, the link advertisement drops out, and no fingerprint is left. `llms.txt` is the most widely-debated example: set `llms_txt = false` and cf-webmcp stops claiming the path entirely. Same applies to `agents.md`, `api-catalog`, `agent-skills`, form-attribute injection, and the in-page `<script>` bootstrap. Defaults are "on" because cf-webmcp's value is publishing discovery surfaces; opting out is one TOML edit away. Two flags are off by default and need opting in: `ai_catalog` (ARD is a draft) and `fallback_widget` (the desktop pairing widget needs the widget in R2 and a bridge program on the visitor's computer; see [Known limits of the desktop bridge](docs/deployment.md#known-limits-of-the-desktop-bridge)). See [`docs/scope.md`](docs/scope.md) for what is in and out of scope at the project level.
+> **Every surface above is opt-in.** Each one maps to a single boolean in your `[features]` block. If you disagree with a convention or do not want to publish it, flip the flag off and the route disappears, the link advertisement drops out, and no fingerprint is left. `llms.txt` is the most widely-debated example: set `llms_txt = false` and cf-webmcp stops claiming the path entirely. Same applies to `agents.md`, `api-catalog`, `agent-skills`, form-attribute injection, and the in-page `<script>` bootstrap. Defaults are "on" because cf-webmcp's value is publishing discovery surfaces; opting out is one TOML edit away. Two flags are off by default and need opting in: `ai_catalog` (ARD is a proposal) and `fallback_widget` (the desktop pairing widget needs the widget in R2 and a bridge program on the visitor's computer; see [Known limits of the desktop bridge](docs/deployment.md#known-limits-of-the-desktop-bridge)). See [`docs/scope.md`](docs/scope.md) for what is in and out of scope at the project level.
 
 ## Quick start
 
@@ -105,7 +105,7 @@ Full reference docs live in [`docs/`](docs/):
 - [Form injection](docs/form-injection.md) - the `[[forms]]` block, declarative `toolname` / `tooldescription` / `toolparamdescription` / `toolautosubmit` attribute stamping.
 - [AGENTS.md](docs/agents-md.md) - `/.well-known/agents.md` publication + 301 aliases.
 - [API catalog (RFC 9727)](docs/api-catalog.md) - the `/.well-known/api-catalog` Linkset.
-- [ARD ai-catalog](docs/ai-catalog.md) - the `/.well-known/ai-catalog.json` ARD publisher catalog (default OFF).
+- [ARD manifest](docs/ard.md) - the `/.well-known/ard.json` ARD v0.91 manifest and the 301 from `/.well-known/ai-catalog.json` (default OFF).
 - [Agent Skills](docs/agent-skills.md) - the `/.well-known/agent-skills/<slug>/SKILL.md` publication.
 
 **Operations**

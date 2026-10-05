@@ -258,7 +258,16 @@
           "properties": {
             "path": {
               "$ref": "#/definitions/WebMCPConfig/properties/manifest/properties/path",
-              "default": "/.well-known/ai-catalog.json"
+              "default": "/.well-known/ard.json"
+            },
+            "aliases": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/WebMCPConfig/properties/manifest/properties/path"
+              },
+              "default": [
+                "/.well-known/ai-catalog.json"
+              ]
             },
             "mode": {
               "type": "string",
@@ -313,6 +322,7 @@
             },
             "name": {
               "type": "string",
+              "pattern": "^(?:[a-z0-9]+(?:-[a-z0-9]+)*)?$",
               "default": ""
             },
             "description": {

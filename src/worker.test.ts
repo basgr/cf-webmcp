@@ -594,10 +594,10 @@ describe("proxyToOrigin redirects (llms.txt, robots.txt, agents.md and the other
       expectNoToken(res, body);
     });
 
-    it("ai-catalog in merge mode keeps serving its synthesized document (200), after one request", async () => {
+    it("the ARD manifest in merge mode keeps serving its synthesized document (200), after one request", async () => {
       const fetchMock = stubOrigin({
-        "https://example.com/.well-known/ai-catalog.json": () =>
-          redirectTo(301, "https://www.example.com/.well-known/ai-catalog.json"),
+        "https://example.com/.well-known/ard.json": () =>
+          redirectTo(301, "https://www.example.com/.well-known/ard.json"),
       });
       const handler = createHandler(
         makeDeps(
@@ -606,12 +606,13 @@ describe("proxyToOrigin redirects (llms.txt, robots.txt, agents.md and the other
         ),
       );
 
-      const res = await call(handler, "https://example.com/.well-known/ai-catalog.json", undefined, tokenEnv);
+      const res = await call(handler, "https://example.com/.well-known/ard.json", undefined, tokenEnv);
 
       expect(res.status).toBe(200);
       expect(await res.text()).toBe('{"synthesized":true}');
-      expect(res.headers.get("content-type")).toBe("application/ai-catalog+json");
-      expect(urlsOf(fetchMock)).toEqual(["https://example.com/.well-known/ai-catalog.json"]);
+      expect(res.headers.get("content-type")).toBe("application/json; charset=utf-8");
+      // A redirect is not a 404: the predecessor path is not consulted.
+      expect(urlsOf(fetchMock)).toEqual(["https://example.com/.well-known/ard.json"]);
     });
 
     it.each([301, 302, 303, 307, 308])("relays the redirect status as it came (%i)", async (status) => {
@@ -1390,7 +1391,7 @@ describe("llms.txt and robots.txt configured under a protected prefix", () => {
 
 describe("the /.well-known/ merge routes keep noindex on every relay and failure", () => {
   // proxyToOrigin's own relays and failures carry noindex, and each of these routes passes an answer it
-  // cannot merge on. The ai-catalog never relays a redirect or an error: it answers with its generated document.
+  // cannot merge on. The ARD manifest never relays a redirect or an error: it answers with its generated document.
   const tokenEnv: Env = { ...env, CF_WEBMCP_DEPLOY_TOKEN: "deploy-token-x" };
   const GENERATED = '{"generated":true}';
   const routes: Array<{ name: string; path: string; override: ConfigOverrides; generated: boolean }> = [
@@ -1402,8 +1403,8 @@ describe("the /.well-known/ merge routes keep noindex on every relay and failure
       generated: false,
     },
     {
-      name: "ai-catalog (merge)",
-      path: "/.well-known/ai-catalog.json",
+      name: "ARD manifest (merge)",
+      path: "/.well-known/ard.json",
       override: { features: { ai_catalog: true }, ai_catalog: { mode: "merge" } },
       generated: true,
     },
@@ -1418,12 +1419,12 @@ describe("the /.well-known/ merge routes keep noindex on every relay and failure
     vi.useRealTimers();
   });
 
-  /** What each route answers: its own status for a relayed or failed answer, the generated document for the ai-catalog. */
+  /** What each route answers: its own status for a relayed or failed answer, the generated document for the ARD manifest. */
   async function expectAnswer(res: Response, route: { generated: boolean }, status: number) {
     expect(res.headers.get("x-robots-tag")).toBe("noindex");
     if (route.generated) {
       expect(res.status).toBe(200);
-      expect(res.headers.get("content-type")).toBe("application/ai-catalog+json");
+      expect(res.headers.get("content-type")).toBe("application/json; charset=utf-8");
       expect(await res.text()).toBe(GENERATED);
     } else {
       expect(res.status).toBe(status);
@@ -1494,8 +1495,8 @@ describe("the /.well-known/ merge routes keep noindex on every relay and failure
     });
   });
 
-  it("ai-catalog (merge) relays a 200 that is not JSON, with noindex", async () => {
-    const origin = "https://example.com/.well-known/ai-catalog.json";
+  it("the ARD manifest (merge) relays a 200 that is not JSON, with noindex", async () => {
+    const origin = "https://example.com/.well-known/ard.json";
     stubOrigin({ [origin]: () => new Response("<html></html>", { status: 200, headers: { "content-type": "text/html" } }) });
     const res = await call(
       handlerFor({ features: { ai_catalog: true }, ai_catalog: { mode: "merge" } }),
@@ -1508,6 +1509,97 @@ describe("the /.well-known/ merge routes keep noindex on every relay and failure
     expect(res.headers.get("content-type")).toBe("text/html");
     expect(await res.text()).toBe("<html></html>");
     expect(res.headers.get("x-robots-tag")).toBe("noindex");
+  });
+});
+
+describe("ARD v0.91: /.well-known/ard.json, the 301 from ai-catalog.json and rel=ard", () => {
+  const ARD = "https://example.com/.well-known/ard.json";
+  const PREDECESSOR = "https://example.com/.well-known/ai-catalog.json";
+  const GENERATED = JSON.stringify({
+    host: { displayName: "Example", identifier: "did:web:example.com" },
+    entries: [{ identifier: "urn:air:example.com:skill:example", displayName: "Example", type: "application/ai-skill+md", url: "https://example.com/.well-known/agent-skills/site/SKILL.md" }],
+  });
+  const OTHER = { identifier: "urn:air:example.com:agent:other", displayName: "Other", type: "application/a2a-agent-card+json", url: "https://example.com/a.json" };
+  const handlerFor = (override: ConfigOverrides) => createHandler(makeDeps(override, { assets: { aiCatalogJson: GENERATED } }));
+  const jsonDoc = (doc: unknown, ct = "application/json") =>
+    new Response(JSON.stringify(doc), { status: 200, headers: { "content-type": ct } });
+  const urlsOf = (mock: ReturnType<typeof stubOrigin>): string[] =>
+    mock.mock.calls.map((c) => (typeof c[0] === "string" ? c[0] : String(c[0])));
+
+  it.each(["synthesize", "merge"] as const)("301s /.well-known/ai-catalog.json to /.well-known/ard.json with noindex (%s)", async (mode) => {
+    const fetchMock = stubOrigin({});
+    const res = await call(handlerFor({ features: { ai_catalog: true }, ai_catalog: { mode } }), PREDECESSOR);
+
+    expect(res.status).toBe(301);
+    expect(res.headers.get("location")).toBe("/.well-known/ard.json");
+    expect(res.headers.get("x-robots-tag")).toBe("noindex");
+    expect(await res.text()).toBe("");
+    // Claimed, not proxied: origin is not asked, even in merge mode.
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("serves ard.json without specVersion, as application/json with CORS and noindex", async () => {
+    stubOrigin({});
+    const res = await call(handlerFor({ features: { ai_catalog: true } }), ARD);
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toBe("application/json; charset=utf-8");
+    expect(res.headers.get("access-control-allow-origin")).toBe("*");
+    expect(res.headers.get("x-robots-tag")).toBe("noindex");
+    const doc = JSON.parse(await res.text());
+    expect(doc).not.toHaveProperty("specVersion");
+    expect(Object.keys(doc).sort()).toEqual(["entries", "host"]);
+  });
+
+  it("leaves both paths to origin when the feature is off", async () => {
+    stubOrigin({ [PREDECESSOR]: () => jsonDoc({ entries: [] }), [ARD]: () => jsonDoc({ entries: [OTHER] }) });
+    const handler = handlerFor({});
+    expect((await call(handler, PREDECESSOR)).status).toBe(200);
+    const res = await call(handler, ARD);
+    expect(JSON.parse(await res.text()).entries).toEqual([OTHER]);
+    expect(res.headers.get("x-robots-tag")).toBeNull();
+  });
+
+  it("advertises rel=\"ard\" at the canonical URL in the Link header and the <link> tag, and no rel=\"ai-catalog\"", async () => {
+    stubOrigin({ "https://example.com/page": () => htmlResponse() });
+    const res = await call(handlerFor({ features: { ai_catalog: true } }), "https://example.com/page");
+
+    const link = res.headers.get("link") ?? "";
+    expect(link).toContain('<https://example.com/.well-known/ard.json>; rel="ard"');
+    expect(link).not.toContain('rel="ai-catalog"');
+    expect(link).not.toContain("ai-catalog.json");
+    const body = await res.text();
+    expect(body).toContain('<link rel="ard" href="https://example.com/.well-known/ard.json">');
+    expect(body).not.toContain('rel="ai-catalog"');
+  });
+
+  it("merge: falls back to origin's predecessor path on a 404 and merges that document", async () => {
+    const fetchMock = stubOrigin({
+      [ARD]: () => new Response("not found", { status: 404 }),
+      [PREDECESSOR]: () => jsonDoc({ host: { displayName: "Origin" }, entries: [OTHER] }, "application/ai-catalog+json"),
+    });
+    const res = await call(handlerFor({ features: { ai_catalog: true }, ai_catalog: { mode: "merge" } }), ARD);
+
+    expect(urlsOf(fetchMock)).toEqual([ARD, PREDECESSOR]);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toBe("application/json; charset=utf-8");
+    const doc = JSON.parse(await res.text());
+    expect(doc.host).toEqual({ displayName: "Origin" });
+    expect(doc.entries.map((e: { identifier: string }) => e.identifier)).toEqual([
+      OTHER.identifier,
+      "urn:air:example.com:skill:example",
+    ]);
+  });
+
+  it("merge: relays an origin document that fails v0.91 validation unchanged, with noindex", async () => {
+    const invalid = JSON.stringify({ specVersion: "1.0", entries: [{ displayName: "no identifier" }] });
+    stubOrigin({ [ARD]: () => new Response(invalid, { status: 200, headers: { "content-type": "application/json" } }) });
+    const res = await call(handlerFor({ features: { ai_catalog: true }, ai_catalog: { mode: "merge" } }), ARD);
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toBe("application/json");
+    expect(res.headers.get("x-robots-tag")).toBe("noindex");
+    expect(await res.text()).toBe(invalid);
   });
 });
 

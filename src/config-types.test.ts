@@ -225,10 +225,11 @@ describe("dom_extract selector and strip", () => {
 });
 
 describe("ai_catalog config", () => {
-  it("defaults: feature off, canonical path, synthesize mode, empty optionals", () => {
+  it("defaults: feature off, ARD v0.91 canonical path, predecessor path as a 301 alias, synthesize mode, empty optionals", () => {
     const c = ConfigSchema.parse(minimal);
     expect(c.features.ai_catalog).toBe(false);
-    expect(c.ai_catalog.path).toBe("/.well-known/ai-catalog.json");
+    expect(c.ai_catalog.path).toBe("/.well-known/ard.json");
+    expect(c.ai_catalog.aliases).toEqual(["/.well-known/ai-catalog.json"]);
     expect(c.ai_catalog.mode).toBe("synthesize");
     expect(c.ai_catalog.host_identifier).toBe("");
     expect(c.ai_catalog.representative_queries).toEqual([]);
@@ -249,6 +250,38 @@ describe("ai_catalog config", () => {
       ConfigSchema.parse({ ...minimal, ai_catalog: { representative_queries: ["1", "2", "3", "4", "5", "6"] } }),
     ).toThrow();
   });
+
+  it("accepts an empty aliases list (no redirect)", () => {
+    expect(ConfigSchema.parse({ ...minimal, ai_catalog: { aliases: [] } }).ai_catalog.aliases).toEqual([]);
+  });
+});
+
+describe("agent_skills.name", () => {
+  const withName = (name: string) => ({ ...minimal, agent_skills: { name } });
+
+  it("may be empty (derived from [site].name)", () => {
+    expect(ConfigSchema.parse(minimal).agent_skills.name).toBe("");
+    expect(ConfigSchema.safeParse(withName("")).success).toBe(true);
+  });
+
+  it.each(["site", "example-site", "a1", "my-2nd-shop", "x"])("accepts the skill name %s", (name) => {
+    expect(ConfigSchema.parse(withName(name)).agent_skills.name).toBe(name);
+  });
+
+  it.each([
+    ["uppercase", "Example"],
+    ["a space", "example site"],
+    ["a leading hyphen", "-site"],
+    ["a trailing hyphen", "site-"],
+    ["a double hyphen", "my--site"],
+    ["an underscore", "my_site"],
+    ["a non-ASCII letter", "café"],
+    ["a dot", "site.v2"],
+  ])("rejects a name with %s", (_label, name) => {
+    const r = ConfigSchema.safeParse(withName(name));
+    expect(r.success).toBe(false);
+    if (!r.success) expect(r.error.issues[0]!.path).toEqual(["agent_skills", "name"]);
+  });
 });
 
 describe("path validation (PathString)", () => {
@@ -264,6 +297,7 @@ describe("path validation (PathString)", () => {
     { name: "agents_md.aliases", withPath: (p) => ({ agents_md: { aliases: [p] } }) },
     { name: "api_catalog.path", withPath: (p) => ({ api_catalog: { path: p } }) },
     { name: "ai_catalog.path", withPath: (p) => ({ ai_catalog: { path: p } }) },
+    { name: "ai_catalog.aliases", withPath: (p) => ({ ai_catalog: { aliases: [p] } }) },
     { name: "agent_skills.path", withPath: (p) => ({ agent_skills: { path: p } }) },
     { name: "agent_skills.aliases", withPath: (p) => ({ agent_skills: { aliases: [p] } }) },
     { name: "agent_skills_index.path", withPath: (p) => ({ agent_skills_index: { path: p } }) },
@@ -314,6 +348,7 @@ describe("path validation (PathString)", () => {
       ...c.agents_md.aliases,
       c.api_catalog.path,
       c.ai_catalog.path,
+      ...c.ai_catalog.aliases,
       c.agent_skills.path,
       ...c.agent_skills.aliases,
       c.agent_skills_index.path,

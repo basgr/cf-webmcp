@@ -17,6 +17,7 @@
  */
 
 import type { Config } from "./config-types";
+import { ARD_REL } from "./ard";
 
 export function buildLinkHeader(config: Config): string {
   const base = config.site.public_url ?? `https://${config.site.domain}`;
@@ -29,8 +30,10 @@ export function buildLinkHeader(config: Config): string {
     );
   }
   if (config.features.ai_catalog && config.ai_catalog.mode !== "passthrough") {
+    // ARD v0.91 section 5.1: consumers MUST honour rel="ard". The predecessor
+    // rel="ai-catalog" is not emitted; publishers are told to move off it.
     entries.push(
-      `<${base}${config.ai_catalog.path}>; rel="ai-catalog"; title="AI agent catalog (ARD)"`,
+      `<${base}${config.ai_catalog.path}>; rel="${ARD_REL}"; title="AI agent catalog (ARD)"`,
     );
   }
   if (config.features.agent_skills && config.agent_skills.mode !== "passthrough") {

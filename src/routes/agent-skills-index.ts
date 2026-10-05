@@ -27,7 +27,7 @@
 
 import type { Config } from "../config-types";
 import { buildCacheControl } from "../cache";
-import { slugify } from "./agent-skills";
+import { skillName } from "./agent-skills";
 
 export const AGENT_SKILLS_INDEX_SCHEMA_URI =
   "https://schemas.agentskills.io/discovery/0.2.0/schema.json";
@@ -78,7 +78,8 @@ export function agentSkillsIndexResponse(
     );
   }
 
-  const skillName = slugify(config.agent_skills.name || config.site.name);
+  // The same name as the SKILL.md frontmatter and the ARD entry.
+  const name = skillName(config);
   const description =
     config.agent_skills.description ||
     config.site.description ||
@@ -88,7 +89,7 @@ export function agentSkillsIndexResponse(
     $schema: AGENT_SKILLS_INDEX_SCHEMA_URI,
     skills: [
       {
-        name: skillName,
+        name,
         type: "skill-md",
         description,
         url: config.agent_skills.path,

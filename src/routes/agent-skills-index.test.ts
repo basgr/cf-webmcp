@@ -29,7 +29,7 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     robots_txt: { path: "/robots.txt", mode: "merge" },
     agents_md: { path: "/.well-known/agents.md", mode: "merge", aliases: ["/AGENTS.md", "/agents.md"] },
     api_catalog: { path: "/.well-known/api-catalog", mode: "merge" },
-    ai_catalog: { path: "/.well-known/ai-catalog.json", mode: "synthesize", host_identifier: "", representative_queries: [], tags: [] },
+    ai_catalog: { path: "/.well-known/ard.json", aliases: ["/.well-known/ai-catalog.json"], mode: "synthesize", host_identifier: "", representative_queries: [], tags: [] },
     agent_skills: {
       path: "/.well-known/agent-skills/site/SKILL.md",
       mode: "synthesize",
@@ -144,12 +144,19 @@ describe("agentSkillsIndexResponse", () => {
     expect(res.headers.get("x-robots-tag")).toBe("noindex");
   });
 
-  it("respects an explicit agent_skills.name override for the skill entry name", async () => {
+  it("uses an explicit agent_skills.name verbatim, the same value as the SKILL.md frontmatter", async () => {
     const config = makeConfig({
-      agent_skills: { ...makeConfig().agent_skills, name: "Custom Name With Spaces" },
+      agent_skills: { ...makeConfig().agent_skills, name: "custom-name" },
     });
     const body = await (await agentSkillsIndexResponse(new Request("https://example.com/.well-known/agent-skills/index.json"), config, FAKE_DIGEST)).json() as { skills: Array<{ name: string }> };
-    expect(body.skills[0]!.name).toBe("custom-name-with-spaces");
+    expect(body.skills[0]!.name).toBe("custom-name");
+    expect(buildFrontmatter(config)).toContain('name: "custom-name"\n');
+  });
+
+  it("derives the name with the shared NFKD slugify (Café gives cafe)", async () => {
+    const config = makeConfig({ site: { ...makeConfig().site, name: "Café" } });
+    const body = await (await agentSkillsIndexResponse(new Request("https://example.com/.well-known/agent-skills/index.json"), config, FAKE_DIGEST)).json() as { skills: Array<{ name: string }> };
+    expect(body.skills[0]!.name).toBe("cafe");
   });
 
   it("digest matches the actual served SKILL.md body end-to-end (synthesize)", async () => {

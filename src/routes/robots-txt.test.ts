@@ -20,7 +20,7 @@ function makeConfig(): Config {
     manifest: { path: "/.well-known/webmcp.json", aliases: ["/.well-known/webmcp"] },
     webmcp_landing: { path: "/mcp/" },
     llms_txt: { path: "/llms.txt", mode: "merge" },
-    robots_txt: { path: "/robots.txt", mode: "merge" }, agents_md: { path: "/.well-known/agents.md", mode: "merge", aliases: ["/AGENTS.md", "/agents.md"] }, api_catalog: { path: "/.well-known/api-catalog", mode: "merge" }, ai_catalog: { path: "/.well-known/ai-catalog.json", mode: "synthesize", host_identifier: "", representative_queries: [], tags: [] }, agent_skills: { path: "/.well-known/agent-skills/site/SKILL.md", mode: "synthesize", name: "", description: "", aliases: ["/.well-known/agent-skills/site/SKILLS.md", "/.well-known/agent-skills/site/skill.md", "/.well-known/agent-skills/site/skills.md"], hints: [] }, agent_skills_index: { path: "/.well-known/agent-skills/index.json", mode: "synthesize" },
+    robots_txt: { path: "/robots.txt", mode: "merge" }, agents_md: { path: "/.well-known/agents.md", mode: "merge", aliases: ["/AGENTS.md", "/agents.md"] }, api_catalog: { path: "/.well-known/api-catalog", mode: "merge" }, ai_catalog: { path: "/.well-known/ard.json", aliases: ["/.well-known/ai-catalog.json"], mode: "synthesize", host_identifier: "", representative_queries: [], tags: [] }, agent_skills: { path: "/.well-known/agent-skills/site/SKILL.md", mode: "synthesize", name: "", description: "", aliases: ["/.well-known/agent-skills/site/SKILLS.md", "/.well-known/agent-skills/site/skill.md", "/.well-known/agent-skills/site/skills.md"], hints: [] }, agent_skills_index: { path: "/.well-known/agent-skills/index.json", mode: "synthesize" },
     origin_trial: { tokens: [] },
     paths: { namespace: "/_webmcp" },
     injection: { exclude_paths: [] },
@@ -81,7 +81,8 @@ describe("robotsTxtResponse", () => {
     const proxy = async () => new Response("", { status: 404 });
     const res = await robotsTxtResponse(new Request("https://example.com/robots.txt"), makeConfig(), proxy);
     const text = await res.text();
-    expect(text).toContain("Agentmap: https://example.com/.well-known/ai-catalog.json");
+    expect(text).toContain("Agentmap: https://example.com/.well-known/ard.json");
+    expect(text).not.toContain("ai-catalog.json");
   });
 
   it("omits Agentmap directive when ai_catalog feature is off", async () => {

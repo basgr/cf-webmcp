@@ -15,6 +15,7 @@
 
 import type { Config } from "../config-types";
 import { buildCacheControl } from "../cache";
+import { slugify } from "../ard";
 
 const BEGIN = "<!-- cf-webmcp:begin -->";
 const END = "<!-- cf-webmcp:end -->";
@@ -115,8 +116,19 @@ export function mergeBlock(original: string, block: string): string {
   return `${trimmed}\n${BEGIN}\n${block}\n${END}\n`;
 }
 
+/**
+ * The skill's name: [agent_skills].name when set (the schema holds it to the
+ * Agent Skills name rule), else the slug of [site].name. The one value used by
+ * the SKILL.md frontmatter, the skills index entry and the ARD entry
+ * identifier. The build refuses a config where this is empty and one of
+ * those is served.
+ */
+export function skillName(config: Config): string {
+  return config.agent_skills.name || slugify(config.site.name);
+}
+
 export function buildFrontmatter(config: Config): string {
-  const name = config.agent_skills.name || slugify(config.site.name);
+  const name = skillName(config);
   const description = config.agent_skills.description || config.site.description || `WebMCP-enabled site: ${config.site.name}`;
   // YAML frontmatter values are wrapped in double quotes to be defensive
   // against colons, hashes, leading whitespace, and unicode in site metadata.
@@ -184,20 +196,6 @@ function toolSignature(tool: { name: string; input_schema?: unknown }): string {
     params.push(`${name}${suffix}: ${type}`);
   }
   return `${tool.name}(${params.join(", ")})`;
-}
-
-/**
- * Lowercase, replace runs of non-alphanumeric with hyphens, trim hyphens.
- * Falls back to "site" if the result is empty (degenerate name).
- */
-export function slugify(input: string): string {
-  const out = input
-    .normalize("NFKD")
-    .replace(/[̀-ͯ]/g, "")
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
-  return out || "site";
 }
 
 function yamlString(s: string): string {

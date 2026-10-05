@@ -4,6 +4,7 @@
  */
 
 import { z } from "zod";
+import { ARD_PATH, ARD_PREDECESSOR_PATH } from "./ard";
 import { ORIGIN_TRIAL_TOKEN_RE } from "./origin-trial";
 import { checkSelector, type SelectorCheckOptions } from "./selector-grammar";
 
@@ -202,8 +203,9 @@ const Tool = z.object({
 const Site = z.object({
   // A bare hostname (optionally with a port), e.g. `example.com` or
   // `localhost:8787`. Interpolated build-time into `https://${domain}` base
-  // URLs (Link header, robots.txt, llms.txt, HTML <link> tag) and into
-  // `did:web:${domain}` / `urn:air:${domain}` identifiers in the ai-catalog.
+  // URLs (Link header, robots.txt, llms.txt, HTML <link> tag). The ARD
+  // manifest's did:web and urn:air identifiers are derived from the host of
+  // public_url, or from this domain when public_url is unset (src/ard.ts).
   // The hostname charset forbids CR/LF, double-quotes, whitespace, schemes and
   // paths, so a malicious build-time TOML cannot inject into those headers/text.
   domain: z
@@ -349,19 +351,28 @@ const AgentSkillsIndexBlock = z.object({
 });
 
 /**
- * Agentic Resource Discovery (ARD) publisher catalog. Publishes a
- * /.well-known/ai-catalog.json listing this site's agentic resources. cf-webmcp
+ * Agentic Resource Discovery (ARD) v0.91 manifest. Publishes
+ * /.well-known/ard.json listing this site's agentic resources. cf-webmcp
  * auto-derives exactly one entry from the Agent Skill (type
  * application/ai-skill+md). Publisher half only - no registry API, no signing.
- * See docs/ai-catalog.md. Default OFF: ARD is a v0.9 draft.
+ * See docs/ard.md. Default OFF: ARD is a proposal (v0.91). The key keeps its
+ * pre-v0.91 name, ai_catalog.
  *
  * Modes:
- *   - synthesize (default): emit the catalog from config, ignore origin
- *   - merge: splice our skill entry into an origin-published ai-catalog.json
+ *   - synthesize (default): emit the manifest from config, ignore origin
+ *   - merge: add our skill entry to origin's manifest (at `path`, or at the
+ *     predecessor /.well-known/ai-catalog.json when origin has none at `path`)
  *   - passthrough: route not registered; origin owns the path
  */
 const AiCatalogBlock = z.object({
-  path: PathString.default("/.well-known/ai-catalog.json"),
+  path: PathString.default(ARD_PATH),
+  /**
+   * Path aliases that 301-redirect to the canonical `path`. The predecessor
+   * path /.well-known/ai-catalog.json is redirected by default, so consumers
+   * that still look there find the manifest. Set to an empty array to disable
+   * redirects. An alias equal to `path` is ignored.
+   */
+  aliases: z.array(PathString).default([ARD_PREDECESSOR_PATH]),
   mode: z.enum(["synthesize", "merge", "passthrough"]).default("synthesize"),
   /** Override host.identifier (defaults to did:web:<domain> when empty). */
   host_identifier: z.string().default(""),
@@ -374,8 +385,19 @@ const AiCatalogBlock = z.object({
 const AgentSkillsBlock = z.object({
   path: PathString.default("/.well-known/agent-skills/site/SKILL.md"),
   mode: z.enum(["merge", "replace", "passthrough", "synthesize"]).default("synthesize"),
-  /** Override the auto-derived skill name (defaults to slugified [site].name). */
-  name: z.string().default(""),
+  /**
+   * Override the auto-derived skill name (defaults to slugified [site].name).
+   * Lowercase letters and digits in groups joined by single hyphens, the Agent
+   * Skills name rule. The SKILL.md frontmatter, the skills index and the ARD
+   * entry identifier all use this one value.
+   */
+  name: z
+    .string()
+    .regex(
+      /^(?:[a-z0-9]+(?:-[a-z0-9]+)*)?$/,
+      'agent_skills.name must be lowercase letters and digits, groups joined by single hyphens (e.g. "example-site"), or empty to derive it from [site].name',
+    )
+    .default(""),
   /** Override the auto-derived skill description (defaults to [site].description). */
   description: z.string().default(""),
   /** Path aliases that 301-redirect to the canonical `path`. Common case-variants by default. */

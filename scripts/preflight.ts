@@ -38,6 +38,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import TOML from "@iarna/toml";
 import { ConfigSchema, type Config } from "../src/config-types.js";
+import { ARD_PREDECESSOR_PATH, isArdContentType, isArdDocument } from "../src/ard.js";
 import { configHashOf, resolveInherits } from "./build-config.js";
 
 interface Args {
@@ -50,12 +51,17 @@ interface Args {
 interface PathCheck {
   label: string;
   url: URL;
-  expect: "claim" | "merge";
+  /**
+   * claim: any 200 is a collision. merge: a 200 text file the Worker merges into.
+   * merge_json: a 200 ARD document the Worker merges into (the ARD manifest in merge mode).
+   */
+  expect: "claim" | "merge" | "merge_json";
 }
 
 type Outcome =
   | { kind: "ok"; status: number; contentType: string }
   | { kind: "merge"; status: number; contentType: string; hasMarker: boolean }
+  | { kind: "merge_json"; status: number; contentType: string; valid: boolean }
   | { kind: "collision"; status: number; contentType: string; reason: string }
   | { kind: "error"; reason: string };
 
@@ -144,6 +150,17 @@ function pathsToCheck(config: Config, base: URL): PathCheck[] {
     for (const alias of config.agents_md.aliases) claim(alias, "claim");
   }
   if (config.features.api_catalog && config.api_catalog.mode !== "passthrough") claim(config.api_catalog.path, "claim");
+  if (config.features.ai_catalog && config.ai_catalog.mode !== "passthrough") {
+    // In merge mode the Worker merges into origin's ARD document at the path, or
+    // at the predecessor path when origin has none at the path, so a JSON document
+    // at either is a merge. Every other alias is only ever redirected: a claim.
+    const merge = config.ai_catalog.mode === "merge";
+    const paths = new Set([config.ai_catalog.path, ...config.ai_catalog.aliases]);
+    if (merge) paths.add(ARD_PREDECESSOR_PATH);
+    for (const p of paths) {
+      claim(p, merge && (p === config.ai_catalog.path || p === ARD_PREDECESSOR_PATH) ? "merge_json" : "claim");
+    }
+  }
   if (config.features.agent_skills && config.agent_skills.mode !== "passthrough") {
     claim(config.agent_skills.path, "merge");
     for (const alias of config.agent_skills.aliases) claim(alias, "claim");
@@ -183,6 +200,31 @@ async function probe(check: PathCheck, deployToken: string | undefined): Promise
     }
     if (res.status >= 300 && res.status < 400) {
       return { kind: "ok", status: res.status, contentType: ct };
+    }
+    if (check.expect === "merge_json") {
+      // The Worker's own rule (src/routes/ai-catalog.ts): a 200 declared as JSON is
+      // merged into when it is an ARD document and relayed unchanged when it is
+      // not; any other 200 is relayed. Text or HTML here is a collision.
+      if (res.status === 200 && isArdContentType(ct)) {
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(await res.text());
+        } catch {
+          return {
+            kind: "collision",
+            status: 200,
+            contentType: ct,
+            reason: `origin answers 200 ${ct || "(no content type)"} but the body is not JSON`,
+          };
+        }
+        return { kind: "merge_json", status: 200, contentType: ct, valid: isArdDocument(parsed) };
+      }
+      return {
+        kind: "collision",
+        status: res.status,
+        contentType: ct,
+        reason: `expected an application/json ARD document for merge, got ${ct || "(unknown)"}`,
+      };
     }
     if (check.expect === "merge") {
       // For mergeable paths: 200 text is a merge, anything else is a collision.
@@ -306,6 +348,8 @@ function formatRow(check: PathCheck, outcome: Outcome): string {
       return `  ${label} ${String(outcome.status).padEnd(3)} ${outcome.contentType.padEnd(28)} → claim OK`;
     case "merge":
       return `  ${label} 200 ${outcome.contentType.padEnd(28)} → merge (marker ${outcome.hasMarker ? "present, will replace" : "absent, will append"})`;
+    case "merge_json":
+      return `  ${label} 200 ${outcome.contentType.padEnd(28)} → ${outcome.valid ? "merge (ARD manifest, our entry is added unless origin lists its identifier)" : "merge refused (not an ARD manifest, relayed unchanged)"}`;
     case "collision":
       return `  ${label} ${String(outcome.status).padEnd(3)} ${outcome.contentType.padEnd(28)} → COLLISION (${outcome.reason})`;
     case "error":
@@ -355,6 +399,11 @@ export async function runPreflight(configPath: string, force: boolean, opts: Pre
       collisions.push(`${check.label}: ${outcome.reason}`);
     } else if (outcome.kind === "merge" && !outcome.hasMarker) {
       warnings.push(`${check.label}: merge marker absent at origin, will append on first deploy`);
+    } else if (outcome.kind === "merge_json" && !outcome.valid) {
+      warnings.push(
+        `${check.label}: origin's JSON is not an ARD manifest (an object with an entries array of objects with a string identifier); ` +
+          `the Worker relays it unchanged and adds no entry`,
+      );
     } else if (outcome.kind === "error") {
       warnings.push(`${check.label}: ${outcome.reason}`);
     }

@@ -46,7 +46,7 @@ Search is path-based, not full-text.
 <https://example.com/.well-known/webmcp>
 ```
 
-The frontmatter `name` and `description` derive from `[site].name` and `[site].description`. The tool list is auto-generated from `[[tools]]` and `[[forms]]`. The "When to use which" and "Common pitfalls" sections come from `[[agent_skills.hints]]` blocks you write in TOML.
+The frontmatter `name` and `description` derive from `[site].name` and `[site].description`. The name is `[agent_skills].name` when set, which must be lowercase letters and digits in groups joined by single hyphens (`example-site`); otherwise it is the slug of `[site].name` (NFKD, accents removed, lowercased, other characters turned into hyphens: `Café` becomes `cafe`). The skills index entry and the ARD entry identifier use the same name, and the build fails when it would be empty (see [`docs/ard.md`](ard.md#the-skill-name)). The tool list is auto-generated from `[[tools]]` and `[[forms]]`. The "When to use which" and "Common pitfalls" sections come from `[[agent_skills.hints]]` blocks you write in TOML.
 
 Hint `body` is rendered into agent-visible markdown - see [`docs/security.md`](security.md) before pasting user-generated content into hint fields.
 
@@ -59,7 +59,7 @@ agent_skills = true       # default true; flip to false to disable
 [agent_skills]
 path        = "/.well-known/agent-skills/site/SKILL.md"   # canonical path
 mode        = "synthesize"                                  # merge | replace | passthrough | synthesize
-name        = ""    # optional override; defaults to slugified [site].name
+name        = ""    # optional override, e.g. "example-site"; defaults to slugified [site].name
 description = ""    # optional override; defaults to [site].description
 aliases     = [
   "/.well-known/agent-skills/site/SKILLS.md",

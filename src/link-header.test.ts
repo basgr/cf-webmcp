@@ -24,7 +24,7 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     llms_txt: { path: "/llms.txt", mode: "merge" },
     robots_txt: { path: "/robots.txt", mode: "merge" },
     agents_md: { path: "/.well-known/agents.md", mode: "merge", aliases: ["/AGENTS.md", "/agents.md"] },
-    api_catalog: { path: "/.well-known/api-catalog", mode: "merge" }, ai_catalog: { path: "/.well-known/ai-catalog.json", mode: "synthesize", host_identifier: "", representative_queries: [], tags: [] }, agent_skills: { path: "/.well-known/agent-skills/site/SKILL.md", mode: "synthesize", name: "", description: "", aliases: ["/.well-known/agent-skills/site/SKILLS.md", "/.well-known/agent-skills/site/skill.md", "/.well-known/agent-skills/site/skills.md"], hints: [] }, agent_skills_index: { path: "/.well-known/agent-skills/index.json", mode: "synthesize" },
+    api_catalog: { path: "/.well-known/api-catalog", mode: "merge" }, ai_catalog: { path: "/.well-known/ard.json", aliases: ["/.well-known/ai-catalog.json"], mode: "synthesize", host_identifier: "", representative_queries: [], tags: [] }, agent_skills: { path: "/.well-known/agent-skills/site/SKILL.md", mode: "synthesize", name: "", description: "", aliases: ["/.well-known/agent-skills/site/SKILLS.md", "/.well-known/agent-skills/site/skill.md", "/.well-known/agent-skills/site/skills.md"], hints: [] }, agent_skills_index: { path: "/.well-known/agent-skills/index.json", mode: "synthesize" },
     origin_trial: { tokens: [] },
     paths: { namespace: "/_webmcp" },
     injection: { exclude_paths: [] },
@@ -130,23 +130,25 @@ describe("buildLinkHeader", () => {
     expect(value).not.toContain('rel="describedby"');
   });
 
-  it("includes the ai-catalog rel when feature on and mode != passthrough", () => {
+  it("includes rel=\"ard\" at the canonical ARD path when feature on and mode != passthrough, and no rel=\"ai-catalog\"", () => {
     const value = buildLinkHeader(makeConfig());
-    expect(value).toContain('<https://example.com/.well-known/ai-catalog.json>; rel="ai-catalog"');
+    expect(value).toContain('<https://example.com/.well-known/ard.json>; rel="ard"');
+    expect(value).not.toContain('rel="ai-catalog"');
+    expect(value).not.toContain("ai-catalog.json");
   });
 
-  it("omits ai-catalog when features.ai_catalog is false", () => {
+  it("omits rel=\"ard\" when features.ai_catalog is false", () => {
     const value = buildLinkHeader(
       makeConfig({ features: { ...makeConfig().features, ai_catalog: false } }),
     );
-    expect(value).not.toContain('rel="ai-catalog"');
+    expect(value).not.toContain('rel="ard"');
   });
 
-  it("omits ai-catalog when mode is passthrough", () => {
+  it("omits rel=\"ard\" when mode is passthrough", () => {
     const value = buildLinkHeader(
-      makeConfig({ ai_catalog: { path: "/.well-known/ai-catalog.json", mode: "passthrough", host_identifier: "", representative_queries: [], tags: [] } }),
+      makeConfig({ ai_catalog: { path: "/.well-known/ard.json", aliases: ["/.well-known/ai-catalog.json"], mode: "passthrough", host_identifier: "", representative_queries: [], tags: [] } }),
     );
-    expect(value).not.toContain('rel="ai-catalog"');
+    expect(value).not.toContain('rel="ard"');
   });
 
   it("emits RFC 8288 title parameter on every advertised rel", () => {

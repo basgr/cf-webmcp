@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { agentSkillsResponse, agentSkillsRedirect, mergeBlock, slugify } from "./agent-skills";
+import { agentSkillsResponse, agentSkillsRedirect, mergeBlock, skillName } from "./agent-skills";
+import { slugify } from "../ard";
 import type { Config } from "../config-types";
 
 function makeConfig(overrides: Partial<Config> = {}): Config {
@@ -27,7 +28,7 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     robots_txt: { path: "/robots.txt", mode: "merge" },
     agents_md: { path: "/.well-known/agents.md", mode: "merge", aliases: ["/AGENTS.md", "/agents.md"] },
     api_catalog: { path: "/.well-known/api-catalog", mode: "merge" },
-    ai_catalog: { path: "/.well-known/ai-catalog.json", mode: "synthesize", host_identifier: "", representative_queries: [], tags: [] },
+    ai_catalog: { path: "/.well-known/ard.json", aliases: ["/.well-known/ai-catalog.json"], mode: "synthesize", host_identifier: "", representative_queries: [], tags: [] },
     agent_skills: {
       path: "/.well-known/agent-skills/site/SKILL.md",
       mode: "synthesize",
@@ -344,15 +345,21 @@ describe("agentSkillsRedirect", () => {
   });
 });
 
-describe("slugify", () => {
-  it("lowercases, replaces non-alphanumeric with hyphens, trims", () => {
-    expect(slugify("Example Site")).toBe("example-site");
-    expect(slugify("  cf-webmcp ")).toBe("cf-webmcp");
-    expect(slugify("Tübingen & Co.")).toBe("tubingen-co");
+describe("skillName", () => {
+  it("is [agent_skills].name verbatim when set", () => {
+    expect(skillName(makeConfig({ agent_skills: { ...makeConfig().agent_skills, name: "my-shop" } }))).toBe("my-shop");
   });
 
-  it("falls back to 'site' for degenerate input", () => {
-    expect(slugify("")).toBe("site");
-    expect(slugify("///")).toBe("site");
+  it("is the shared ARD slugify of [site].name otherwise (NFKD: Café gives cafe)", () => {
+    const config = makeConfig({ site: { ...makeConfig().site, name: "Café" } });
+    expect(skillName(config)).toBe("cafe");
+    expect(skillName(config)).toBe(slugify(config.site.name));
+  });
+
+  it("is the name in the SKILL.md frontmatter", async () => {
+    const config = makeConfig({ site: { ...makeConfig().site, name: "Café" } });
+    const proxy = async () => new Response("", { status: 404 });
+    const body = await (await agentSkillsResponse(new Request("https://example.com/.well-known/agent-skills/site/SKILL.md"), config, proxy)).text();
+    expect(body).toMatch(/^---\nname: "cafe"\n/);
   });
 });

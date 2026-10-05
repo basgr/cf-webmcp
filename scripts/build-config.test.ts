@@ -4,7 +4,11 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
+import TOML from "@iarna/toml";
 import { buildConfig, CLOUDFLARE_WEBMCP_LABS_TOOL_NAMES, defaultAnnotationsFor } from "./build-config";
+import { ConfigSchema } from "../src/config-types";
+import { buildFrontmatter } from "../src/routes/agent-skills";
+import { agentSkillsIndexResponse } from "../src/routes/agent-skills-index";
 import { LICENSE_PREAMBLE } from "../src/widget-preamble";
 import { es5Violations, inlineScripts } from "../src/test-support/es5";
 import { expiryInDays, makeOriginTrialToken, type TokenPayload } from "../src/test-support/origin-trial";
@@ -539,52 +543,154 @@ representative_queries = ["find a page about X"]
 tags = ["docs"]
 `;
 
-describe("ai_catalog generation", () => {
-  it("emits a spec-conformant catalog with one skill entry", async () => {
-    const toml = await writeToml("ai-catalog.toml", WITH_AI_CATALOG);
+describe("ai_catalog generation (ARD v0.91 ard.json)", () => {
+  /** MINIMAL with extra [site] lines (after name) and the ARD feature on, plus any trailing TOML. */
+  function ardToml(siteLines: string[] = [], rest = ""): string {
+    const site = siteLines.length
+      ? MINIMAL.replace('name   = "Example Co."', ['name   = "Example Co."', ...siteLines].join("\n"))
+      : MINIMAL;
+    return `${site}\n\n[features]\nai_catalog = true\n${rest}`;
+  }
+  const ard = (files: Record<string, string>) => JSON.parse(files["ard.json"]!);
+
+  it("emits { host, entries } with one skill entry, no specVersion", async () => {
+    const toml = await writeToml("ard.toml", WITH_AI_CATALOG);
     const { files } = await runBuild(toml);
-    expect(files).toHaveProperty("ai-catalog.json");
-    const cat = JSON.parse(files["ai-catalog.json"]!);
-    expect(cat.specVersion).toBe("1.0");
-    expect(cat.host.displayName).toBe("Example Co.");
-    expect(cat.host.identifier).toBe("did:web:example.com");
-    expect(cat.entries).toHaveLength(1);
-    const e = cat.entries[0];
-    expect(e.identifier).toMatch(/^urn:air:example\.com:skill:/);
+    expect(files).toHaveProperty("ard.json");
+    expect(files).not.toHaveProperty("ai-catalog.json");
+    const doc = ard(files);
+    expect(Object.keys(doc).sort()).toEqual(["entries", "host"]);
+    expect(doc).not.toHaveProperty("specVersion");
+    expect(doc.host).toEqual({ displayName: "Example Co.", identifier: "did:web:example.com" });
+    expect(doc.entries).toHaveLength(1);
+    const e = doc.entries[0];
+    expect(e.identifier).toBe("urn:air:example.com:skill:example-co");
+    expect(e.displayName).toBe("Example Co.");
     expect(e.type).toBe("application/ai-skill+md");
     expect(e.url).toBe("https://example.com/.well-known/agent-skills/site/SKILL.md");
     expect(e.capabilities).toContain("search_pages");
     expect(e.representativeQueries).toEqual(["find a page about X"]);
     expect(e.tags).toEqual(["docs"]);
+    // The v0.91 entry schema's identifier pattern.
+    expect(e.identifier).toMatch(/^urn:air:[a-zA-Z0-9.-]+(:[a-zA-Z0-9._-]+)+$/);
   });
 
   it("omits representativeQueries and tags when not configured", async () => {
-    const bare = `${MINIMAL}\n\n[features]\nai_catalog = true\n`;
-    const toml = await writeToml("ai-catalog-bare.toml", bare);
+    const toml = await writeToml("ard-bare.toml", ardToml());
     const { files } = await runBuild(toml);
-    const e = JSON.parse(files["ai-catalog.json"]!).entries[0];
+    const e = ard(files).entries[0];
     expect(e).not.toHaveProperty("representativeQueries");
     expect(e).not.toHaveProperty("tags");
   });
 
   it("honors host_identifier override", async () => {
-    const ov = `${MINIMAL}\n\n[features]\nai_catalog = true\n\n[ai_catalog]\nhost_identifier = "did:web:acme.com"\n`;
-    const toml = await writeToml("ai-catalog-host.toml", ov);
+    const toml = await writeToml("ard-host.toml", ardToml([], `\n[ai_catalog]\nhost_identifier = "did:web:acme.com"\n`));
     const { files } = await runBuild(toml);
-    expect(JSON.parse(files["ai-catalog.json"]!).host.identifier).toBe("did:web:acme.com");
+    expect(ard(files).host.identifier).toBe("did:web:acme.com");
+  });
+
+  it("percent-encodes a port in did:web and drops it from the urn, for a domain with a port", async () => {
+    const toml = await writeToml(
+      "ard-port.toml",
+      ardToml().replace('domain = "example.com"', 'domain = "example.com:8787"'),
+    );
+    const { files } = await runBuild(toml);
+    const doc = ard(files);
+    expect(doc.host.identifier).toBe("did:web:example.com%3A8787");
+    expect(doc.entries[0].identifier).toBe("urn:air:example.com:skill:example-co");
+    expect(doc.entries[0].url).toBe("https://example.com:8787/.well-known/agent-skills/site/SKILL.md");
+  });
+
+  it("takes the host from public_url when it is set", async () => {
+    const toml = await writeToml("ard-public.toml", ardToml(['public_url = "http://localhost:8787"']));
+    const { files } = await runBuild(toml);
+    const doc = ard(files);
+    expect(doc.host.identifier).toBe("did:web:localhost%3A8787");
+    expect(doc.entries[0].identifier).toBe("urn:air:localhost:skill:example-co");
   });
 
   it("emits empty entries when agent_skills is off", async () => {
-    const noSkill = `${MINIMAL}\n\n[features]\nai_catalog = true\nagent_skills = false\n`;
-    const toml = await writeToml("ai-catalog-noskill.toml", noSkill);
+    const toml = await writeToml("ard-noskill.toml", ardToml().replace("ai_catalog = true", "ai_catalog = true\nagent_skills = false"));
     const { files } = await runBuild(toml);
-    expect(JSON.parse(files["ai-catalog.json"]!).entries).toEqual([]);
+    expect(ard(files).entries).toEqual([]);
   });
 
   it("fails the build when ai_catalog.path collides with another surface", async () => {
-    const collide = `${MINIMAL}\n\n[features]\nai_catalog = true\n\n[ai_catalog]\npath = "/.well-known/api-catalog"\n`;
-    const toml = await writeToml("ai-catalog-collide.toml", collide);
+    const toml = await writeToml("ard-collide.toml", ardToml([], `\n[ai_catalog]\npath = "/.well-known/api-catalog"\n`));
     await expect(runBuild(toml)).rejects.toThrow(/path collision/i);
+  });
+
+  it("fails the build when an ai_catalog alias collides with another surface", async () => {
+    const toml = await writeToml("ard-alias-collide.toml", ardToml([], `\n[ai_catalog]\naliases = ["/.well-known/api-catalog"]\n`));
+    await expect(runBuild(toml)).rejects.toThrow(/path collision.*ai_catalog\.alias/i);
+  });
+
+  it("ignores an alias equal to the canonical path", async () => {
+    const toml = await writeToml("ard-alias-self.toml", ardToml([], `\n[ai_catalog]\naliases = ["/.well-known/ard.json", "/.well-known/ai-catalog.json"]\n`));
+    await expect(runBuild(toml)).resolves.toBeDefined();
+  });
+
+  it("does not claim the alias, so no collision, when the feature is off or in passthrough", async () => {
+    const off = `${MINIMAL}\n\n[ai_catalog]\naliases = ["/.well-known/api-catalog"]\n`;
+    await expect(runBuild(await writeToml("ard-off.toml", off))).resolves.toBeDefined();
+    const pt = ardToml([], `\n[ai_catalog]\nmode = "passthrough"\naliases = ["/.well-known/api-catalog"]\n`);
+    await expect(runBuild(await writeToml("ard-pt.toml", pt))).resolves.toBeDefined();
+  });
+});
+
+describe("one skill name for SKILL.md, the skills index and the ARD entry (M10)", () => {
+  async function namesFor(siteName: string, skillsBlock = ""): Promise<{ frontmatter: string; index: string; ard: string }> {
+    const text = `${MINIMAL.replace('name   = "Example Co."', `name   = ${JSON.stringify(siteName)}`)}\n\n[features]\nai_catalog = true\n${skillsBlock}`;
+    const toml = await writeToml("names.toml", text);
+    const { files } = await runBuild(toml);
+    const config = ConfigSchema.parse(TOML.parse(text));
+    const frontmatter = /^---\nname: "([^"]*)"/.exec(buildFrontmatter(config))![1]!;
+    const index = (
+      (await agentSkillsIndexResponse(new Request("https://example.com/"), config, `sha256:${"a".repeat(64)}`).json()) as {
+        skills: Array<{ name: string }>;
+      }
+    ).skills[0]!.name;
+    const identifier = JSON.parse(files["ard.json"]!).entries[0].identifier as string;
+    return { frontmatter, index, ard: identifier.slice(identifier.lastIndexOf(":") + 1) };
+  }
+
+  it("derives the same NFKD slug in all three from [site].name", async () => {
+    expect(await namesFor("Café")).toEqual({ frontmatter: "cafe", index: "cafe", ard: "cafe" });
+    expect(await namesFor("Grüße Welt")).toEqual({ frontmatter: "gru-e-welt", index: "gru-e-welt", ard: "gru-e-welt" });
+  });
+
+  it("uses an explicit [agent_skills].name verbatim in all three", async () => {
+    expect(await namesFor("Example Co.", `\n[agent_skills]\nname = "my-shop"\n`)).toEqual({
+      frontmatter: "my-shop",
+      index: "my-shop",
+      ard: "my-shop",
+    });
+  });
+
+  it("refuses a [site].name with nothing to slug when the skill name is derived", async () => {
+    const text = MINIMAL.replace('name   = "Example Co."', 'name   = "日本語"');
+    await expect(runBuild(await writeToml("noslug.toml", text))).rejects.toThrow(/\[agent_skills\]\.name/);
+  });
+
+  it("accepts such a [site].name with an explicit [agent_skills].name, or with both skill surfaces off", async () => {
+    const base = MINIMAL.replace('name   = "Example Co."', 'name   = "日本語"');
+    await expect(runBuild(await writeToml("named.toml", `${base}\n\n[agent_skills]\nname = "nihongo"\n`))).resolves.toBeDefined();
+    const off = `${base}\n\n[features]\nagent_skills = false\nagent_skills_index = false\n`;
+    await expect(runBuild(await writeToml("off.toml", off))).resolves.toBeDefined();
+    // Both skill surfaces left to origin and no ARD manifest: the name is used nowhere.
+    const passthrough = `${base}\n\n[agent_skills]\nmode = "passthrough"\n\n[agent_skills_index]\nmode = "passthrough"\n`;
+    await expect(runBuild(await writeToml("pt.toml", passthrough))).resolves.toBeDefined();
+  });
+
+  it("still refuses it when only the ARD entry needs the name (skill surfaces in passthrough, ai_catalog on)", async () => {
+    const base = MINIMAL.replace('name   = "Example Co."', 'name   = "日本語"');
+    const text = `${base}\n\n[features]\nai_catalog = true\n\n[agent_skills]\nmode = "passthrough"\n\n[agent_skills_index]\nmode = "passthrough"\n`;
+    await expect(runBuild(await writeToml("ard-only.toml", text))).rejects.toThrow(/\[agent_skills\]\.name/);
+  });
+
+  it("rejects an [agent_skills].name that is not a skill name", async () => {
+    const text = `${MINIMAL}\n\n[agent_skills]\nname = "My Shop"\n`;
+    await expect(runBuild(await writeToml("badname.toml", text))).rejects.toThrow(/agent_skills\.name/);
   });
 });
 

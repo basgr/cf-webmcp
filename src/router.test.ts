@@ -19,7 +19,7 @@ const baseConfig: Config = {
   manifest: { path: "/.well-known/webmcp.json", aliases: ["/.well-known/webmcp"] },
   webmcp_landing: { path: "/mcp" },
   llms_txt: { path: "/llms.txt", mode: "merge" },
-  robots_txt: { path: "/robots.txt", mode: "merge" }, agents_md: { path: "/.well-known/agents.md", mode: "merge", aliases: ["/AGENTS.md", "/agents.md"] }, api_catalog: { path: "/.well-known/api-catalog", mode: "merge" }, ai_catalog: { path: "/.well-known/ai-catalog.json", mode: "synthesize", host_identifier: "", representative_queries: [], tags: [] }, agent_skills: { path: "/.well-known/agent-skills/site/SKILL.md", mode: "synthesize", name: "", description: "", aliases: ["/.well-known/agent-skills/site/SKILLS.md", "/.well-known/agent-skills/site/skill.md", "/.well-known/agent-skills/site/skills.md"], hints: [] }, agent_skills_index: { path: "/.well-known/agent-skills/index.json", mode: "synthesize" },
+  robots_txt: { path: "/robots.txt", mode: "merge" }, agents_md: { path: "/.well-known/agents.md", mode: "merge", aliases: ["/AGENTS.md", "/agents.md"] }, api_catalog: { path: "/.well-known/api-catalog", mode: "merge" }, ai_catalog: { path: "/.well-known/ard.json", aliases: ["/.well-known/ai-catalog.json"], mode: "synthesize", host_identifier: "", representative_queries: [], tags: [] }, agent_skills: { path: "/.well-known/agent-skills/site/SKILL.md", mode: "synthesize", name: "", description: "", aliases: ["/.well-known/agent-skills/site/SKILLS.md", "/.well-known/agent-skills/site/skill.md", "/.well-known/agent-skills/site/skills.md"], hints: [] }, agent_skills_index: { path: "/.well-known/agent-skills/index.json", mode: "synthesize" },
   origin_trial: { tokens: [] },
   paths: { namespace: "/_webmcp" },
   injection: { exclude_paths: [] },
@@ -244,15 +244,37 @@ describe("matchRoute", () => {
     expect(matchRoute(baseConfig, req("/"), BOOTSTRAP, WIDGET).kind).toBe("proxy");
   });
 
-  it("routes the ai-catalog when feature on", () => {
+  it("routes the ARD manifest at ard.json and 301s the predecessor ai-catalog.json when the feature is on", () => {
     const on = { ...baseConfig, features: { ...baseConfig.features, ai_catalog: true } };
-    expect(matchRoute(on, req("/.well-known/ai-catalog.json"), BOOTSTRAP, WIDGET).kind).toBe("ards_catalog");
+    expect(matchRoute(on, req("/.well-known/ard.json"), BOOTSTRAP, WIDGET).kind).toBe("ards_catalog");
+    expect(matchRoute(on, req("/.well-known/ai-catalog.json"), BOOTSTRAP, WIDGET).kind).toBe("ards_catalog_redirect");
   });
 
-  it("does not route ai-catalog when feature off or passthrough", () => {
-    expect(matchRoute(baseConfig, req("/.well-known/ai-catalog.json"), BOOTSTRAP, WIDGET).kind).toBe("proxy");
-    const pt = { ...baseConfig, features: { ...baseConfig.features, ai_catalog: true }, ai_catalog: { ...baseConfig.ai_catalog, mode: "passthrough" as const } };
-    expect(matchRoute(pt, req("/.well-known/ai-catalog.json"), BOOTSTRAP, WIDGET).kind).toBe("proxy");
+  it("claims the alias in merge mode too", () => {
+    const merge = { ...baseConfig, features: { ...baseConfig.features, ai_catalog: true }, ai_catalog: { ...baseConfig.ai_catalog, mode: "merge" as const } };
+    expect(matchRoute(merge, req("/.well-known/ai-catalog.json"), BOOTSTRAP, WIDGET).kind).toBe("ards_catalog_redirect");
+  });
+
+  it("does not route the ARD manifest or its alias when feature off or passthrough", () => {
+    for (const path of ["/.well-known/ard.json", "/.well-known/ai-catalog.json"]) {
+      expect(matchRoute(baseConfig, req(path), BOOTSTRAP, WIDGET).kind, path).toBe("proxy");
+      const pt = { ...baseConfig, features: { ...baseConfig.features, ai_catalog: true }, ai_catalog: { ...baseConfig.ai_catalog, mode: "passthrough" as const } };
+      expect(matchRoute(pt, req(path), BOOTSTRAP, WIDGET).kind, path).toBe("proxy");
+    }
+  });
+
+  it("serves an alias equal to the canonical path as the manifest, not as a redirect", () => {
+    const self = {
+      ...baseConfig,
+      features: { ...baseConfig.features, ai_catalog: true },
+      ai_catalog: { ...baseConfig.ai_catalog, path: "/.well-known/ai-catalog.json", aliases: ["/.well-known/ai-catalog.json"] },
+    };
+    expect(matchRoute(self, req("/.well-known/ai-catalog.json"), BOOTSTRAP, WIDGET).kind).toBe("ards_catalog");
+  });
+
+  it("does not redirect the predecessor path when aliases is empty", () => {
+    const none = { ...baseConfig, features: { ...baseConfig.features, ai_catalog: true }, ai_catalog: { ...baseConfig.ai_catalog, aliases: [] } };
+    expect(matchRoute(none, req("/.well-known/ai-catalog.json"), BOOTSTRAP, WIDGET).kind).toBe("proxy");
   });
 });
 

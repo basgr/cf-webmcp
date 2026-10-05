@@ -27,7 +27,8 @@ import TOML from "@iarna/toml";
 import { ConfigSchema, type Config, type ToolConfig, type ExecutorConfig } from "../src/config-types.js";
 import { compileTemplate } from "../src/mini-language.js";
 import { decodeOriginTrialToken, type OriginTrialPayload } from "../src/origin-trial.js";
-import { buildFrontmatter, buildSkillBody } from "../src/routes/agent-skills.js";
+import { buildFrontmatter, buildSkillBody, skillName } from "../src/routes/agent-skills.js";
+import { SKILL_MEDIA_TYPE, didWeb, siteHost, urnAir } from "../src/ard.js";
 import { LICENSE_PREAMBLE } from "../src/widget-preamble.js";
 import { bridgeNpmVersion, sha256Hex, widgetAssetName } from "./widget-pin.js";
 
@@ -1078,6 +1079,9 @@ function checkPathCollisions(config: Config): void {
   }
   if (config.features.ai_catalog && config.ai_catalog.mode !== "passthrough") {
     claimed.push({ name: "ai_catalog", path: config.ai_catalog.path });
+    for (const a of config.ai_catalog.aliases) {
+      if (a !== config.ai_catalog.path) claimed.push({ name: "ai_catalog.alias", path: a });
+    }
   }
   if (config.features.agent_skills && config.agent_skills.mode !== "passthrough") {
     claimed.push({ name: "agent_skills", path: config.agent_skills.path });
@@ -1217,10 +1221,24 @@ export function stringifyCanonical(obj: unknown): string {
   return JSON.stringify(obj, sortReplacer, 2) + "\n";
 }
 
-function skillSlug(config: Config): string {
-  const raw = config.agent_skills.name || config.site.name || "site";
-  const slug = raw.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
-  return slug || "site";
+/**
+ * Refuse a build whose skill name would be empty: [agent_skills].name unset and
+ * nothing left of [site].name after slugify (a name in a script without an
+ * ASCII decomposition, say). The SKILL.md frontmatter, the skills index and the
+ * ARD entry identifier all need it, so it is required whenever one of them is
+ * served.
+ */
+function checkSkillName(config: Config): void {
+  const used =
+    (config.features.agent_skills && config.agent_skills.mode !== "passthrough") ||
+    (config.features.agent_skills_index && config.agent_skills_index.mode !== "passthrough") ||
+    (config.features.ai_catalog && config.ai_catalog.mode !== "passthrough" && config.features.agent_skills);
+  if (!used || skillName(config) !== "") return;
+  throw new Error(
+    `[build-config] no skill name: [site].name ${JSON.stringify(config.site.name)} has no letters a-z or digits left after ` +
+      `removing accents, and [agent_skills].name is not set. Set [agent_skills].name to lowercase letters and digits ` +
+      `joined by hyphens, such as "my-site".`,
+  );
 }
 
 export interface AiCatalogEntry {
@@ -1234,24 +1252,31 @@ export interface AiCatalogEntry {
   tags?: string[];
 }
 
+/**
+ * The ARD v0.91 manifest: `entries` is the only member ARD defines. `host` is
+ * a transport member ARD ignores (v0.91 section 5.1); it keeps the predecessor
+ * ai-catalog Host Info shape, and there is no specVersion.
+ */
 export interface AiCatalogDoc {
-  specVersion: "1.0";
   host: { displayName: string; identifier: string };
   entries: AiCatalogEntry[];
 }
 
 /**
- * Build the ARD ai-catalog.json document. One entry, auto-derived from the
- * Agent Skill, emitted only when agent_skills is enabled (any mode - the
- * SKILL.md URL on the publisher domain is valid even in passthrough). When
- * agent_skills is off, entries is [] and a warning is logged.
+ * Build the ARD ard.json document. One entry, auto-derived from the Agent
+ * Skill, emitted only when agent_skills is enabled (any mode - the SKILL.md URL
+ * on the publisher domain is valid even in passthrough). When agent_skills is
+ * off, entries is [] and a warning is logged.
+ *
+ * Identifiers come from the site's canonical host (public_url, else domain):
+ * did:web keeps a port, percent-encoded; the urn:air publisher segment drops it.
  */
 export function buildAiCatalog(config: Config): AiCatalogDoc {
   const base = siteBase(config);
-  const domain = config.site.domain;
-  const host = {
+  const host = siteHost(config.site);
+  const hostInfo = {
     displayName: config.site.name,
-    identifier: config.ai_catalog.host_identifier || `did:web:${domain}`,
+    identifier: config.ai_catalog.host_identifier || didWeb(host),
   };
   const entries: AiCatalogEntry[] = [];
   if (config.features.agent_skills) {
@@ -1260,9 +1285,10 @@ export function buildAiCatalog(config: Config): AiCatalogDoc {
       ...config.forms.map((f) => f.name),
     ];
     const entry: AiCatalogEntry = {
-      identifier: `urn:air:${domain}:skill:${skillSlug(config)}`,
+      // The same name as the SKILL.md frontmatter and the skills index.
+      identifier: urnAir(host, "skill", skillName(config)),
       displayName: config.agent_skills.name || config.site.name,
-      type: "application/ai-skill+md",
+      type: SKILL_MEDIA_TYPE,
       url: `${base}${config.agent_skills.path}`,
       description: config.agent_skills.description || config.site.description || undefined,
       capabilities: capabilities.length ? capabilities : undefined,
@@ -1281,7 +1307,7 @@ export function buildAiCatalog(config: Config): AiCatalogDoc {
       "[build-config] ai_catalog is enabled but agent_skills is off; the catalog will have no entries. Enable agent_skills to list the site skill.",
     );
   }
-  return { specVersion: "1.0", host, entries };
+  return { host: hostInfo, entries };
 }
 
 /** What this build ships for the widget. All null when the widget is disabled for lack of a usable pin. */
@@ -1545,6 +1571,7 @@ export async function buildConfig(opts: BuildOptions): Promise<void> {
   }
   checkAllowList(config);
   checkPathCollisions(config);
+  checkSkillName(config);
   checkReservedToolNames(config);
   checkToolNameCollisions(config);
   checkOriginTrial(config, opts.now ?? new Date());
@@ -1608,7 +1635,7 @@ export const AI_CATALOG_JSON: string = ${JSON.stringify(aiCatalogStr)};
       path.join(opts.outDir, "hash.ts"),
       `export const CONFIG_HASH = ${JSON.stringify(configHash)};\nexport const BOOTSTRAP_ASSET = ${JSON.stringify(bootstrapName)};\nexport const WIDGET_ASSET: string | null = ${JSON.stringify(widget.asset)};\n`,
     ),
-    ...(aiCatalog ? [fs.writeFile(path.join(opts.outDir, "ai-catalog.json"), aiCatalogStr)] : []),
+    ...(aiCatalog ? [fs.writeFile(path.join(opts.outDir, "ard.json"), aiCatalogStr)] : []),
   ]);
 
   // eslint-disable-next-line no-console

@@ -21,6 +21,7 @@
  */
 
 import type { Config, FormInjectionConfig } from "../config-types";
+import { ARD_REL } from "../ard";
 
 export interface InjectOptions {
   manifestUrl: string;
@@ -28,7 +29,7 @@ export interface InjectOptions {
   emitLinkTag: boolean;
   /** When set, an additional <link rel="api-catalog"> is injected alongside the webmcp link. */
   apiCatalogUrl?: string;
-  /** When set, an additional <link rel="ai-catalog"> is injected alongside the webmcp link. */
+  /** When set, an additional <link rel="ard"> (ARD v0.91 manifest) is injected alongside the webmcp link. */
   aiCatalogUrl?: string;
   /** When set, an additional <link rel="agent-skills"> is injected alongside the webmcp link. */
   agentSkillsUrl?: string;
@@ -142,7 +143,7 @@ export function injectIntoHtml(response: Response, opts: InjectOptions): Respons
     ? `<link rel="api-catalog" href="${escapeAttr(opts.apiCatalogUrl)}">`
     : "";
   const aiCatalogTag = opts.aiCatalogUrl
-    ? `<link rel="ai-catalog" href="${escapeAttr(opts.aiCatalogUrl)}">`
+    ? `<link rel="${ARD_REL}" href="${escapeAttr(opts.aiCatalogUrl)}">`
     : "";
   const agentSkillsTag = opts.agentSkillsUrl
     ? `<link rel="agent-skills" href="${escapeAttr(opts.agentSkillsUrl)}">`

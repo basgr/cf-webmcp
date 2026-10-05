@@ -41,7 +41,7 @@ agents_md        = true
 api_catalog      = true
 agent_skills     = true
 agent_skills_index = true
-# ai_catalog     = true   # ARD publisher catalog at /.well-known/ai-catalog.json (opt-in; ARD is a v0.9 draft)
+# ai_catalog     = true   # ARD v0.91 manifest at /.well-known/ard.json (opt-in; ARD is a proposal)
 fallback_widget  = true   # opt-in desktop pairing widget (off by default); needs the widget in R2: npm run update-widget, then npm run upload-widget before deploy
 
 # ---------- Paths ----------
@@ -72,12 +72,13 @@ aliases = ["/AGENTS.md", "/agents.md"]
 path = "/.well-known/api-catalog"
 mode = "merge"   # merge | replace | passthrough | synthesize
 
-# Agentic Resource Discovery (ARD) publisher catalog. Opt-in: also set
+# Agentic Resource Discovery (ARD) v0.91 manifest. Opt-in: also set
 # ai_catalog = true in [features] above. Lists this site's Agent Skill so ARD
 # registries can index it. Publisher half only (no registry API, no signing).
 # [ai_catalog]
-# path = "/.well-known/ai-catalog.json"
-# mode = "synthesize"   # synthesize | merge | passthrough
+# path    = "/.well-known/ard.json"
+# aliases = ["/.well-known/ai-catalog.json"]   # 301 to path; [] leaves it to origin
+# mode    = "synthesize"   # synthesize | merge | passthrough
 # representative_queries = ["find a page about X", "list recent posts"]
 # tags = ["docs"]
 

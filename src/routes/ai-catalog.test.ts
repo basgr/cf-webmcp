@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { aiCatalogResponse } from "./ai-catalog";
+import { aiCatalogResponse, ardRedirect } from "./ai-catalog";
 import type { Config } from "../config-types";
 
 function makeConfig(overrides: Partial<Config> = {}): Config {
@@ -35,7 +35,7 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     robots_txt: { path: "/robots.txt", mode: "merge" },
     agents_md: { path: "/.well-known/agents.md", mode: "merge", aliases: ["/AGENTS.md", "/agents.md"] },
     api_catalog: { path: "/.well-known/api-catalog", mode: "merge" },
-    ai_catalog: { path: "/.well-known/ai-catalog.json", mode: "synthesize", host_identifier: "", representative_queries: [], tags: [] },
+    ai_catalog: { path: "/.well-known/ard.json", aliases: ["/.well-known/ai-catalog.json"], mode: "synthesize", host_identifier: "", representative_queries: [], tags: [] },
     agent_skills: { path: "/.well-known/agent-skills/site/SKILL.md", mode: "synthesize", name: "", description: "", aliases: ["/.well-known/agent-skills/site/SKILLS.md", "/.well-known/agent-skills/site/skill.md", "/.well-known/agent-skills/site/skills.md"], hints: [] },
     agent_skills_index: { path: "/.well-known/agent-skills/index.json", mode: "synthesize" },
     origin_trial: { tokens: [] },
@@ -106,20 +106,22 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
 const cfg = makeConfig();
 
 const SYNTH_BODY =
-  JSON.stringify({ specVersion: "1.0", host: { displayName: "Example", identifier: "did:web:example.com" }, entries: [] }, null, 2) + "\n";
+  JSON.stringify({ host: { displayName: "Example", identifier: "did:web:example.com" }, entries: [] }, null, 2) + "\n";
 
 const noProxy = async () => new Response(null, { status: 404 });
 
+const JSON_UTF8 = "application/json; charset=utf-8";
+
 describe("aiCatalogResponse (synthesize)", () => {
-  it("serves the catalog with ARD headers", async () => {
+  it("serves the ARD manifest as application/json with CORS, noindex and nosniff", async () => {
     const res = await aiCatalogResponse(
-      new Request("https://example.com/.well-known/ai-catalog.json"),
+      new Request("https://example.com/.well-known/ard.json"),
       cfg,
       SYNTH_BODY,
       noProxy,
     );
     expect(res.status).toBe(200);
-    expect(res.headers.get("content-type")).toBe("application/ai-catalog+json");
+    expect(res.headers.get("content-type")).toBe(JSON_UTF8);
     expect(res.headers.get("access-control-allow-origin")).toBe("*");
     expect(res.headers.get("x-robots-tag")).toBe("noindex");
     expect(res.headers.get("x-content-type-options")).toBe("nosniff");
@@ -128,7 +130,7 @@ describe("aiCatalogResponse (synthesize)", () => {
 
   it("sets correct cache-control header", async () => {
     const res = await aiCatalogResponse(
-      new Request("https://example.com/.well-known/ai-catalog.json"),
+      new Request("https://example.com/.well-known/ard.json"),
       cfg,
       SYNTH_BODY,
       noProxy,
@@ -139,54 +141,186 @@ describe("aiCatalogResponse (synthesize)", () => {
     expect(cc).toContain("stale-while-revalidate=86400");
   });
 
-  it("returns exactly the synthesized body as-is", async () => {
-    const body = '{"specVersion":"1.0","host":{"displayName":"Test"},"entries":[]}\n';
+  it("returns exactly the synthesized body as-is and never asks origin", async () => {
+    const body = '{"entries":[],"host":{"displayName":"Test"}}\n';
+    const asked: string[] = [];
     const res = await aiCatalogResponse(
-      new Request("https://example.com/.well-known/ai-catalog.json"),
+      new Request("https://example.com/.well-known/ard.json"),
       cfg,
       body,
-      noProxy,
+      async (u) => {
+        asked.push(u.toString());
+        return new Response(null, { status: 404 });
+      },
     );
     expect(await res.text()).toBe(body);
+    expect(asked).toEqual([]);
   });
 });
 
+describe("ardRedirect", () => {
+  it("301s an alias to the canonical path with noindex and the ARD cache settings", () => {
+    const res = ardRedirect(cfg);
+    expect(res.status).toBe(301);
+    expect(res.headers.get("location")).toBe("/.well-known/ard.json");
+    expect(res.headers.get("x-robots-tag")).toBe("noindex");
+    expect(res.headers.get("x-content-type-options")).toBe("nosniff");
+    const cc = res.headers.get("cache-control") ?? "";
+    expect(cc).toContain("max-age=300");
+    expect(cc).toContain("s-maxage=21600");
+  });
+
+  it("points at a custom canonical path", () => {
+    const res = ardRedirect(makeConfig({ ai_catalog: { ...cfg.ai_catalog, path: "/.well-known/agents/ard.json" } }));
+    expect(res.headers.get("location")).toBe("/.well-known/agents/ard.json");
+  });
+});
+
+const OUR_ID = "urn:air:example.com:skill:example";
+
 const SYNTH_ONE = JSON.stringify(
-  { specVersion: "1.0", host: { displayName: "Example", identifier: "did:web:example.com" },
-    entries: [{ identifier: "urn:air:example.com:skill:example", displayName: "Example", type: "application/ai-skill+md", url: "https://example.com/.well-known/agent-skills/site/SKILL.md" }] },
+  { host: { displayName: "Example", identifier: "did:web:example.com" },
+    entries: [{ identifier: OUR_ID, displayName: "Example", type: "application/ai-skill+md", url: "https://example.com/.well-known/agent-skills/site/SKILL.md" }] },
   null, 2) + "\n";
 
-const originDoc = (entries: unknown[]) =>
-  new Response(JSON.stringify({ specVersion: "1.0", host: { displayName: "O", identifier: "did:web:example.com" }, entries }), { status: 200, headers: { "content-type": "application/json" } });
+const OTHER = { identifier: "urn:air:example.com:agent:other", displayName: "Other", type: "application/a2a-agent-card+json", url: "https://example.com/a.json" };
 
-const req = new Request("https://example.com/.well-known/ai-catalog.json");
+const originDoc = (entries: unknown[], ct = "application/json") =>
+  new Response(JSON.stringify({ host: { displayName: "O", identifier: "did:web:example.com" }, entries }), { status: 200, headers: { "content-type": ct } });
+
+const req = new Request("https://example.com/.well-known/ard.json");
+
+const CANONICAL = "https://example.com/.well-known/ard.json";
+const PREDECESSOR = "https://example.com/.well-known/ai-catalog.json";
+
+/** A proxy answering by URL (404 for anything not listed) that records what was asked. */
+function originBy(answers: Record<string, () => Response>) {
+  const asked: string[] = [];
+  const proxy = async (u: URL) => {
+    asked.push(u.toString());
+    const answer = answers[u.toString()];
+    return answer ? answer() : new Response("not found", { status: 404 });
+  };
+  return { proxy, asked };
+}
 
 describe("aiCatalogResponse (merge)", () => {
   const cfgMerge = { ...cfg, ai_catalog: { ...cfg.ai_catalog, mode: "merge" as const } };
 
-  it("splices our entry into an origin catalog and is idempotent", async () => {
-    const res1 = await aiCatalogResponse(req, cfgMerge, SYNTH_ONE, async () =>
-      originDoc([{ identifier: "urn:air:example.com:agent:other", displayName: "Other", type: "application/a2a-agent-card+json", url: "https://example.com/a.json" }]));
+  it("appends our entry to a valid origin document and is idempotent", async () => {
+    const res1 = await aiCatalogResponse(req, cfgMerge, SYNTH_ONE, async () => originDoc([OTHER]));
+    expect(res1.status).toBe(200);
+    expect(res1.headers.get("content-type")).toBe(JSON_UTF8);
+    expect(res1.headers.get("access-control-allow-origin")).toBe("*");
+    expect(res1.headers.get("x-robots-tag")).toBe("noindex");
     const body1 = await res1.text();
-    const ids = JSON.parse(body1).entries.map((e: any) => e.identifier);
-    expect(ids).toContain("urn:air:example.com:skill:example");
-    expect(JSON.parse(body1).entries).toHaveLength(2);
+    const doc = JSON.parse(body1);
+    expect(doc.entries.map((e: { identifier: string }) => e.identifier)).toEqual([OTHER.identifier, OUR_ID]);
+    // Origin's other members stay as they were; nothing is added at the top level.
+    expect(doc.host).toEqual({ displayName: "O", identifier: "did:web:example.com" });
+    expect(Object.keys(doc).sort()).toEqual(["entries", "host"]);
     // Idempotent: feed our own output back as the origin -> byte identical.
     const res2 = await aiCatalogResponse(req, cfgMerge, SYNTH_ONE, async () =>
       new Response(body1, { status: 200, headers: { "content-type": "application/json" } }));
     expect(await res2.text()).toBe(body1);
   });
 
-  it("falls back to synthesized on 404, unparseable, or invalid entry member", async () => {
-    const cases = [
-      async () => new Response(null, { status: 404 }),
-      async () => new Response("not json", { status: 200, headers: { "content-type": "application/json" } }),
-      async () => new Response(JSON.stringify({ entries: [{ noId: true }] }), { status: 200, headers: { "content-type": "application/json" } }),
-    ];
-    for (const proxy of cases) {
-      const res = await aiCatalogResponse(req, cfgMerge, SYNTH_ONE, proxy);
-      expect(JSON.parse(await res.text()).entries).toHaveLength(1);
+  it("keeps origin's entry when it already has our identifier, and does not duplicate it", async () => {
+    const theirs = { identifier: OUR_ID, displayName: "Their own skill", type: "application/ai-skill+md", url: "https://example.com/theirs/SKILL.md" };
+    const res = await aiCatalogResponse(req, cfgMerge, SYNTH_ONE, async () => originDoc([theirs, OTHER]));
+    const doc = JSON.parse(await res.text());
+    expect(doc.entries).toHaveLength(2);
+    expect(doc.entries[0]).toEqual(theirs);
+    expect(doc.entries[1]).toEqual(OTHER);
+  });
+
+  it("keeps a valid origin document when we have no entry to add (agent_skills off)", async () => {
+    const res = await aiCatalogResponse(req, cfgMerge, SYNTH_BODY, async () => originDoc([OTHER]));
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toBe(JSON_UTF8);
+    expect(JSON.parse(await res.text()).entries).toEqual([OTHER]);
+  });
+
+  it("accepts the predecessor's application/ai-catalog+json and a missing content type", async () => {
+    for (const ct of ["application/ai-catalog+json", ""]) {
+      const res = await aiCatalogResponse(req, cfgMerge, SYNTH_ONE, async () => {
+        const r = originDoc([OTHER]);
+        const headers = new Headers(r.headers);
+        if (ct) headers.set("content-type", ct);
+        else headers.delete("content-type");
+        // Bytes, not a string: a string body would get a default text/plain content type.
+        const res = new Response(new TextEncoder().encode(await r.text()), { status: 200, headers });
+        expect(res.headers.get("content-type")).toBe(ct || null);
+        return res;
+      });
+      expect(JSON.parse(await res.text()).entries, ct || "(none)").toHaveLength(2);
     }
+  });
+
+  it("falls back to origin's predecessor path when the canonical path is 404, and merges that document", async () => {
+    const { proxy, asked } = originBy({ [PREDECESSOR]: () => originDoc([OTHER], "application/ai-catalog+json") });
+    const res = await aiCatalogResponse(req, cfgMerge, SYNTH_ONE, proxy);
+    expect(asked).toEqual([CANONICAL, PREDECESSOR]);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toBe(JSON_UTF8);
+    const ids = JSON.parse(await res.text()).entries.map((e: { identifier: string }) => e.identifier);
+    expect(ids).toEqual([OTHER.identifier, OUR_ID]);
+  });
+
+  it("serves the generated document when both the canonical and the predecessor path are 404", async () => {
+    const { proxy, asked } = originBy({});
+    const res = await aiCatalogResponse(req, cfgMerge, SYNTH_ONE, proxy);
+    expect(asked).toEqual([CANONICAL, PREDECESSOR]);
+    expect(res.headers.get("content-type")).toBe(JSON_UTF8);
+    expect(await res.text()).toBe(SYNTH_ONE);
+  });
+
+  it("asks origin once when the configured path is the predecessor path itself", async () => {
+    const cfgOld = { ...cfgMerge, ai_catalog: { ...cfgMerge.ai_catalog, path: "/.well-known/ai-catalog.json", aliases: [] } };
+    const { proxy, asked } = originBy({});
+    const res = await aiCatalogResponse(new Request(PREDECESSOR), cfgOld, SYNTH_ONE, proxy);
+    expect(asked).toEqual([PREDECESSOR]);
+    expect(await res.text()).toBe(SYNTH_ONE);
+  });
+
+  it("does not consult the predecessor path when the canonical path answers anything but 404", async () => {
+    for (const answer of [() => originDoc([OTHER]), () => new Response("boom", { status: 500 })]) {
+      const { proxy, asked } = originBy({ [CANONICAL]: answer, [PREDECESSOR]: () => originDoc([]) });
+      await aiCatalogResponse(req, cfgMerge, SYNTH_ONE, proxy);
+      expect(asked).toEqual([CANONICAL]);
+    }
+  });
+
+  it.each([
+    { name: "unparseable JSON", body: "not json" },
+    { name: "an entry without a string identifier", body: JSON.stringify({ entries: [{ noId: true }] }) },
+    { name: "no entries array", body: JSON.stringify({ specVersion: "1.0", host: { displayName: "O" } }) },
+    { name: "a top-level array", body: JSON.stringify([{ identifier: "a" }]) },
+  ])("relays an origin JSON document that fails v0.91 validation unchanged, with noindex ($name)", async ({ body }) => {
+    const res = await aiCatalogResponse(req, cfgMerge, SYNTH_ONE, async () =>
+      new Response(body, { status: 200, headers: { "content-type": "application/json", "x-origin": "1" } }));
+    expect(res.status).toBe(200);
+    expect(res.headers.get("x-robots-tag")).toBe("noindex");
+    expect(res.headers.get("content-type")).toBe("application/json");
+    expect(res.headers.get("x-origin")).toBe("1");
+    expect(await res.text()).toBe(body);
+  });
+
+  it("applies the same rules to the predecessor document: invalid JSON or HTML is relayed, a 5xx gets the generated document", async () => {
+    const invalid = originBy({ [PREDECESSOR]: () => new Response('{"entries":{}}', { status: 200, headers: { "content-type": "application/json" } }) });
+    const r1 = await aiCatalogResponse(req, cfgMerge, SYNTH_ONE, invalid.proxy);
+    expect(r1.headers.get("x-robots-tag")).toBe("noindex");
+    expect(await r1.text()).toBe('{"entries":{}}');
+
+    const html = originBy({ [PREDECESSOR]: () => new Response("<html></html>", { status: 200, headers: { "content-type": "text/html" } }) });
+    const r2 = await aiCatalogResponse(req, cfgMerge, SYNTH_ONE, html.proxy);
+    expect(r2.headers.get("content-type")).toBe("text/html");
+    expect(r2.headers.get("x-robots-tag")).toBe("noindex");
+
+    const failed = originBy({ [PREDECESSOR]: () => new Response("boom", { status: 503 }) });
+    const r3 = await aiCatalogResponse(req, cfgMerge, SYNTH_ONE, failed.proxy);
+    expect(r3.status).toBe(200);
+    expect(await r3.text()).toBe(SYNTH_ONE);
   });
 
   it.each([
@@ -198,7 +332,7 @@ describe("aiCatalogResponse (merge)", () => {
   ])("serves the generated document, not the origin answer, after $name", async ({ response }) => {
     const res = await aiCatalogResponse(req, cfgMerge, SYNTH_ONE, async () => response());
     expect(res.status).toBe(200);
-    expect(res.headers.get("content-type")).toBe("application/ai-catalog+json");
+    expect(res.headers.get("content-type")).toBe(JSON_UTF8);
     expect(await res.text()).toBe(SYNTH_ONE);
   });
 
@@ -211,28 +345,15 @@ describe("aiCatalogResponse (merge)", () => {
     expect(await res.text()).toBe("<html>hi</html>");
   });
 
-  it("relays a non-JSON origin response with noindex added", async () => {
-    const res = await aiCatalogResponse(req, cfgMerge, SYNTH_ONE, async () =>
-      new Response("<html></html>", { status: 200, headers: { "content-type": "text/html" } }));
-    expect(res.headers.get("x-robots-tag")).toBe("noindex");
-  });
-
-  it("does NOT merge when origin content-type is text/json or text/plain - relays unchanged (Fix B)", async () => {
+  it("does NOT merge when origin content-type is text/json or text/plain - relays unchanged", async () => {
     // text/json and text/plain look JSON-ish but are not application/* types.
-    // The anchored regex should reject them and fall through to the relay path,
-    // NOT splice our entry in.
-    const jsonBody = JSON.stringify({
-      specVersion: "1.0",
-      host: { displayName: "O", identifier: "did:web:example.com" },
-      entries: [{ identifier: "urn:air:example.com:agent:other", displayName: "Other", type: "application/a2a-agent-card+json", url: "https://example.com/a.json" }],
-    });
+    const jsonBody = JSON.stringify({ host: { displayName: "O" }, entries: [OTHER] });
     for (const ct of ["text/json", "text/plain"]) {
       const res = await aiCatalogResponse(req, cfgMerge, SYNTH_ONE, async () =>
         new Response(jsonBody, { status: 200, headers: { "content-type": ct } }));
-      // Relayed: x-robots-tag must be noindex (withNoindex path) and the body
-      // must be the raw origin body, NOT the merged ai-catalog+json document.
       expect(res.headers.get("x-robots-tag")).toBe("noindex");
-      expect(res.headers.get("content-type")).not.toBe("application/ai-catalog+json");
+      expect(res.headers.get("content-type")).toBe(ct);
+      expect(await res.text()).toBe(jsonBody);
     }
   });
 });
