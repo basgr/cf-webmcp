@@ -113,6 +113,8 @@ namespace = "/_webmcp"
 
 [injection]
 # Exclude checkout, cart, account, and admin from injection.
+# Globs on the path only (never the query string): * any run of characters, ? exactly one.
+# Query-string endpoints such as /?wc-ajax= or /?add-to-cart= cannot be excluded here.
 exclude_paths = [
   "/wp-admin/*",
   "/wp-login.php",
@@ -120,8 +122,6 @@ exclude_paths = [
   "/checkout*",
   "/cart*",
   "/my-account*",
-  "/?wc-ajax=*",
-  "/?add-to-cart=*",
 ]
 
 [cache]

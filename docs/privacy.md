@@ -12,7 +12,7 @@ In route-only mode, the Worker only sees requests on Worker-claimed paths.
 
 By default, **nothing identifying**. The Worker logs nothing about visitors (no client IPs, cookies or request bodies, that is, executor input) and nothing for a request that goes as planned. It writes one error line when something goes wrong, which shows in `wrangler tail` (and in Workers Logs, if you turn them on):
 
-- an origin redirect the Worker refused (on an executor) or could not follow (on a merge route; a redirect to an origin outside `allowed_origins` is relayed to the client there, not logged): the origin and path of the start URL and of a refused target, or a `Location` it could not use, cut at its first `?` or `#`;
+- an origin redirect the Worker refused or could not follow: on an executor every such redirect (a target outside `allowed_origins`, more than 5 hops, an unusable `Location`), on a merge route all but a redirect to an origin outside `allowed_origins`, which is relayed to the client there and not logged. The line holds the origin and path of the start URL and of a refused target, or the unusable `Location` cut at its first `?` or `#`;
 - a failed origin fetch on a merge route: the origin and path, and the error message;
 - an executor that threw: the tool name and the error message;
 - an `http_json` origin answer that is not valid JSON: the parser's message, which can quote the start of origin's body;
@@ -63,4 +63,4 @@ If `[features].fallback_widget = true` (it is off by default), the widget JS fro
 
 ## Health endpoint
 
-`/_webmcp/health` exposes the config hash, the build time, the last preflight result, whether the widget object is in R2, each origin-trial token's feature and expiry (never the token), and the tool names (their success and error counts are always `null`). It does not expose request bodies, client data, or secrets. If you would rather not expose it publicly, set a bearer token with the `CF_WEBMCP_HEALTH_TOKEN` secret (or `[health].token`): with a token set, a request without it gets `401`. `[health].public = false` with no token at all turns the endpoint off (`404`).
+`/_webmcp/health` exposes the schema version, the config hash, the build time, the last preflight result, whether the widget object is in R2 (`widget_asset_present`), each origin-trial token's feature, expiry and whether it has `expired` (never the token; `{"error": "undecodable"}` for one that cannot be read), and the tool names with `ok_24h`, `err_24h` and `p95_ms_24h`, which are always `null`. It does not expose request bodies, client data, or secrets. If you would rather not expose it publicly, set a bearer token with the `CF_WEBMCP_HEALTH_TOKEN` secret (or `[health].token`): with a token set, a request without it gets `401`. `[health].public = false` with no token at all turns the endpoint off (`404`).

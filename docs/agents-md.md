@@ -9,11 +9,13 @@ This is the "user manual" companion to the manifest. The manifest is the typed c
 The canonical file is generated from your TOML and merged into origin content (or synthesized if no origin file exists). Default content:
 
 - A `## WebMCP on this site` heading and a one-line site description
-- Available tools - both imperative (`[[tools]]` from TOML) and form-injected (`[[forms]]` from TOML), with descriptions
-- Manifest URL for programmatic consumers (only while `[features].manifest` is on)
-- How agents connect: browser-native registration, and the landing page. With the desktop-bridge widget on (`[features].fallback_widget = true` and a widget pinned in the build) the block tells desktop MCP clients to pair at the landing page and notes that the widget only starts there. With the widget off, the default, it links the landing page as the "WebMCP page" that lists the tools, and nothing says to pair. With `[features].webmcp_landing = false` the landing page is not mentioned.
-- Operational notes: response envelope shape, rate-limit honour, health endpoint
-- What to avoid: cross-origin executor calls without CORS config, ignoring `Retry-After`, etc.
+- Available tools - the imperative ones (`[[tools]]` from TOML) and, while `[features].inject_html` is on, the form tools (`[[forms]]` from TOML), with descriptions. With HTML injection off the Worker stamps no form, so no form tool exists and none is listed.
+- Manifest URL for programmatic consumers (only while `[features].manifest` is on). It covers `[[tools]]` only, and says so when form tools exist.
+- How agents connect, written from the config:
+  - Browser-native registration. With `inject_html` on: on pages that load the cf-webmcp script, the tools that are not forms register on `document.modelContext` (Chrome 146 to 149: the deprecated `navigator.modelContext`), and a form tool exists only on pages that carry its form. With `inject_html` off: the tools register when the landing page loads, if it uses the default template (which loads the bootstrap); with a custom template, or with the landing off, there is no such line.
+  - The landing page. With the desktop-bridge widget on (`[features].fallback_widget = true` and a widget pinned in the build) the block tells desktop MCP clients to pair at the landing page and notes that the widget only starts there. With the widget off, the default, it links the landing page as the "WebMCP page", which with the default template lists the tools that are not forms; nothing says to pair. With `[features].webmcp_landing = false` the landing page is not mentioned.
+- Operational notes: the exec endpoint (for the tools that are not forms), the response envelope, `Retry-After` (sent with the Worker's own rate limit, not with an origin 429), and the health endpoint, linked only when it answers without a token: `[health].public` on and neither `[health].token` nor the `CF_WEBMCP_HEALTH_TOKEN` secret set.
+- What to avoid: cross-origin executor calls without CORS config, retrying sooner than `Retry-After`, etc.
 
 The Worker wraps this in `<!-- cf-webmcp:begin -->` / `<!-- cf-webmcp:end -->` markers so origin content around it is preserved across deploys.
 

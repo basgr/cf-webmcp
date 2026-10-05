@@ -45,7 +45,7 @@ autosubmit  = false
 | `name` | yes | Tool name. Must match `^[a-z][a-z0-9_]*$` (same rules as imperative tool names). |
 | `description` | yes | Human-readable description of what the form does. Agents see this when listing tools. |
 | `selector` | yes | CSS selector matching the `<form>` element. Must start with `form`. Examples: `form#contact`, `form.contact-form`, `form[action="/contact"]`. |
-| `paths` | no | List of glob patterns. The form is only injected when the request pathname matches at least one entry. Empty list (default) means inject on every page. Use glob `*` for wildcards. |
+| `paths` | no | List of glob patterns. The form is only injected when the request pathname matches at least one entry. Empty list (default) means inject on every page. `*` and `?` are wildcards (see [Path scoping](#path-scoping-with-paths)). |
 | `autosubmit` | no | Boolean. When `true`, the Worker stamps `toolautosubmit` on the form. Default `false`. |
 | `params` | no | List of per-input descriptions. Each has its own `selector` (resolved as a descendant of the form's selector) and `description`. |
 
@@ -60,7 +60,7 @@ The selectors must work in Cloudflare HTMLRewriter, which supports a subset of C
 - Descendant (space) and child (`>`) combinators. The form selector and each param selector are joined with a descendant combinator: `form#contact input[name=email]`. A param selector may start with `>` to mean a direct child: `> input[name=email]`.
 - `:nth-child()` and `:nth-of-type()` with `an+b`, `odd`, `even` or a number (no `of S` clause), `:first-child` and `:first-of-type` (no argument), and `:not(...)` with a non-empty argument
 
-Not supported: the sibling combinators `+` and `~`, pseudo-elements (`::before`), `:has()`, every other pseudo-class (`:hover`, `:last-child`, `:is()`), comma lists, comments, namespaces (`svg|rect`) and backslash escapes. Quoted attribute values may contain any of these characters (`[action="/a,b"]` is fine), except backslashes and line breaks. Where you would escape a character in an identifier, match the attribute instead: `[class~="sm:flex"]` for a Tailwind class, `[id="123"]` for an id that starts with a digit. A selector may be at most 1024 characters and 64 compounds long. Every compound counts toward the 64, also those inside `:not()` and in each entry of a list (`:not(.a, .b)` holds two, and so does a `dom_extract` list such as `main, article`), and `:not()` may nest at most 16 deep. The form selector and each param selector are checked on their own.
+Not supported: the sibling combinators `+` and `~`, pseudo-elements (`::before`), `:has()`, every other pseudo-class (`:hover`, `:last-child`, `:is()`), comma lists, comments, namespaces (`svg|rect`) and backslash escapes. Quoted attribute values may contain any of these characters (`[action="/a,b"]` is fine), except backslashes and line breaks. Where you would escape a character in an identifier, match the attribute instead: `[class~="sm:flex"]` for a Tailwind class, `[id="123"]` for an id that starts with a digit. A selector may be at most 1024 characters and 64 compounds long. Every compound counts toward the 64, also those inside `:not()` and in each entry of a list (`form:not(.a, .b)` counts three: `form:not(...)`, `.a` and `.b`; a `dom_extract` list such as `main, article` counts two), and `:not()` may nest at most 16 deep. The form selector and each param selector are checked on their own.
 
 The build checks every selector against exactly this list and fails with a message naming the problem, so a typo is caught when you build rather than on live pages. The check is deliberately strict: it accepts only what Cloudflare's HTMLRewriter is known to take. It is a safeguard, not a guarantee; if a selector still gets past it and HTMLRewriter rejects it at request time, the Worker skips only that form (or that one param), logs a line naming it, and injects everything else on the page as usual. If your form does not have a stable id/class/attribute, the easiest fix is to add one on the origin side.
 
@@ -70,16 +70,17 @@ The `selector` and `strip` entries of a `dom_extract` tool go through the same c
 
 If `paths` is empty (the default), the form is injected on every HTML page the Worker proxies. This is often wrong - your `#contact` selector might accidentally match a similar-id element on another page, or you do not want the search form's tool advertised on the checkout page.
 
-Limit injection to specific URLs with `paths`. Glob `*` is supported:
+Limit injection to specific URLs with `paths`. Two characters are wildcards: `*` matches any run of characters, none included, and `?` matches exactly one character; both match `/` too. Every other character, `.` and the brackets included, matches itself. A pattern is matched against the whole path and never sees the query string: `/search?q=*` does not match a request for `/search?q=1`, whose path is `/search`. Examples:
 
 ```toml
 paths = ["/contact"]                    # only /contact
 paths = ["/contact", "/contact/*"]      # /contact and any nested page
 paths = ["/checkout/*"]                 # only inside checkout flow
-paths = ["/*"]                          # any top-level page (effectively all)
+paths = ["/*"]                          # every path (* matches / too)
+paths = ["/v?/docs/*"]                  # /v1/docs/..., /v2/docs/...: one character after /v
 ```
 
-Path matching is exact when no `*` is present. Glob matching is case-sensitive.
+Path matching is exact when no `*` or `?` is present. Glob matching is case-sensitive. `[injection].exclude_paths` uses the same patterns. The build warns about every pattern in either list that contains `?`: before v0.6.0 a `?` made the previous character optional (`/search?*` also matched `/search`), and now it stands for one character.
 
 ## Hand-stamped attributes always win
 

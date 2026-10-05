@@ -78,7 +78,7 @@ Since September 15, 2026, **new** Cloudflare zones block Agent and Training bots
 
 ## Tool catalogue is static at deploy
 
-Every deploy recompiles the TOML; `CONFIG_HASH` changes only when the compiled config does (a TOML edit, or an upgrade that changes a default). There is no runtime way to add or remove tools without a redeploy. This is intentional: simpler mental model, smaller attack surface, no runtime TOML parsing.
+Every deploy recompiles the TOML. `CONFIG_HASH` changes when a value in the validated config changes (in the TOML or in the TOML it inherits), or when an upgrade adds or changes a default. There is no runtime way to add or remove tools without a redeploy. This is intentional: simpler mental model, smaller attack surface, no runtime TOML parsing.
 
 If you need rapidly-changing tools, redeploy. Wrangler deploys take ~5 seconds.
 

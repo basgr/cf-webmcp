@@ -151,7 +151,7 @@ The bridge's websocket port defaults to 4797; the script passes free ones with `
 
 - **R2-backed widget with `npm run dev:worker`.** The example-site config ships with `fallback_widget = false`. The pairing end-to-end above switches it on in a temporary copy and puts the widget into local R2; to try it by hand, do the same: `npm run upload-widget -- --local`, then build from a copy of the config with `fallback_widget = true`.
 - **CF Analytics Engine metrics.** `/_webmcp/health` returns `null` for executor metrics in local dev.
-- **WAF allow-listing.** The deploy-token headers go out on the Worker's origin fetches when `CF_WEBMCP_DEPLOY_TOKEN` is set, but the local origin has no WAF that reads them.
+- **WAF allow-listing.** The deploy-token headers go out on the executors' and the merge routes' fetches to origin (not on proxied page requests) when `CF_WEBMCP_DEPLOY_TOKEN` is set, but the local origin has no WAF that reads them.
 
 ## Restart loop
 

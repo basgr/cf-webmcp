@@ -119,6 +119,7 @@ mode = "synthesize"   # synthesize | passthrough
 namespace = "/_webmcp"   # private routes prefix
 
 [injection]
+# Globs on the path only (never the query string): * any run of characters, ? exactly one.
 exclude_paths = [
   "/wp-admin/*",
   "/wp-login.php",

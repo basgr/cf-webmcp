@@ -14,7 +14,7 @@ The three are complementary, not redundant. The manifest tells an agent *what to
 
 ## What gets emitted
 
-In `synthesize` mode (default), cf-webmcp generates:
+In `synthesize` mode (default), cf-webmcp generates, for a site with three `[[tools]]`, two `[[agent_skills.hints]]`, no `[[forms]]`, the widget on, and the defaults otherwise:
 
 ```markdown
 ---
@@ -26,7 +26,7 @@ description: "An example site exposing WebMCP tools."
 
 ## Tools available on this site
 
-Browser-native agents register these automatically via `document.modelContext` when the WebMCP runtime is present. Desktop MCP clients can pair at <https://example.com/mcp> and call the tools through the localhost bridge.
+On pages that load this site's cf-webmcp script, the tools register on `document.modelContext` (Chrome 146 to 149: the deprecated `navigator.modelContext`) when the page loads. Desktop MCP clients can pair at <https://example.com/mcp> and call the tools through the localhost bridge.
 
 - `search_pages(query: string)` - Search the site by keyword.
 - `list_posts()` - List recent posts.
@@ -46,15 +46,22 @@ Search is path-based, not full-text.
 <https://example.com/.well-known/webmcp>
 ```
 
-The frontmatter `name` and `description` derive from `[site].name` and `[site].description`. The name is `[agent_skills].name` when set, which must be lowercase letters and digits in groups joined by single hyphens (`example-site`), at most 64 characters; otherwise it is the slug of `[site].name` (NFKD, accents removed, lowercased, letters such as `ß` and `ø` written as `ss` and `o`, other characters turned into hyphens, cut to 64 characters: `Café` becomes `cafe`, `Grüße Welt` becomes `grusse-welt`). The skills index entry and the ARD entry identifier use the same name, and the build fails when it would be empty (see [`docs/ard.md`](ard.md#the-skill-name)). In `merge` mode with a SKILL.md at origin, origin's frontmatter is kept as it is. The tool list is auto-generated from `[[tools]]` and `[[forms]]`. The "When to use which" and "Common pitfalls" sections come from `[[agent_skills.hints]]` blocks you write in TOML.
+The frontmatter `name` and `description` derive from `[site].name` and `[site].description`. The name is `[agent_skills].name` when set, which must be lowercase letters and digits in groups joined by single hyphens (`example-site`), at most 64 characters; otherwise it is the slug of `[site].name` (NFKD, accents removed, lowercased, letters such as `ß` and `ø` written as `ss` and `o`, other characters turned into hyphens, cut to 64 characters: `Café` becomes `cafe`, `Grüße Welt` becomes `grusse-welt`). The skills index entry and the ARD entry identifier use the same name, and the build fails when it would be empty (see [`docs/ard.md`](ard.md#the-skill-name)). In `merge` mode with a SKILL.md at origin, origin's frontmatter is kept as it is. The tool list is auto-generated from `[[tools]]`, and from `[[forms]]` while `[features].inject_html` is on (with HTML injection off the Worker stamps no form, so no form tool exists). The "When to use which" and "Common pitfalls" sections come from `[[agent_skills.hints]]` blocks you write in TOML.
 
-The example shows a site with the desktop-bridge widget on (`[features].fallback_widget = true` and a widget pinned in the build). The sentence about the landing page follows the features:
+The example shows a site with the desktop-bridge widget on (`[features].fallback_widget = true` and a widget pinned in the build). The paragraph under `## Tools available on this site` follows the config. Its first sentence says where the tools register:
 
-- Widget on: `Desktop MCP clients can pair at <landing> and call the tools through the localhost bridge.`
-- Widget off (the default, or no usable pin in the build): `The tools are also listed at <landing>.` Nothing says a desktop client can pair there.
+- `[features].inject_html` on (the default): `On pages that load this site's cf-webmcp script, the tools register on ...` as above. With `[[forms]]` configured it says "the tools that are not forms" and adds `A form tool exists only on pages that carry its form.`
+- `inject_html` off and the default landing template, which loads the bootstrap: `The tools register on ... when the WebMCP page, <landing>, loads.`
+- `inject_html` off with a custom landing template, or with the landing off: no such sentence.
+
+The second sentence is about the landing page:
+
+- Widget on: `Desktop MCP clients can pair at <landing> and call the tools through the localhost bridge.` (The bridge reaches `[[tools]]` only; with form tools it says "the tools that are not forms".)
+- Widget off (the default, or no usable pin in the build), default template: `The tools are also listed at <landing>.` Nothing says a desktop client can pair there.
+- Widget off, custom template: `The WebMCP page is <landing>.`
 - `[features].webmcp_landing = false`: no sentence about the landing page at all.
 
-The closing `## Full machine-readable tool schema` section, which names the manifest, is there only while `[features].manifest` is on.
+The closing `## Full machine-readable tool schema` section, which names the manifest, is there only while `[features].manifest` is on. With form tools it says that the manifest covers the tools that are not forms.
 
 Hint `body` is rendered into agent-visible markdown - see [`docs/security.md`](security.md) before pasting user-generated content into hint fields.
 

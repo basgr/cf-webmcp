@@ -75,10 +75,10 @@ Keys are sorted and the output is byte-stable for one config.
 - **`url`** is the absolute URL of the SKILL.md.
 - **`displayName`** is `[site].name`, the human-readable name, not the slug.
 - **`description`** is `[agent_skills].description`, else `[site].description`; omitted when both are empty.
-- **`capabilities`** lists the `[[tools]]` and `[[forms]]` names.
+- **`capabilities`** lists the `[[tools]]` names and, while `[features].inject_html` is on, the `[[forms]]` names (with HTML injection off the Worker stamps no form, so no form tool exists).
 - **`representativeQueries`** and **`tags`** come from `[ai_catalog]` and are omitted when empty. ARD recommends two to five queries; registries build their search index from them.
 
-A single trailing dot on the host is dropped from both identifiers. With the feature on, a `[site].domain` whose port is outside 1 to 65535 fails the build with an error that names the field and the value. (A `[site].public_url` that is not an `http` or `https` origin, such as `localhost:8787` or `example.com`, fails validation for every config.) ARD v0.91 wants the publisher to be a fully qualified domain name: when `[site].domain` is `localhost`, an IP address, a single label or has an empty label, the build prints a warning and builds the manifest anyway. A name under `.localhost` (`agent.localhost`) is the URN naming guide's own placeholder for local work and gets no warning.
+A single trailing dot on the host is dropped from both identifiers. A `[site].domain` whose port is outside 1 to 65535, and a `[site].public_url` that is not an `http` or `https` origin (`localhost:8787`, `example.com`), fail validation for every config. With the feature on, a `[site].domain` that the URL parser refuses as a host (an invalid IPv4 address such as `1.2.3.4.5`) fails the build with an error that names the field and the value. ARD v0.91 wants the publisher to be a fully qualified domain name: when `[site].domain` is `localhost`, an IP address, a single label or has an empty label, the build prints a warning and builds the manifest anyway. A name under `.localhost` (`agent.localhost`) is the URN naming guide's own placeholder for local work and gets no warning.
 
 With `[features].agent_skills = false` the manifest has `"entries": []`, and the build prints a warning.
 

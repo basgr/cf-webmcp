@@ -105,6 +105,8 @@ mode = "synthesize"   # synthesize | passthrough
 namespace = "/_webmcp"
 
 [injection]
+# Globs on the path only (never the query string): * any run of characters, ? exactly one.
+# A query-string endpoint such as /?rest_route= cannot be excluded here.
 exclude_paths = [
   "/wp-admin/*",
   "/wp-login.php",
@@ -112,7 +114,6 @@ exclude_paths = [
   "/xmlrpc.php",
   "/feed/*",
   "/comments/feed/*",
-  "/?rest_route=*",
 ]
 
 [cache]
