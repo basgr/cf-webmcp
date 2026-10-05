@@ -204,8 +204,9 @@ const Site = z.object({
   // A bare hostname (optionally with a port), e.g. `example.com` or
   // `localhost:8787`. Interpolated build-time into `https://${domain}` base
   // URLs (Link header, robots.txt, llms.txt, HTML <link> tag). The ARD
-  // manifest's did:web and urn:air identifiers are derived from the host of
-  // public_url, or from this domain when public_url is unset (src/ard.ts).
+  // manifest's urn:air publisher is this domain without its port; its did:web
+  // host identifier is the host of public_url, or this domain when public_url
+  // is unset (src/ard.ts).
   // The hostname charset forbids CR/LF, double-quotes, whitespace, schemes and
   // paths, so a malicious build-time TOML cannot inject into those headers/text.
   domain: z

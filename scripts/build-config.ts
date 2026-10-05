@@ -1268,8 +1268,10 @@ export interface AiCatalogDoc {
  * on the publisher domain is valid even in passthrough). When agent_skills is
  * off, entries is [] and a warning is logged.
  *
- * Identifiers come from the site's canonical host (public_url, else domain):
- * did:web keeps a port, percent-encoded; the urn:air publisher segment drops it.
+ * host.identifier is did:web of the site's canonical host (public_url, else
+ * domain), a port percent-encoded. The urn:air publisher segment is
+ * [site].domain without its port: the ARD URN naming guide keeps the real
+ * domain in local development too, so a dev public_url does not change it.
  */
 export function buildAiCatalog(config: Config): AiCatalogDoc {
   const base = siteBase(config);
@@ -1286,7 +1288,7 @@ export function buildAiCatalog(config: Config): AiCatalogDoc {
     ];
     const entry: AiCatalogEntry = {
       // The same name as the SKILL.md frontmatter and the skills index.
-      identifier: urnAir(host, "skill", skillName(config)),
+      identifier: urnAir(config.site.domain, "skill", skillName(config)),
       displayName: config.agent_skills.name || config.site.name,
       type: SKILL_MEDIA_TYPE,
       url: `${base}${config.agent_skills.path}`,

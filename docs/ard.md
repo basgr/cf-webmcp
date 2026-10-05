@@ -68,7 +68,7 @@ Keys are sorted and the output is byte-stable for one config.
 
 - **No `specVersion`.** v0.91 requires only `entries` and defines no version member. Other top-level members are ignored by ARD.
 - **`host`** is such a member: ARD ignores it. cf-webmcp keeps it in the shape the predecessor format used. `displayName` comes from `[site].name`. `identifier` is `did:web:<host>`, where `<host>` is the host of `[site].public_url` when set, else `[site].domain`, port included. A port is percent-encoded, as the `did:web` method requires: `did:web:example.com%3A8787`. `[ai_catalog].host_identifier` overrides it.
-- **`entries[0].identifier`** is `urn:air:<publisher>:skill:<skill name>` (v0.91 Appendix C). `<publisher>` is the same host without its port, lowercase, an internationalised name in its punycode form. `<skill name>` is the skill name described below.
+- **`entries[0].identifier`** is `urn:air:<publisher>:skill:<skill name>` (v0.91 Appendix C). `<publisher>` is `[site].domain` without its port, lowercase, an internationalised name in its punycode form. It does not follow `[site].public_url`: the ARD URN naming guide keeps the real domain in local development too, so the identifier is the same in development and production. `<skill name>` is the skill name described below.
 - **`type`** is `application/ai-skill+md`, the type of the skill entry example in v0.91 section 4.4.
 - **`url`** is the absolute URL of the SKILL.md.
 - **`displayName`** is `[agent_skills].name` when set, else `[site].name`.

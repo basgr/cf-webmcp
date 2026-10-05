@@ -601,12 +601,15 @@ describe("ai_catalog generation (ARD v0.91 ard.json)", () => {
     expect(doc.entries[0].url).toBe("https://example.com:8787/.well-known/agent-skills/site/SKILL.md");
   });
 
-  it("takes the host from public_url when it is set", async () => {
+  it("takes the did:web host from public_url when it is set, but keeps the urn on [site].domain", async () => {
+    // The ARD URN naming guide: the publisher segment stays the real domain in local
+    // development too, so the identifier does not change between dev and production.
     const toml = await writeToml("ard-public.toml", ardToml(['public_url = "http://localhost:8787"']));
     const { files } = await runBuild(toml);
     const doc = ard(files);
     expect(doc.host.identifier).toBe("did:web:localhost%3A8787");
-    expect(doc.entries[0].identifier).toBe("urn:air:localhost:skill:example-co");
+    expect(doc.entries[0].identifier).toBe("urn:air:example.com:skill:example-co");
+    expect(doc.entries[0].url).toBe("http://localhost:8787/.well-known/agent-skills/site/SKILL.md");
   });
 
   it("emits empty entries when agent_skills is off", async () => {
