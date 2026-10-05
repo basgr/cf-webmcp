@@ -293,6 +293,15 @@ export function defaultAnnotationsFor(executorType: string): {
  * canonical host is cross-origin and the exec endpoint sends no CORS headers. The discovery
  * documents (manifest, Link header, llms.txt, agents.md, SKILL.md) stay absolute on the site
  * URL: they are read from outside the page.
+ *
+ * Threat model of the page-wide registry: it guards against the script running twice and
+ * against page scripts that throw, freeze or occupy its key by accident or crudely; none of
+ * those can make it throw or register a name twice. It does not defend against a page script
+ * that sets out to defeat it by replacing builtins (Object.defineProperty, Object.freeze,
+ * Object.prototype.hasOwnProperty) or by installing an accessor or stateful Proxy under the
+ * key. Such a script runs with the page's full authority and could register one of our tool
+ * names itself, which crashes the renderer just the same; no state this script keeps on the
+ * page can be protected from it.
  */
 function buildBootstrap(config: Config, configHash: string): string {
   const ns = config.paths.namespace;
