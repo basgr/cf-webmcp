@@ -2595,6 +2595,46 @@ describe("exec: error messages name no host and carry no runtime text", () => {
   });
 });
 
+describe("makeDeps: the exec cache never carries an answer from one test config to another", () => {
+  it("derives CONFIG_HASH from the config, unless a test passes one", () => {
+    const a = makeDeps({ site: { name: "A" } }).meta.CONFIG_HASH;
+    expect(makeDeps({ site: { name: "A" } }).meta.CONFIG_HASH).toBe(a);
+    expect(makeDeps({ site: { name: "B" } }).meta.CONFIG_HASH).not.toBe(a);
+    expect(makeDeps({}, { meta: { CONFIG_HASH: "explicit" } }).meta.CONFIG_HASH).toBe("explicit");
+  });
+
+  it("two configs with the same tool name and input each get their own answer", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+        return new Response(`from ${url.pathname}`, { headers: { "content-type": "text/plain" } });
+      }),
+    );
+    const tool = (path: string) =>
+      makeDeps({ tools: [{ name: "cache_probe_tool", description: "d", executor: { type: "http_get", url_template: `https://example.com${path}` } }] });
+
+    const run = async (deps: ReturnType<typeof makeDeps>) => {
+      const pending: Promise<unknown>[] = [];
+      const ctx = { waitUntil: (p: Promise<unknown>) => pending.push(p), passThroughOnException: () => {}, props: {} } as unknown as ExecutionContext;
+      const res = await createHandler(deps).fetch(
+        new Request("https://example.com/_webmcp/exec/cache_probe_tool", { method: "POST", body: "{}" }) as Request<unknown, IncomingRequestCfProperties>,
+        env,
+        ctx,
+      );
+      const body = (await res.json()) as { data: { body: string } };
+      await Promise.all(pending);
+      return { body: body.data.body, cache: res.headers.get("x-webmcp-cache") };
+    };
+
+    const first = await run(tool("/first-config"));
+    const second = await run(tool("/second-config"));
+
+    expect(first).toEqual({ body: "from /first-config", cache: "MISS" });
+    expect(second).toEqual({ body: "from /second-config", cache: "MISS" });
+  });
+});
+
 describe("the deploy token never comes back to the caller", () => {
   const TOKEN = "SECRET-DEPLOY-TOKEN-0123456789abcdef";
   const tokenEnv: Env = { ...env, CF_WEBMCP_DEPLOY_TOKEN: TOKEN };

@@ -59,12 +59,32 @@ export function makeConfig(overrides: ConfigOverrides = {}): Config {
   return ConfigSchema.parse(deepMerge(minimalValidConfig, overrides));
 }
 
+/**
+ * A short hash of the config, like the build's CONFIG_HASH (8 hex), but synchronous: FNV-1a
+ * over its JSON. Not the build's value, only one that differs whenever the config does.
+ */
+function testConfigHash(config: Config): string {
+  const text = JSON.stringify(config);
+  let h = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) {
+    h ^= text.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0).toString(16).padStart(8, "0");
+}
+
+/**
+ * Full HandlerDeps for a test. CONFIG_HASH is derived from the config (unless `extra.meta` sets
+ * one): the exec cache is keyed on it, and caches.default lives across the tests of a file, so a
+ * constant would let a cached answer of one test's config answer another's same tool and input.
+ */
 export function makeDeps(
   configOverrides: ConfigOverrides = {},
   extra: { assets?: Partial<HandlerAssets>; meta?: Partial<HandlerMeta> } = {},
 ): HandlerDeps {
+  const config = makeConfig(configOverrides);
   return {
-    config: makeConfig(configOverrides),
+    config,
     assets: {
       bootstrapJs: "/*bootstrap*/",
       landingHtml: "<html><head></head><body>landing</body></html>",
@@ -73,7 +93,7 @@ export function makeDeps(
       ...extra.assets,
     },
     meta: {
-      CONFIG_HASH: "testhash",
+      CONFIG_HASH: testConfigHash(config),
       CF_WEBMCP_VERSION: "0.0.0-test",
       MANIFEST_ETAG: '"manifesttesttag0"',
       LANDING_ETAG: '"landingtesttag00"',
