@@ -4,8 +4,11 @@
  */
 
 import type { ExecutorContext } from "./common";
-import { fromErr, mapOriginStatus, originFetch } from "./common";
+import { fromErr, mapOriginStatus, originFetch, readFailure, readWithLimit } from "./common";
 import { err, ok, type Envelope } from "../envelope";
+
+/** Largest feed body we will read. */
+export const MAX_FEED_BYTES = 2 * 1024 * 1024;
 
 export interface RssConfig {
   feed_url: string;
@@ -37,8 +40,9 @@ export async function runRssFeed(
   if ("error" in res) return fromErr(res.error);
   const mapped = mapOriginStatus(res.status);
   if (mapped) return fromErr(mapped);
-  const text = await res.text();
-  const items = parseFeed(text).slice(0, config.max_items);
+  const body = await readWithLimit(res, MAX_FEED_BYTES, ctx.signal);
+  if (!body.ok) return fromErr(readFailure(body, ctx, MAX_FEED_BYTES, "feed"));
+  const items = parseFeed(body.text).slice(0, config.max_items);
   return ok({ items });
 }
 

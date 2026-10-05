@@ -53,13 +53,14 @@ autosubmit  = false
 
 The selectors must work in Cloudflare HTMLRewriter, which supports a subset of CSS Selectors Level 4:
 
-- Element names: `form`, `input`, `select`, `textarea`
+- Element names: `form`, `input`, `select`, `textarea`, and `*`
 - IDs: `#myform`
 - Classes: `.contact-form`
-- Attribute selectors: `[name=email]`, `[action="/contact"]`, `[type^="email"]`
-- Descendant combinator (used implicitly between the form selector and each param selector): `form#contact input[name=email]`
+- Attribute selectors: `[name=email]`, `[action="/contact"]`, `[type^="email"]`, with the operators `=`, `~=`, `^=`, `$=`, `*=`, `|=` and an optional `i` or `s` flag
+- Descendant (space) and child (`>`) combinators. The form selector and each param selector are joined with a descendant combinator: `form#contact input[name=email]`. A param selector may start with `>` to mean a direct child: `> input[name=email]`.
+- `:nth-child()`, `:first-child`, `:nth-of-type()`, `:first-of-type` and `:not(...)`
 
-Complex pseudo-classes (`:has()`, `:nth-of-type(...)`) are not supported. If your form does not have a stable id/class/attribute, the easiest fix is to add one on the origin side.
+Not supported: the sibling combinators `+` and `~`, pseudo-elements (`::before`), `:has()`, every other pseudo-class (`:hover`, `:last-child`, `:is()`), and comma lists. Quoted attribute values may contain any of these characters (`[action="/a,b"]` is fine). The build checks every selector and fails with a message naming the construct, so an unsupported selector is caught at deploy time rather than on live pages. If your form does not have a stable id/class/attribute, the easiest fix is to add one on the origin side.
 
 ## Path scoping with `paths`
 

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { runRssFeed, parseFeed } from "./rss";
+import { runRssFeed, parseFeed, MAX_FEED_BYTES } from "./rss";
 
 const ctx = {
   allowedOrigins: ["https://example.com"],
@@ -74,5 +74,30 @@ describe("runRssFeed", () => {
     const r = await runRssFeed(ctx, { feed_url: "https://example.com/feed", max_items: 5 }, {});
     if (r.ok) throw new Error("expected error");
     expect(r.error.code).toBe("origin_5xx");
+  });
+
+  it("reads the feed through a size cap of 2 MiB", async () => {
+    expect(MAX_FEED_BYTES).toBe(2 * 1024 * 1024);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response("a".repeat(MAX_FEED_BYTES + 1), { status: 200, headers: { "content-type": "application/rss+xml" } }),
+      ),
+    );
+    const r = await runRssFeed(ctx, { feed_url: "https://example.com/feed", max_items: 5 }, {});
+    if (r.ok) throw new Error("expected error");
+    expect(r.error.code).toBe("response_too_large");
+  });
+
+  it("accepts a feed of exactly the cap", async () => {
+    const padded = rss20 + " ".repeat(MAX_FEED_BYTES - rss20.length);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(padded, { status: 200, headers: { "content-type": "application/rss+xml" } })),
+    );
+    const r = await runRssFeed(ctx, { feed_url: "https://example.com/feed", max_items: 5 }, {});
+    if (!r.ok) throw new Error(JSON.stringify(r));
+    expect((r.data as { items: unknown[] }).items).toHaveLength(2);
   });
 });

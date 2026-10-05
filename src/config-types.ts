@@ -4,6 +4,7 @@
  */
 
 import { z } from "zod";
+import { checkSelector, type SelectorCheckOptions } from "./selector-grammar";
 
 // ---------- Reusable shapes ----------
 
@@ -440,8 +441,22 @@ const RateLimitBlock = z.object({
 // these in their HTML. With a [[forms]] block, cf-webmcp does the stamping
 // at the edge so existing CMS forms become WebMCP tools with no template edit.
 
+/**
+ * Adds an issue carrying checkSelector's message. Selectors are checked at build
+ * time because HTMLRewriter throws on anything outside its streaming subset, and
+ * that used to surface as an error on every page the selector matched.
+ */
+function selectorIssue(opts: SelectorCheckOptions) {
+  return (selector: string, ctx: z.RefinementCtx) => {
+    const message = checkSelector(selector, opts);
+    if (message !== null) ctx.addIssue({ code: z.ZodIssueCode.custom, message });
+  };
+}
+
 const FormParamInjection = z.object({
-  selector: z.string().min(1),
+  // Params are composed as `${form.selector} ${param.selector}`, so a leading
+  // child combinator (`> input`) is meaningful here.
+  selector: z.string().min(1).superRefine(selectorIssue({ allowLeadingChild: true })),
   description: z.string().min(1),
 });
 
@@ -457,7 +472,8 @@ const FormInjection = z.object({
     .min(1)
     .refine((s) => s.startsWith("form"), {
       message: "selector must start with `form` (the matched element must be a <form>)",
-    }),
+    })
+    .superRefine(selectorIssue({ allowLeadingChild: false })),
   paths: z.array(z.string()).default([]),
   autosubmit: z.boolean().default(false),
   params: z.array(FormParamInjection).default([]),

@@ -41,6 +41,65 @@ describe("site.domain validation", () => {
   });
 });
 
+describe("forms selector grammar", () => {
+  const form = (selector: string, params: Array<{ selector: string; description: string }> = []) => ({
+    ...minimal,
+    forms: [{ name: "contact", description: "Contact form.", selector, params }],
+  });
+
+  it("accepts supported form and param selectors", () => {
+    const c = ConfigSchema.parse(
+      form('form[action="/a,b"]#contact', [
+        { selector: "input[name=email]", description: "Email." },
+        { selector: "> input", description: "Direct child input." },
+        { selector: "li:nth-child(2n+1) input", description: "Odd rows." },
+      ]),
+    );
+    expect(c.forms[0]!.selector).toBe('form[action="/a,b"]#contact');
+  });
+
+  it("rejects a form selector lol-html cannot parse, naming the construct", () => {
+    const r = ConfigSchema.safeParse(form("form:has(input)"));
+    expect(r.success).toBe(false);
+    if (!r.success) {
+      const issue = r.error.issues.find((i) => i.path.join(".") === "forms.0.selector");
+      expect(issue).toBeDefined();
+      expect(issue!.message).toContain(":has");
+    }
+  });
+
+  it("rejects sibling combinators, pseudo-elements and selector lists in a form selector", () => {
+    for (const sel of ["form + form", "form ~ div", "form::before", "form#a, form#b", "form:hover"]) {
+      expect(ConfigSchema.safeParse(form(sel)).success, sel).toBe(false);
+    }
+  });
+
+  it("rejects a leading child combinator in a form selector but not in a param selector", () => {
+    expect(ConfigSchema.safeParse(form("> input")).success).toBe(false);
+    expect(ConfigSchema.safeParse(form("form#c", [{ selector: "> input", description: "d" }])).success).toBe(true);
+  });
+
+  it("rejects an unsupported param selector at the param path", () => {
+    const r = ConfigSchema.safeParse(
+      form("form#c", [{ selector: "input:has(+ label)", description: "d" }]),
+    );
+    expect(r.success).toBe(false);
+    if (!r.success) {
+      const issue = r.error.issues.find((i) => i.path.join(".") === "forms.0.params.0.selector");
+      expect(issue).toBeDefined();
+      expect(issue!.message).toContain(":has");
+    }
+    expect(
+      ConfigSchema.safeParse(form("form#c", [{ selector: "input, select", description: "d" }])).success,
+    ).toBe(false);
+  });
+
+  it("still requires form selectors to start with `form`", () => {
+    const r = ConfigSchema.safeParse(form("div#contact"));
+    expect(r.success).toBe(false);
+  });
+});
+
 describe("ai_catalog config", () => {
   it("defaults: feature off, canonical path, synthesize mode, empty optionals", () => {
     const c = ConfigSchema.parse(minimal);

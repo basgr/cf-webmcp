@@ -129,14 +129,149 @@ describe("worker proxy", () => {
     expect(await res.text()).toContain("about");
   });
 
-  it("returns origin HTML unchanged when features.inject_html is false", async () => {
+  it("leaves the body untouched but still sends the Link header when features.inject_html is false", async () => {
     stubOrigin({ "https://example.com/page": () => htmlResponse() });
     const handler = createHandler(makeDeps({ features: { inject_html: false } }));
 
     const res = await call(handler, "https://example.com/page");
 
     expect(await res.text()).toBe(HTML);
+    expect(res.headers.get("link")).toContain('rel="webmcp"');
+  });
+
+  it("sends no Link header when both inject_html and link_header are off", async () => {
+    stubOrigin({ "https://example.com/page": () => htmlResponse() });
+    const handler = createHandler(makeDeps({ features: { inject_html: false, link_header: false } }));
+
+    const res = await call(handler, "https://example.com/page");
+
+    expect(await res.text()).toBe(HTML);
     expect(res.headers.get("link")).toBeNull();
+  });
+
+  it("appends the script at the end of minified HTML that has no </body>", async () => {
+    stubOrigin({
+      "https://example.com/min": () => htmlResponse("<!doctype html><html><head><title>t</title></head><body><p>hi"),
+    });
+    const handler = createHandler(makeDeps());
+
+    const body = await (await call(handler, "https://example.com/min")).text();
+
+    expect(body).toMatch(/<p>hi<script[^>]+\/_webmcp\/bootstrap\.test\.js[^>]*><\/script>$/);
+    expect(body).toContain('<link rel="webmcp"');
+  });
+});
+
+describe("worker fails open", () => {
+  it("serves the origin HTML unchanged, with the Link header, when a form selector makes HTMLRewriter throw", async () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    stubOrigin({ "https://example.com/page": () => htmlResponse("<html><head></head><body><form id=a></form></body></html>") });
+    const deps = makeDeps();
+    // Bypass the schema (which now rejects this selector at build time) to model a
+    // selector that slips through, e.g. an older generated config.
+    deps.config.forms = [
+      { name: "contact", description: "d", selector: "form:has(input)", paths: [], autosubmit: false, params: [] },
+    ];
+    const handler = createHandler(deps);
+
+    const res = await call(handler, "https://example.com/page");
+
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("<html><head></head><body><form id=a></form></body></html>");
+    expect(res.headers.get("link")).toContain('rel="webmcp"');
+    expect(errors).toHaveBeenCalled();
+    errors.mockRestore();
+  });
+
+  it.each([true, false])("passes an origin 101 WebSocket upgrade through untouched (inject_html=%s)", async (injectHtml) => {
+    const pair = new WebSocketPair();
+    const upstream = new Response(null, { status: 101, webSocket: pair[0] });
+    stubOrigin({ "https://example.com/socket": () => upstream });
+    const handler = createHandler(makeDeps({ features: { inject_html: injectHtml } }));
+
+    const res = await call(handler, "https://example.com/socket", { headers: { upgrade: "websocket" } });
+
+    expect(res).toBe(upstream);
+    expect(res.status).toBe(101);
+    expect(res.webSocket).not.toBeNull();
+  });
+});
+
+describe("unknown paths under the namespace", () => {
+  const unknown = [
+    "/_webmcp/does-not-exist",
+    "/_webmcp/",
+    "/_webmcp/exec/UPPER",
+    "/_webmcp/exec/search_pages/extra",
+    "/_webmcp/exec/",
+    "/_webmcp/bootstrap.js",
+    "/_webmcp/sub/dir/file.txt",
+  ];
+
+  it.each(unknown)("answers %s with 404 no-store noindex and never asks origin", async (path) => {
+    const fetchMock = stubOrigin({});
+    const handler = createHandler(makeDeps());
+
+    const res = await call(handler, `https://example.com${path}`);
+
+    expect(res.status).toBe(404);
+    expect(res.headers.get("cache-control")).toBe("no-store");
+    expect(res.headers.get("x-robots-tag")).toContain("noindex");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("answers HEAD with the same 404 headers and no body", async () => {
+    const fetchMock = stubOrigin({});
+    const handler = createHandler(makeDeps());
+
+    const res = await call(handler, "https://example.com/_webmcp/does-not-exist", { method: "HEAD" });
+
+    expect(res.status).toBe(404);
+    expect(res.headers.get("x-robots-tag")).toContain("noindex");
+    expect(await res.text()).toBe("");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("answers any method with 404, not only GET", async () => {
+    const fetchMock = stubOrigin({});
+    const handler = createHandler(makeDeps());
+
+    const res = await call(handler, "https://example.com/_webmcp/exec/UPPER", { method: "POST", body: "{}" });
+
+    expect(res.status).toBe(404);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("still serves the known namespace routes", async () => {
+    stubOrigin({});
+    const handler = createHandler(makeDeps());
+
+    expect((await call(handler, "https://example.com/_webmcp/health")).status).toBe(200);
+    expect((await call(handler, "https://example.com/_webmcp/bootstrap.test.js")).status).toBe(200);
+    // A configured tool name that is not POSTed to is the exec route's own 405, not a namespace 404.
+    expect((await call(handler, "https://example.com/_webmcp/exec/search_pages")).status).toBe(405);
+  });
+
+  it("keeps proxying paths that merely share the namespace spelling as a prefix", async () => {
+    const fetchMock = stubOrigin({ "https://example.com/_webmcp-docs": () => htmlResponse() });
+    const handler = createHandler(makeDeps());
+
+    const res = await call(handler, "https://example.com/_webmcp-docs");
+
+    expect(res.status).toBe(200);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("applies to the configured namespace only", async () => {
+    const fetchMock = stubOrigin({ "https://example.com/_webmcp/anything": () => htmlResponse() });
+    const handler = createHandler(makeDeps({ paths: { namespace: "/_x" } }));
+
+    const inside = await call(handler, "https://example.com/_x/anything");
+    const outside = await call(handler, "https://example.com/_webmcp/anything");
+
+    expect(inside.status).toBe(404);
+    expect(outside.status).toBe(200);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });
 

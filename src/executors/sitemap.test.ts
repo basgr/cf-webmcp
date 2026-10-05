@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { runSitemapFilter, parseSitemap } from "./sitemap";
+import { runSitemapFilter, parseSitemap, MAX_SITEMAP_BYTES } from "./sitemap";
 import type { ExecutorContext } from "./common";
 
 const ctx: ExecutorContext = {
@@ -104,5 +104,41 @@ describe("runSitemapFilter", () => {
     );
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.error.code).toBe("origin_5xx");
+  });
+
+  it("reads the sitemap through a size cap of 5 MiB", async () => {
+    expect(MAX_SITEMAP_BYTES).toBe(5 * 1024 * 1024);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response("a".repeat(MAX_SITEMAP_BYTES + 1), {
+            status: 200,
+            headers: { "content-type": "application/xml" },
+          }),
+      ),
+    );
+    const result = await runSitemapFilter(
+      ctx,
+      { sitemap_url: "https://example.com/sitemap.xml", max_results: 10 },
+      {},
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.code).toBe("response_too_large");
+  });
+
+  it("accepts a sitemap of exactly the cap", async () => {
+    const padded = fakeSitemap + " ".repeat(MAX_SITEMAP_BYTES - fakeSitemap.length);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(padded, { status: 200, headers: { "content-type": "application/xml" } })),
+    );
+    const result = await runSitemapFilter(
+      ctx,
+      { sitemap_url: "https://example.com/sitemap.xml", max_results: 10 },
+      {},
+    );
+    if (!result.ok) throw new Error(JSON.stringify(result));
+    expect((result.data as { entries: unknown[] }).entries).toHaveLength(3);
   });
 });

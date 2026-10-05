@@ -10,7 +10,7 @@
  */
 
 import type { ExecutorContext } from "./common";
-import { fromErr, mapOriginStatus, originFetch, resolveUrl } from "./common";
+import { fromErr, mapOriginStatus, originFetch, readFailure, readWithLimit, resolveUrl } from "./common";
 import { err, ok, type Envelope } from "../envelope";
 
 export interface HttpGetConfig {
@@ -46,8 +46,8 @@ export async function runHttpGet(
 
   // Enforce max_bytes by streaming. We read up to max_bytes + 1; if we
   // overshoot, we reject the whole response.
-  const limited = await readWithLimit(res, config.max_bytes);
-  if (!limited.ok) return err("response_too_large", `response exceeded ${config.max_bytes} bytes`, false);
+  const limited = await readWithLimit(res, config.max_bytes, ctx.signal);
+  if (!limited.ok) return fromErr(readFailure(limited, ctx, config.max_bytes, "response"));
 
   return ok({ status: res.status, content_type: ct, body: limited.text });
 }
@@ -65,36 +65,4 @@ function matchOneType(actual: string, pattern: string): boolean {
     return actual.startsWith(family + "/");
   }
   return actual === pattern;
-}
-
-export async function readWithLimit(
-  res: Response,
-  limit: number,
-): Promise<{ ok: true; text: string } | { ok: false }> {
-  const reader = res.body?.getReader();
-  if (!reader) return { ok: true, text: await res.text() };
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    if (!value) continue;
-    total += value.byteLength;
-    if (total > limit) {
-      try {
-        await reader.cancel();
-      } catch {
-        /* ignore */
-      }
-      return { ok: false };
-    }
-    chunks.push(value);
-  }
-  const merged = new Uint8Array(total);
-  let offset = 0;
-  for (const c of chunks) {
-    merged.set(c, offset);
-    offset += c.byteLength;
-  }
-  return { ok: true, text: new TextDecoder("utf-8", { fatal: false, ignoreBOM: false }).decode(merged) };
 }

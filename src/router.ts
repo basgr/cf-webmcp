@@ -14,6 +14,7 @@ export interface RouteMatch {
     | "bootstrap"
     | "widget"
     | "asset_not_found"
+    | "namespace_not_found"
     | "exec"
     | "health"
     | "llms_txt"
@@ -42,7 +43,8 @@ const WIDGET_ASSET_NAME = /^widget\.[^/]+\.js$/;
  * `widgetAsset` is null when this build ships no widget (feature pin missing).
  * A request for any other `bootstrap.<x>.js` / `widget.<x>.js` under the
  * namespace is a stale or unknown asset URL: it gets `asset_not_found` and is
- * never proxied to origin.
+ * never proxied to origin. Any other unknown path under `${namespace}/` gets
+ * `namespace_not_found`, also never proxied.
  */
 export function matchRoute(
   config: Config,
@@ -151,6 +153,11 @@ export function matchRoute(
   ) {
     return { kind: "agent_skills_index" };
   }
+
+  // Everything else under the namespace (a typo, an exec path with an invalid
+  // tool name) belongs to cf-webmcp and is never proxied to origin. Checked last
+  // so a configured route that happens to live under the namespace still wins.
+  if (pathname.startsWith(assetPrefix)) return { kind: "namespace_not_found" };
 
   return { kind: "proxy" };
 }

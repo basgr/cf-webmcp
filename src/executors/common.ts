@@ -6,7 +6,8 @@
  *   - Reject any resolved URL outside [origin].allowed_origins.
  *   - Strip visitor cookies, set a stable User-Agent, attach the deploy-token
  *     bypass header so the publisher's Bot Management can allow our traffic.
- *   - Time-bound the fetch.
+ *   - Time-bound the fetch, and (via the run-wide signal) the body reads after it.
+ *   - Bound body reads by size (readWithLimit).
  *   - Map response codes / network errors to the envelope error codes.
  */
 
@@ -18,7 +19,24 @@ const VERSION = "1.0";
 export interface ExecutorContext {
   allowedOrigins: string[];
   deployToken: string;
+  /** Deadline for the whole run (fetch plus body reads), used in timeout messages. */
   timeoutMs: number;
+  /**
+   * Run-wide abort signal, owned by the caller (the exec route aborts it at the
+   * deadline). When set, originFetch passes it to fetch and starts no timer of
+   * its own, so the deadline stays armed until the executor has consumed the
+   * body. Without it (direct callers, tests) originFetch falls back to a
+   * fetch-only timer.
+   */
+  signal?: AbortSignal;
+}
+
+export function timeoutError(timeoutMs: number): ErrorPayload {
+  return { code: "timeout", message: `origin request timed out after ${timeoutMs}ms`, retriable: true };
+}
+
+export function isAbortError(e: unknown): boolean {
+  return (e as { name?: string } | null)?.name === "AbortError";
 }
 
 export interface ResolveOptions {
@@ -72,15 +90,18 @@ export interface OriginFetchOptions {
  *   - No visitor cookies. credentials: omit. headers stripped to minimum.
  *   - Stable UA.
  *   - bypass header set if enabled.
- *   - Timeout via AbortController.
+ *   - Timeout via ctx.signal when the caller supplies one (it then also covers the
+ *     body reads that follow), otherwise via a local AbortController that only
+ *     covers the fetch itself.
  */
 export async function originFetch(
   ctx: ExecutorContext,
   url: URL,
   opts: OriginFetchOptions = {},
 ): Promise<Response | { ok: false; error: ErrorPayload }> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), ctx.timeoutMs);
+  const local = ctx.signal ? null : new AbortController();
+  const timer = local ? setTimeout(() => local.abort(), ctx.timeoutMs) : undefined;
+  const signal = ctx.signal ?? local!.signal;
 
   const headers: Record<string, string> = {
     "user-agent": `cf-webmcp/${VERSION}`,
@@ -96,7 +117,7 @@ export async function originFetch(
       method: opts.method ?? "GET",
       headers,
       redirect: "follow",
-      signal: controller.signal,
+      signal,
     });
     // Defense in depth: even though the initial URL passed the allow-list
     // check, an origin can 301/302 us to a different host. Verify the final
@@ -122,13 +143,95 @@ export async function originFetch(
     }
     return res;
   } catch (e) {
-    const aborted = (e as { name?: string })?.name === "AbortError";
-    return aborted
-      ? { ok: false, error: { code: "timeout", message: `origin fetch timed out after ${ctx.timeoutMs}ms`, retriable: true } }
+    return isAbortError(e)
+      ? { ok: false, error: timeoutError(ctx.timeoutMs) }
       : { ok: false, error: { code: "internal", message: (e as Error).message, retriable: true } };
   } finally {
-    clearTimeout(timer);
+    if (timer !== undefined) clearTimeout(timer);
   }
+}
+
+/** A body that can be read as a stream: a Response, or the Request of the exec route. */
+export interface BodySource {
+  body: ReadableStream<Uint8Array> | null;
+  text(): Promise<string>;
+}
+
+export type BoundedRead =
+  | { ok: true; text: string }
+  | { ok: false; reason: "too_large" | "aborted" };
+
+/**
+ * Read a body as UTF-8 text, giving up as soon as it exceeds `limit` bytes
+ * (counted in bytes, not characters) or `signal` aborts.
+ *
+ *   - too_large: the stream is cancelled and nothing is buffered beyond the cap.
+ *   - aborted:   the stream is cancelled and the partial body is discarded, so a
+ *                half-read body can never be mistaken for a complete one.
+ *
+ * A stream error that is not an abort (a reset connection) propagates to the caller.
+ */
+export async function readWithLimit(
+  source: BodySource,
+  limit: number,
+  signal?: AbortSignal,
+): Promise<BoundedRead> {
+  if (signal?.aborted) {
+    await source.body?.cancel().catch(() => {});
+    return { ok: false, reason: "aborted" };
+  }
+  const reader = source.body?.getReader();
+  if (!reader) return { ok: true, text: await source.text() };
+
+  // Cancelling the reader resolves a pending read() with done, which is how a
+  // stalled body (a stream that never produces or closes) is released.
+  const onAbort = () => {
+    reader.cancel().catch(() => {});
+  };
+  signal?.addEventListener("abort", onAbort, { once: true });
+  try {
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    while (true) {
+      let next: ReadableStreamReadResult<Uint8Array>;
+      try {
+        next = await reader.read();
+      } catch (e) {
+        if (signal?.aborted) return { ok: false, reason: "aborted" };
+        throw e;
+      }
+      if (next.done) break;
+      if (!next.value) continue;
+      total += next.value.byteLength;
+      if (total > limit) {
+        await reader.cancel().catch(() => {});
+        return { ok: false, reason: "too_large" };
+      }
+      chunks.push(next.value);
+    }
+    if (signal?.aborted) return { ok: false, reason: "aborted" };
+    const merged = new Uint8Array(total);
+    let offset = 0;
+    for (const c of chunks) {
+      merged.set(c, offset);
+      offset += c.byteLength;
+    }
+    return { ok: true, text: new TextDecoder("utf-8", { fatal: false, ignoreBOM: false }).decode(merged) };
+  } finally {
+    signal?.removeEventListener("abort", onAbort);
+  }
+}
+
+/** Envelope error for a failed bounded read. `what` names the body in the message ("sitemap", "response"). */
+export function readFailure(
+  failure: { reason: "too_large" | "aborted" },
+  ctx: ExecutorContext,
+  limit: number,
+  what: string,
+): ErrorPayload {
+  return failure.reason === "aborted"
+    ? timeoutError(ctx.timeoutMs)
+    : { code: "response_too_large", message: `${what} exceeded ${limit} bytes`, retriable: false };
 }
 
 /** Map an HTTP response code from origin into our envelope error codes. */

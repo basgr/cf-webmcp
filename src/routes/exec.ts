@@ -6,18 +6,20 @@
 
 import type { Config, ToolConfig } from "../config-types";
 import { runExecutor } from "../executors";
-import type { ExecutorContext } from "../executors/common";
+import { readWithLimit, timeoutError, type ExecutorContext } from "../executors/common";
 import { validateInput } from "../validate";
-import { jsonResponse, err } from "../envelope";
+import { jsonResponse, err, type Envelope } from "../envelope";
 import { buildCacheControl, makeCacheKey } from "../cache";
 import { checkGlobalRateLimit, checkPerToolRateLimit, clientIp } from "../rate-limit";
 
 export interface ExecOptions {
   domain: string;
   deployToken: string;
+  /** Deadline for one executor run, origin fetch and body reads together. Defaults to 8s. */
+  timeoutMs?: number;
 }
 
-const TIMEOUT_MS = 8_000;
+const DEFAULT_TIMEOUT_MS = 8_000;
 /** Hard cap on POST body size for /_webmcp/exec/*. JSON payloads are typically
  * tiny (a few hundred bytes); a multi-MB POST is either misuse or abuse. */
 const MAX_EXEC_BODY_BYTES = 64 * 1024; // 64KB
@@ -63,20 +65,21 @@ export async function execResponse(
   if (contentLengthHeader) {
     const declaredLength = Number(contentLengthHeader);
     if (Number.isFinite(declaredLength) && declaredLength > MAX_EXEC_BODY_BYTES) {
-      return jsonResponse(
-        err("invalid_input", `body exceeds ${MAX_EXEC_BODY_BYTES} bytes`),
-        { status: 413 },
-      );
+      return bodyTooLarge();
     }
   }
 
-  // Read body once, use the raw text for cache key, parse for validation.
-  const bodyText = await request.text();
-  if (bodyText.length > MAX_EXEC_BODY_BYTES) {
-    return jsonResponse(
-      err("invalid_input", `body exceeds ${MAX_EXEC_BODY_BYTES} bytes`),
-      { status: 413 },
-    );
+  // Read body once, use the raw text for cache key, parse for validation. The
+  // reader stops at the cap, so a chunked body with no (or a false) Content-Length
+  // is never buffered beyond MAX_EXEC_BODY_BYTES.
+  let bodyText: string;
+  try {
+    const read = await readWithLimit(request, MAX_EXEC_BODY_BYTES);
+    if (!read.ok) return bodyTooLarge();
+    bodyText = read.text;
+  } catch {
+    // The client dropped the connection mid-body.
+    return jsonResponse(err("invalid_input", "could not read request body"));
   }
   let parsed: unknown;
   try {
@@ -103,10 +106,10 @@ export async function execResponse(
   const ctx: ExecutorContext = {
     allowedOrigins: config.origin.allowed_origins.map((u) => new URL(u).origin),
     deployToken: opts.deployToken,
-    timeoutMs: TIMEOUT_MS,
+    timeoutMs: opts.timeoutMs ?? DEFAULT_TIMEOUT_MS,
   };
 
-  const envelope = await runExecutor(ctx, tool as ToolConfig, validation.value);
+  const envelope = await runWithDeadline(ctx, tool as ToolConfig, validation.value);
 
   const ttl = tool.cache ?? {};
   const cc = buildCacheControl({
@@ -129,6 +132,58 @@ export async function execResponse(
   }
 
   return response;
+}
+
+function bodyTooLarge(): Response {
+  return jsonResponse(err("invalid_input", "request body too large"), { status: 413 });
+}
+
+/**
+ * Run an executor under one deadline that covers the origin fetch AND the body
+ * reads that follow it (the old per-fetch timer was cleared as soon as headers
+ * arrived, so an origin that sent headers and then stalled held the request open).
+ *
+ * The signal in the executor context is aborted at the deadline, which releases
+ * the origin connection and makes pending body reads give up. The race on top
+ * guarantees a timeout envelope even where a body read does not honour the signal.
+ *
+ * An exception from the executor becomes an `internal` envelope. The detail is
+ * logged; the client gets neither the message nor a stack.
+ */
+async function runWithDeadline(
+  ctx: ExecutorContext,
+  tool: ToolConfig,
+  input: Record<string, unknown>,
+): Promise<Envelope> {
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+
+  const deadline = new Promise<Envelope>((resolve) => {
+    timer = setTimeout(() => {
+      // Resolve before aborting: the abort makes the in-flight run settle a moment
+      // later (with an abort error), and that must lose the race.
+      resolve({ ok: false, error: timeoutError(ctx.timeoutMs) });
+      controller.abort();
+    }, ctx.timeoutMs);
+  });
+
+  const run = (async (): Promise<Envelope> => {
+    try {
+      return await runExecutor({ ...ctx, signal: controller.signal }, tool, input);
+    } catch (e) {
+      if (controller.signal.aborted) return { ok: false, error: timeoutError(ctx.timeoutMs) };
+      console.error(
+        `cf-webmcp: executor for tool "${tool.name}" threw: ${e instanceof Error ? e.message : String(e)}`,
+      );
+      return err("internal", "the tool failed unexpectedly", false);
+    }
+  })();
+
+  try {
+    return await Promise.race([run, deadline]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function rateLimited(retryAfterSec: number): Response {

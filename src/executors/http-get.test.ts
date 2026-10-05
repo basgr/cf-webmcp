@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { runHttpGet, matchesAny, readWithLimit } from "./http-get";
+import { runHttpGet, matchesAny } from "./http-get";
+import { readWithLimit } from "./common";
 
 const ctx = {
   allowedOrigins: ["https://example.com"],

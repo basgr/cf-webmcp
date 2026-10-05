@@ -3,8 +3,10 @@
  *
  *   1. Bootstrapper (always when shouldInject is true):
  *      - <link rel="webmcp" href="..."> in <head>
- *      - <script src="..." defer></script> before </body>
- *      The caller adds the Link: HTTP header separately (worker.ts).
+ *      - <script src="..." defer></script> before </body>, or at the end of the
+ *        document when the page omits </body> (full documents only; a bare
+ *        fragment is left alone)
+ *      The caller adds the Link: HTTP header separately (handler.ts).
  *
  *   2. Form attribute stamping (when [[forms]] entries match the current path):
  *      For each matched form, set toolname, tooldescription, toolautosubmit on
@@ -90,6 +92,45 @@ export function formsForPath(forms: FormInjectionConfig[], pathname: string): Fo
 class State {
   linkInjected = false;
   scriptInjected = false;
+  /**
+   * True once the document looks like a full page (doctype, <html>, <head> or
+   * <body> seen), as opposed to a bare fragment such as an AJAX partial. Gates
+   * the document-end script fallback.
+   */
+  isDocument = false;
+}
+
+/**
+ * injectIntoHtml, failing open: if building the rewriter throws synchronously,
+ * the untouched origin response is returned and the error is logged.
+ *
+ * `HTMLRewriter.on(selector)` parses the selector eagerly and throws for
+ * anything outside lol-html's subset (`form:has(input)`, `form + form`). That
+ * happens before `transform()` touches the body, so `upstream` is still intact
+ * and the visitor gets the origin page without WebMCP instead of an error page.
+ *
+ * Only synchronous throws are caught here. An error raised while the body
+ * streams surfaces later, in the response body the visitor is already reading,
+ * and cannot be intercepted at this point. Selectors are therefore validated at
+ * build time (src/selector-grammar.ts); this wrapper is the net for the ones
+ * that still get through.
+ *
+ * Deliberately no `ctx.passThroughOnException()` as an additional net: it falls
+ * back to the zone's origin server, not to `[origin].base_url`, so it would hit
+ * a different host whenever the Worker proxies to another one, and it does
+ * nothing on Custom Domains and workers.dev routes.
+ */
+export function safeInject(upstream: Response, opts: InjectOptions): Response {
+  try {
+    return injectIntoHtml(upstream, opts);
+  } catch (e) {
+    console.error(
+      `cf-webmcp: HTML injection failed, serving the origin response unchanged: ${
+        e instanceof Error ? e.message : String(e)
+      }`,
+    );
+    return upstream;
+  }
 }
 
 export function injectIntoHtml(response: Response, opts: InjectOptions): Response {
@@ -122,8 +163,28 @@ export function injectIntoHtml(response: Response, opts: InjectOptions): Respons
   const scriptTag = `<script src="${escapeAttr(opts.bootstrapUrl)}" defer${sriAttrs}></script>`;
 
   let rewriter = new HTMLRewriter()
+    .onDocument({
+      doctype() {
+        state.isDocument = true;
+      },
+      end(end) {
+        // Minified HTML may legally omit </body> (and </html>); the body end-tag
+        // handler below then never fires. Append at the very end instead. Bare
+        // fragments (no doctype/html/head/body) are left alone: injecting a
+        // script into an AJAX partial would run it on every swap.
+        if (state.scriptInjected || !state.isDocument) return;
+        end.append(scriptTag, { html: true });
+        state.scriptInjected = true;
+      },
+    })
+    .on("html", {
+      element() {
+        state.isDocument = true;
+      },
+    })
     .on("head", {
       element(el) {
+        state.isDocument = true;
         if (state.linkInjected || !opts.emitLinkTag) return;
         el.append(linkTags, { html: true });
         state.linkInjected = true;
@@ -131,6 +192,7 @@ export function injectIntoHtml(response: Response, opts: InjectOptions): Respons
     })
     .on("body", {
       element(el) {
+        state.isDocument = true;
         if (state.scriptInjected) return;
         el.onEndTag((endTag) => {
           if (state.scriptInjected) return;

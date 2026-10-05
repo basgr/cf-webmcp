@@ -6,6 +6,7 @@
  * its default automatically and tests only spell out what they care about.
  */
 
+import type { z } from "zod";
 import { ConfigSchema, type Config } from "../config-types";
 import type { HandlerAssets, HandlerDeps, HandlerMeta } from "../handler";
 
@@ -15,6 +16,14 @@ export type DeepPartial<T> = T extends readonly unknown[]
   : T extends object
     ? { [K in keyof T]?: DeepPartial<T[K]> }
     : T;
+
+/**
+ * What a test may pass to makeConfig: the schema INPUT shape (before defaults
+ * are applied), so a test can write `forms: [{ name, description, selector }]`
+ * without spelling out every defaulted field. Deliberately not based on the
+ * parsed `Config` (the zod output type), where defaulted fields are required.
+ */
+export type ConfigOverrides = DeepPartial<z.input<typeof ConfigSchema>>;
 
 const minimalValidConfig = {
   schema_version: 1,
@@ -46,12 +55,12 @@ export function deepMerge(base: unknown, override: unknown): unknown {
   return override;
 }
 
-export function makeConfig(overrides: DeepPartial<Config> = {}): Config {
+export function makeConfig(overrides: ConfigOverrides = {}): Config {
   return ConfigSchema.parse(deepMerge(minimalValidConfig, overrides));
 }
 
 export function makeDeps(
-  configOverrides: DeepPartial<Config> = {},
+  configOverrides: ConfigOverrides = {},
   extra: { assets?: Partial<HandlerAssets>; meta?: Partial<HandlerMeta> } = {},
 ): HandlerDeps {
   return {
@@ -71,7 +80,7 @@ export function makeDeps(
       PREFLIGHT: { ran_at: null, collisions: [], warnings: [] },
       AGENT_SKILLS_DIGEST: null,
       BOOTSTRAP_SRI: null,
-      LLMS_TXT_TOKEN_HINTS: { manifest: 0, landing: 0 },
+      LLMS_TXT_TOKEN_HINTS: { manifest: 500, landing: 300 },
       ...extra.meta,
     },
   };

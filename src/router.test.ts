@@ -116,13 +116,21 @@ describe("matchRoute", () => {
   });
 
   it("only treats single-segment bootstrap.<x>.js and widget.<x>.js under the namespace as assets", () => {
-    // No hash segment, a nested path, a trailing segment, and a path outside the namespace all keep their old routing.
-    expect(matchRoute(baseConfig, url("/_webmcp/bootstrap.js"), BOOTSTRAP, WIDGET).kind).toBe("proxy");
-    expect(matchRoute(baseConfig, url("/_webmcp/widget.js"), BOOTSTRAP, WIDGET).kind).toBe("proxy");
-    expect(matchRoute(baseConfig, url("/_webmcp/sub/bootstrap.abc.js"), BOOTSTRAP, WIDGET).kind).toBe("proxy");
-    expect(matchRoute(baseConfig, url("/_webmcp/bootstrap.abc.js/extra"), BOOTSTRAP, WIDGET).kind).toBe("proxy");
+    // No hash segment, a nested path and a trailing segment are not asset names; they are
+    // still inside the namespace, so they 404 (namespace_not_found) instead of reaching origin.
+    expect(matchRoute(baseConfig, url("/_webmcp/bootstrap.js"), BOOTSTRAP, WIDGET).kind).toBe("namespace_not_found");
+    expect(matchRoute(baseConfig, url("/_webmcp/widget.js"), BOOTSTRAP, WIDGET).kind).toBe("namespace_not_found");
+    expect(matchRoute(baseConfig, url("/_webmcp/sub/bootstrap.abc.js"), BOOTSTRAP, WIDGET).kind).toBe(
+      "namespace_not_found",
+    );
+    expect(matchRoute(baseConfig, url("/_webmcp/bootstrap.abc.js/extra"), BOOTSTRAP, WIDGET).kind).toBe(
+      "namespace_not_found",
+    );
+    expect(matchRoute(baseConfig, url("/_webmcp/exec/bootstrap.abc.js"), BOOTSTRAP, WIDGET).kind).toBe(
+      "namespace_not_found",
+    );
+    // A path outside the namespace is origin content.
     expect(matchRoute(baseConfig, url("/other/bootstrap.abc.js"), BOOTSTRAP, WIDGET).kind).toBe("proxy");
-    expect(matchRoute(baseConfig, url("/_webmcp/exec/bootstrap.abc.js"), BOOTSTRAP, WIDGET).kind).toBe("proxy");
   });
 
   it("applies the stale-asset rule under a custom namespace only", () => {
@@ -132,15 +140,38 @@ describe("matchRoute", () => {
     expect(matchRoute(custom, url("/_webmcp/bootstrap.old.js"), BOOTSTRAP, WIDGET).kind).toBe("proxy");
   });
 
+  it("answers any unknown path under the namespace with namespace_not_found", () => {
+    expect(matchRoute(baseConfig, url("/_webmcp/does-not-exist"), BOOTSTRAP, WIDGET).kind).toBe("namespace_not_found");
+    expect(matchRoute(baseConfig, url("/_webmcp/"), BOOTSTRAP, WIDGET).kind).toBe("namespace_not_found");
+    expect(matchRoute(baseConfig, url("/_webmcp/exec/"), BOOTSTRAP, WIDGET).kind).toBe("namespace_not_found");
+    const custom = { ...baseConfig, paths: { namespace: "/_x" } };
+    expect(matchRoute(custom, url("/_x/nope"), BOOTSTRAP, WIDGET).kind).toBe("namespace_not_found");
+    expect(matchRoute(custom, url("/_webmcp/nope"), BOOTSTRAP, WIDGET).kind).toBe("proxy");
+  });
+
+  it("does not treat a path that only shares the namespace spelling as a prefix as namespaced", () => {
+    expect(matchRoute(baseConfig, url("/_webmcp-docs"), BOOTSTRAP, WIDGET).kind).toBe("proxy");
+    expect(matchRoute(baseConfig, url("/_webmcp"), BOOTSTRAP, WIDGET).kind).toBe("proxy");
+  });
+
+  it("keeps a configured route that lives under the namespace ahead of the namespace 404", () => {
+    const inside = { ...baseConfig, llms_txt: { path: "/_webmcp/llms.txt", mode: "merge" as const } };
+    expect(matchRoute(inside, url("/_webmcp/llms.txt"), BOOTSTRAP, WIDGET).kind).toBe("llms_txt");
+  });
+
   it("routes valid exec tool names", () => {
     const m = matchRoute(baseConfig, url("/_webmcp/exec/search_pages"), BOOTSTRAP, WIDGET);
     expect(m.kind).toBe("exec");
     expect(m.toolName).toBe("search_pages");
   });
 
-  it("rejects invalid tool name characters", () => {
-    expect(matchRoute(baseConfig, url("/_webmcp/exec/../etc/passwd"), BOOTSTRAP, WIDGET).kind).toBe("proxy");
-    expect(matchRoute(baseConfig, url("/_webmcp/exec/UPPERCASE"), BOOTSTRAP, WIDGET).kind).toBe("proxy");
+  it("answers an invalid tool name with namespace_not_found, never proxy", () => {
+    // `..` is normalised away by URL parsing, so this lands on /_webmcp/etc/passwd: still in the namespace.
+    expect(matchRoute(baseConfig, url("/_webmcp/exec/../etc/passwd"), BOOTSTRAP, WIDGET).kind).toBe(
+      "namespace_not_found",
+    );
+    expect(matchRoute(baseConfig, url("/_webmcp/exec/UPPERCASE"), BOOTSTRAP, WIDGET).kind).toBe("namespace_not_found");
+    expect(matchRoute(baseConfig, url("/_webmcp/exec/a/b"), BOOTSTRAP, WIDGET).kind).toBe("namespace_not_found");
   });
 
   it("routes health", () => {

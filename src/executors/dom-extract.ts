@@ -8,7 +8,7 @@
  */
 
 import type { ExecutorContext } from "./common";
-import { fromErr, mapOriginStatus, originFetch, resolveUrl } from "./common";
+import { fromErr, isAbortError, mapOriginStatus, originFetch, resolveUrl, timeoutError } from "./common";
 import { err, ok, type Envelope } from "../envelope";
 
 export interface DomExtractConfig {
@@ -79,12 +79,52 @@ export async function runDomExtract(
   }
 
   const transformed = rewriter.transform(res);
-  // Drain the body so the handlers fire.
-  await transformed.text();
+  // Drain the transformed body so the handlers fire, discarding the output. Reading
+  // chunk by chunk (rather than transformed.text()) keeps a huge page from being
+  // buffered, stops as soon as max_chars is reached, and lets the run-wide abort
+  // signal release a body that stalls.
+  const drained = await drain(transformed, () => truncated, ctx.signal);
+  if (drained === "aborted") return fromErr(timeoutError(ctx.timeoutMs));
 
   // Collapse whitespace.
   text = text.replace(/\s+/g, " ").trim();
   return ok({ url: resolved.url.toString(), text, truncated });
+}
+
+/**
+ * Read `res.body` to the end (or until `enough()` says the handlers have what
+ * they need), throwing the chunks away. "aborted" when `signal` fires first.
+ * A stream error that is not an abort propagates.
+ */
+async function drain(
+  res: Response,
+  enough: () => boolean,
+  signal?: AbortSignal,
+): Promise<"done" | "aborted"> {
+  if (!res.body) return "done";
+  const reader = res.body.getReader();
+  const onAbort = () => {
+    reader.cancel().catch(() => {});
+  };
+  if (signal?.aborted) {
+    onAbort();
+    return "aborted";
+  }
+  signal?.addEventListener("abort", onAbort, { once: true });
+  try {
+    while (!enough()) {
+      const { done } = await reader.read();
+      if (done) break;
+    }
+    if (signal?.aborted) return "aborted";
+    if (enough()) await reader.cancel().catch(() => {});
+    return "done";
+  } catch (e) {
+    if (signal?.aborted || isAbortError(e)) return "aborted";
+    throw e;
+  } finally {
+    signal?.removeEventListener("abort", onAbort);
+  }
 }
 
 function isHtmlResponse(res: Response): boolean {

@@ -1,5 +1,5 @@
-import { describe, it, expect } from "vitest";
-import { injectIntoHtml, matchGlob, shouldInject, escapeAttr, formsForPath } from "./html-rewriter";
+import { describe, it, expect, vi } from "vitest";
+import { injectIntoHtml, safeInject, matchGlob, shouldInject, escapeAttr, formsForPath } from "./html-rewriter";
 import type { Config, FormInjectionConfig } from "../config-types";
 
 const baseConfig: Config = {
@@ -249,6 +249,35 @@ describe("injectIntoHtml", () => {
     expect(out).not.toContain('rel="alternate"');
   });
 
+  it("appends the script at the end of a document whose </body> is omitted", async () => {
+    const out = await inject("<!doctype html><html><head><title>t</title></head><body><p>minified");
+    expect(out.startsWith("<!doctype html><html><head>")).toBe(true);
+    expect(out).toMatch(/<p>minified<script[^>]+bootstrap[^>]+><\/script>$/);
+    expect((out.match(/<script[^>]+bootstrap/g) ?? []).length).toBe(1);
+  });
+
+  it("appends the script for a document with a doctype but no html, head or body tags", async () => {
+    const out = await inject("<!doctype html><title>t</title><p>implied body");
+    expect(out).toMatch(/<script[^>]+bootstrap[^>]+><\/script>$/);
+  });
+
+  it("does not add a second script when </body> is present", async () => {
+    const out = await inject("<html><head></head><body>x</body></html>");
+    expect((out.match(/<script[^>]+bootstrap/g) ?? []).length).toBe(1);
+    expect(out).toMatch(/<script[^>]+bootstrap[^>]+><\/script><\/body><\/html>$/);
+  });
+
+  it("leaves a bare fragment untouched (no doctype, html, head or body tag)", async () => {
+    const out = await inject("<ul><li>partial</li></ul>");
+    expect(out).toBe("<ul><li>partial</li></ul>");
+  });
+
+  it("emits no <link> tags when the page has no literal <head>", async () => {
+    const out = await inject("<!doctype html><title>t</title><body>x</body>");
+    expect(out).not.toContain('<link rel="webmcp"');
+    expect(out).toMatch(/<script[^>]+bootstrap[^>]+><\/script><\/body>/);
+  });
+
   it("escapes bootstrapIntegrity value to prevent attribute breakout", async () => {
     // A pathological integrity string with quotes / brackets must not break
     // out of the attribute. Real SRI hashes never contain these chars, but
@@ -258,6 +287,74 @@ describe("injectIntoHtml", () => {
     const out = await injectIntoHtml(res, { ...opts, bootstrapIntegrity: evil }).text();
     expect(out).not.toContain('"><script>alert(1)');
     expect(out).toContain("&quot;");
+  });
+});
+
+describe("safeInject (fail open on synchronous rewriter errors)", () => {
+  const page = "<html><head></head><body><form id=a></form><form id=b></form></body></html>";
+  const response = () => new Response(page, { status: 200, headers: { "content-type": "text/html" } });
+  const form = (selector: string, params: FormInjectionConfig["params"] = []): FormInjectionConfig => ({
+    name: "f",
+    description: "d",
+    selector,
+    paths: [],
+    autosubmit: false,
+    params,
+  });
+
+  it("proves the premise: lol-html rejects these selectors synchronously", () => {
+    expect(() => injectIntoHtml(response(), { ...opts, forms: [form("form:has(input)")] })).toThrow();
+    expect(() => injectIntoHtml(response(), { ...opts, forms: [form("form + form")] })).toThrow();
+  });
+
+  it("returns the origin response unchanged and logs when a form selector is unsupported", async () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    const upstream = response();
+
+    const out = safeInject(upstream, { ...opts, forms: [form("form:has(input)")] });
+
+    expect(out).toBe(upstream);
+    expect(await out.text()).toBe(page);
+    expect(errors).toHaveBeenCalledTimes(1);
+    expect(String(errors.mock.calls[0]!.join(" "))).toContain("Unsupported pseudo-class");
+    errors.mockRestore();
+  });
+
+  it("fails open on an unsupported combinator in a form selector", async () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    const upstream = response();
+
+    const out = safeInject(upstream, { ...opts, forms: [form("form + form")] });
+
+    expect(out).toBe(upstream);
+    expect(await out.text()).toBe(page);
+    errors.mockRestore();
+  });
+
+  it("fails open when only a param selector is unsupported", async () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    const upstream = response();
+
+    const out = safeInject(upstream, {
+      ...opts,
+      forms: [form("form#a", [{ selector: "input:has(a)", description: "d" }])],
+    });
+
+    expect(out).toBe(upstream);
+    expect(await out.text()).toBe(page);
+    errors.mockRestore();
+  });
+
+  it("injects normally when nothing throws", async () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const out = safeInject(response(), { ...opts, forms: [form("form#a")] });
+
+    const body = await out.text();
+    expect(body).toContain('<link rel="webmcp"');
+    expect(body).toMatch(/<form[^>]+toolname="f"/);
+    expect(errors).not.toHaveBeenCalled();
+    errors.mockRestore();
   });
 });
 

@@ -9,8 +9,11 @@
  */
 
 import type { ExecutorContext } from "./common";
-import { fromErr, mapOriginStatus, originFetch } from "./common";
+import { fromErr, mapOriginStatus, originFetch, readFailure, readWithLimit } from "./common";
 import { err, ok, type Envelope } from "../envelope";
+
+/** Largest sitemap body we will read. The protocol caps a sitemap at 50 MB; this is a deliberate, lower bound for an edge Worker. */
+export const MAX_SITEMAP_BYTES = 5 * 1024 * 1024;
 
 export interface SitemapConfig {
   sitemap_url: string;
@@ -46,8 +49,9 @@ export async function runSitemapFilter(
   const mapped = mapOriginStatus(res.status);
   if (mapped) return fromErr(mapped);
 
-  const text = await res.text();
-  const entries = parseSitemap(text);
+  const body = await readWithLimit(res, MAX_SITEMAP_BYTES, ctx.signal);
+  if (!body.ok) return fromErr(readFailure(body, ctx, MAX_SITEMAP_BYTES, "sitemap"));
+  const entries = parseSitemap(body.text);
 
   const q = typeof input.query === "string" ? input.query.trim().toLowerCase() : "";
   const filtered = q

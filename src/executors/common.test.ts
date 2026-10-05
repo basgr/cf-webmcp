@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { resolveUrl, originFetch, mapOriginStatus } from "./common";
+import { resolveUrl, originFetch, mapOriginStatus, readWithLimit } from "./common";
 
 const ctx = {
   allowedOrigins: ["https://example.com"],
@@ -86,6 +86,102 @@ describe("originFetch", () => {
     const r = await originFetch({ ...ctx, timeoutMs: 10 }, new URL("https://example.com/x"));
     if (r instanceof Response) throw new Error("expected error");
     expect(r.error.code).toBe("timeout");
+  });
+});
+
+describe("originFetch with a run-wide signal", () => {
+  it("hands the caller's signal to fetch and leaves it armed after the headers arrive", async () => {
+    const controller = new AbortController();
+    let seen: AbortSignal | undefined;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init: RequestInit) => {
+        seen = init.signal ?? undefined;
+        return new Response("ok", { status: 200 });
+      }),
+    );
+
+    const r = await originFetch({ ...ctx, timeoutMs: 20, signal: controller.signal }, new URL("https://example.com/x"));
+
+    expect(r).toBeInstanceOf(Response);
+    expect(seen).toBe(controller.signal);
+    // The local per-fetch timer must not exist: waiting past timeoutMs must not abort the shared signal.
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(controller.signal.aborted).toBe(false);
+  });
+
+  it("maps an abort of the caller's signal to a timeout error", async () => {
+    const controller = new AbortController();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        (_url: string, init: RequestInit) =>
+          new Promise((_, reject) => {
+            init.signal!.addEventListener("abort", () =>
+              reject(Object.assign(new Error("aborted"), { name: "AbortError" })),
+            );
+          }),
+      ),
+    );
+    const pending = originFetch({ ...ctx, signal: controller.signal }, new URL("https://example.com/x"));
+    controller.abort();
+
+    const r = await pending;
+    if (r instanceof Response) throw new Error("expected error");
+    expect(r.error.code).toBe("timeout");
+  });
+});
+
+describe("readWithLimit abort handling", () => {
+  function stalling(first = "partial") {
+    return new Response(
+      new ReadableStream<Uint8Array>({
+        start(c) {
+          c.enqueue(new TextEncoder().encode(first));
+        },
+      }),
+    );
+  }
+
+  it("reports aborted (not a partial body) when the signal fires mid-read", async () => {
+    const controller = new AbortController();
+    const pending = readWithLimit(stalling(), 1000, controller.signal);
+    setTimeout(() => controller.abort(), 20);
+
+    const r = await pending;
+
+    expect(r).toEqual({ ok: false, reason: "aborted" });
+  });
+
+  it("reports aborted straight away when the signal is already aborted", async () => {
+    const controller = new AbortController();
+    controller.abort();
+
+    expect(await readWithLimit(stalling(), 1000, controller.signal)).toEqual({ ok: false, reason: "aborted" });
+  });
+
+  it("reports too_large with a reason when the cap is exceeded", async () => {
+    expect(await readWithLimit(new Response("a".repeat(50)), 10)).toEqual({ ok: false, reason: "too_large" });
+  });
+
+  it("returns the text on success", async () => {
+    expect(await readWithLimit(new Response("hello"), 10)).toEqual({ ok: true, text: "hello" });
+  });
+
+  it("counts bytes, so a multi-byte body over the cap is too large", async () => {
+    // 6 characters, 12 bytes.
+    expect(await readWithLimit(new Response("é".repeat(6)), 10)).toEqual({ ok: false, reason: "too_large" });
+  });
+
+  it("propagates a stream error that is not an abort", async () => {
+    const broken = new Response(
+      new ReadableStream<Uint8Array>({
+        start(c) {
+          c.error(new Error("socket reset"));
+        },
+      }),
+    );
+    await expect(readWithLimit(broken, 10)).rejects.toThrow("socket reset");
   });
 });
 

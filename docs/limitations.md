@@ -28,6 +28,18 @@ HTMLRewriter is UTF-8 only. The Worker skips bootstrapper injection on responses
 
 Workaround: configure the origin to serve UTF-8.
 
+## Pages without a literal `<head>` get no `<link>` tags
+
+The Worker adds its `<link rel="webmcp">` (and the other discovery `<link>` tags) by appending to the `<head>` element. HTML that omits the `<head>` tag entirely, which the HTML spec allows, has no element for the rewriter to append to, so those pages get no `<link>` tags. The same discovery data is sent in the HTTP `Link` response header (on by default, `features.link_header`), which does not depend on the page markup, so agents that read headers still find the manifest.
+
+The bootstrap `<script>` does not depend on `<head>`. It goes before `</body>`, or at the very end of the document when the page omits `</body>` (minified HTML often does). Bare fragments with no doctype, `<html>`, `<head>` or `<body>` tag, such as an AJAX partial, are passed through untouched.
+
+## HTML injection fails open only on setup errors
+
+If building the HTML rewriter throws (for example a `[[forms]]` selector that Cloudflare's HTMLRewriter cannot parse), the Worker logs the error and serves the origin page unchanged, without the injected tags and form attributes. Selectors are also validated when the config is compiled, so the build rejects `:has()`, `+` and `~` combinators, pseudo-elements and selector lists before they can reach production.
+
+An error raised while the response body is already streaming to the visitor cannot be recovered this way: the status line and headers have been sent. The Worker does not use `ctx.passThroughOnException()` as a second net. It forwards to the zone's origin server rather than to `[origin].base_url`, and it does nothing on Custom Domains and `workers.dev` routes.
+
 ## Route-only mode loses in-page injection
 
 Two deployment modes are supported:

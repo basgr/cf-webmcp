@@ -16,6 +16,7 @@ import { manifestResponse, manifestRedirect } from "./routes/manifest";
 import { landingRedirect, landingResponse } from "./routes/landing";
 import { bootstrapResponse } from "./routes/bootstrap";
 import { assetNotFoundResponse } from "./routes/asset-not-found";
+import { namespaceNotFoundResponse } from "./routes/namespace-not-found";
 import { execResponse } from "./routes/exec";
 import { healthResponse } from "./routes/health";
 import { widgetResponse } from "./routes/widget";
@@ -27,7 +28,7 @@ import { aiCatalogResponse } from "./routes/ai-catalog";
 import { agentSkillsResponse, agentSkillsRedirect } from "./routes/agent-skills";
 import { agentSkillsIndexResponse } from "./routes/agent-skills-index";
 import { buildLinkHeader, mergeLinkHeader } from "./link-header";
-import { formsForPath, injectIntoHtml, shouldInject } from "./injection/html-rewriter";
+import { formsForPath, safeInject, shouldInject } from "./injection/html-rewriter";
 
 export interface Env {
   CF_WEBMCP_ASSETS: R2Bucket;
@@ -106,6 +107,8 @@ export function createHandler(deps: HandlerDeps): Required<Pick<ExportedHandler<
           return widgetResponse(request, config, env.CF_WEBMCP_ASSETS, meta.WIDGET_ASSET);
         case "asset_not_found":
           return handleHeadable(request, assetNotFoundResponse());
+        case "namespace_not_found":
+          return handleHeadable(request, namespaceNotFoundResponse());
         case "exec":
           return execResponse(
             request,
@@ -204,8 +207,11 @@ export function createHandler(deps: HandlerDeps): Required<Pick<ExportedHandler<
     // relay them.
     const upstream = await fetch(target.toString(), new Request(request, { redirect: "manual" }));
 
-    if (!config.features.inject_html) return upstream;
-    if (!shouldInject(request, upstream, config)) return withLinkHeader(upstream);
+    // The Link header is discovery data, independent of body injection: it goes
+    // on every proxied response, including when inject_html is off.
+    if (!config.features.inject_html || !shouldInject(request, upstream, config)) {
+      return withLinkHeader(upstream);
+    }
 
     const base = config.site.public_url ?? `https://${config.site.domain}`;
     const manifestUrl = `${base}${config.manifest.path}`;
@@ -228,7 +234,11 @@ export function createHandler(deps: HandlerDeps): Required<Pick<ExportedHandler<
         : undefined;
     const bootstrapIntegrity = meta.BOOTSTRAP_SRI ?? undefined;
     const forms = formsForPath(config.forms, reqUrl.pathname);
-    const injected = injectIntoHtml(upstream, {
+    // safeInject fails open on synchronous rewriter errors. No
+    // ctx.passThroughOnException() on top of it: that forwards to the zone's
+    // origin, not [origin].base_url, and is a no-op on Custom Domains and
+    // workers.dev.
+    const injected = safeInject(upstream, {
       manifestUrl,
       bootstrapUrl,
       emitLinkTag: config.features.link_tag,
@@ -244,6 +254,11 @@ export function createHandler(deps: HandlerDeps): Required<Pick<ExportedHandler<
 
   function withLinkHeader(response: Response): Response {
     if (!config.features.link_header) return response;
+    // A WebSocket upgrade must be returned as the very object origin gave us:
+    // its `webSocket` cannot be carried into a new Response, and rewrapping a 101
+    // throws ("Responses may only be constructed with status codes in the range
+    // 200 to 599"). Same for any status outside the constructible range.
+    if (response.webSocket || response.status < 200 || response.status > 599) return response;
     const headers = new Headers(response.headers);
     headers.set("link", mergeLinkHeader(headers.get("link"), buildLinkHeader(config)));
     return new Response(response.body, { status: response.status, headers });
