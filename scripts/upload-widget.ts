@@ -1,9 +1,15 @@
 /**
- * Upload the pinned widget to the R2 bucket configured in wrangler.toml.
+ * Upload the pinned widget to the R2 bucket of the CF_WEBMCP_ASSETS binding.
  *
  * Usage:
- *   npm run upload-widget            # remote bucket (deploys)
- *   npm run upload-widget -- --local # local R2 state, so `wrangler dev` sees it
+ *   npm run upload-widget            # remote bucket from wrangler.toml (deploys)
+ *   npm run upload-widget -- --local # local R2 state of wrangler.dev.toml, so
+ *                                    # `npm run dev:worker` (wrangler dev --config
+ *                                    # wrangler.dev.toml) sees it
+ *
+ * CF_WEBMCP_WRANGLER_CONFIG names another wrangler config for either target. The
+ * bucket name is read from that config and the same file is passed to wrangler
+ * as --config, so both name the same bucket and the same local state.
  *
  * Run after `npm run update-widget` (and after any change of the pin) and BEFORE
  * `wrangler deploy`: the deployed Worker advertises widget.<hash>.js on the
@@ -95,11 +101,25 @@ export async function readVendoredWidget(filePath: string): Promise<Uint8Array> 
 }
 
 /**
+ * The wrangler config the upload reads the bucket from and hands to wrangler:
+ * CF_WEBMCP_WRANGLER_CONFIG (relative to the repo root) when set, else
+ * wrangler.dev.toml for a --local upload (the config `npm run dev:worker` runs
+ * `wrangler dev` with) and wrangler.toml for a deploy upload.
+ */
+export function wranglerConfigPath(opts: { local: boolean; root: string; env: Record<string, string | undefined> }): string {
+  const override = opts.env["CF_WEBMCP_WRANGLER_CONFIG"];
+  if (override) return path.resolve(opts.root, override);
+  return path.join(opts.root, opts.local ? "wrangler.dev.toml" : "wrangler.toml");
+}
+
+/**
  * Arguments for `wrangler r2 object put`. Wrangler 4 defaults `r2 object` to
  * LOCAL storage when neither flag is given, so the target is always explicit:
  * a deploy upload must say --remote or it would never reach the real bucket.
+ * --config is the file the bucket name came from, so a --local upload lands in
+ * the local state `wrangler dev` reads for that same config.
  */
-export function wranglerPutArgs(opts: { bucket: string; key: string; file: string; local: boolean }): string[] {
+export function wranglerPutArgs(opts: { bucket: string; key: string; file: string; local: boolean; config: string }): string[] {
   return [
     "r2",
     "object",
@@ -109,6 +129,8 @@ export function wranglerPutArgs(opts: { bucket: string; key: string; file: strin
     opts.file,
     "--content-type",
     "application/javascript",
+    "--config",
+    opts.config,
     opts.local ? "--local" : "--remote",
   ];
 }
@@ -134,11 +156,10 @@ async function main(): Promise<void> {
   const composed = verifyComposedWidget(raw, LICENSE_PREAMBLE, pin);
   const objectKey = objectKeyFor(pin);
 
-  // Read bucket name from wrangler.toml. Honor CF_WEBMCP_WRANGLER_CONFIG so
-  // out-of-tree deploys (the publisher's own repo) can point at their own file.
-  const wranglerPath = process.env.CF_WEBMCP_WRANGLER_CONFIG
-    ? path.resolve(ROOT, process.env.CF_WEBMCP_WRANGLER_CONFIG)
-    : path.join(ROOT, "wrangler.toml");
+  // Read the bucket name from the wrangler config: wrangler.dev.toml for --local,
+  // wrangler.toml for a deploy. CF_WEBMCP_WRANGLER_CONFIG lets out-of-tree deploys
+  // (the publisher's own repo) point at their own file.
+  const wranglerPath = wranglerConfigPath({ local, root: ROOT, env: process.env });
   const wranglerToml = await fs.readFile(wranglerPath, "utf8");
   const bucketMatch = wranglerToml.match(/binding\s*=\s*"CF_WEBMCP_ASSETS"[\s\S]*?bucket_name\s*=\s*"([^"]+)"/);
   if (!bucketMatch || !bucketMatch[1]) {
@@ -154,9 +175,9 @@ async function main(): Promise<void> {
 
     // eslint-disable-next-line no-console
     console.log(
-      `[upload-widget] uploading ${pin.version} (license preamble + webmcp.js, ${composed.length} bytes) to ${bucket}/${objectKey} (${local ? "local" : "remote"})`,
+      `[upload-widget] uploading ${pin.version} (license preamble + webmcp.js, ${composed.length} bytes) to ${bucket}/${objectKey} (${local ? "local" : "remote"}, ${path.relative(ROOT, wranglerPath) || wranglerPath})`,
     );
-    const args = wranglerPutArgs({ bucket, key: objectKey, file: tmpFile, local });
+    const args = wranglerPutArgs({ bucket, key: objectKey, file: tmpFile, local, config: wranglerPath });
     // One quoted command string: wrangler resolves to wrangler.cmd on Windows, which needs a shell.
     const result = spawnSync(["wrangler", ...args.map(shellQuote)].join(" "), { stdio: "inherit", shell: true });
     if (result.status !== 0) throw new Error("wrangler r2 object put failed");

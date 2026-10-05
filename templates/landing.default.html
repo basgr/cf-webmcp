@@ -62,20 +62,6 @@ hr{border:none;border-top:1px solid #e5e7eb;margin:2.5rem 0}
 
 <div id="state-pair" class="state">
   <div class="callout callout-info">
-    <h2>Pairing required</h2>
-    <p>Your browser does not expose WebMCP natively. A desktop MCP client (Claude Desktop, Cursor, Claude Code, Windsurf) can still reach this page's tools through a small localhost bridge. The bridge has two halves:</p>
-    <ul>
-      <li>A CLI you run in a terminal that opens a localhost MCP server and tells your client about it.</li>
-      <li>A widget on this page that opens a WebSocket to that local server and forwards tool calls.</li>
-    </ul>
-    <p>The widget itself is not your MCP client - it is the in-browser side of the wire. Three steps to pair:</p>
-    <ol>
-      <li>Install and start the localhost bridge. Run this in a terminal, replacing <code>claude</code> with <code>cursor</code>, <code>cline</code>, or <code>windsurf</code> as needed:
-        <pre>npx -y @jason.today/webmcp@latest --config claude</pre>
-      </li>
-      <li>In your MCP client, ask for a pairing token (or run the bridge's pairing command directly).</li>
-      <li>Paste the token into the widget below. The widget hands the connection to the bridge; from then on, your MCP client can list and call this site's tools. The token is single-use and discarded after pairing.</li>
-    </ol>
     {{widget_block}}
   </div>
 </div>
@@ -84,7 +70,7 @@ hr{border:none;border-top:1px solid #e5e7eb;margin:2.5rem 0}
   <div class="callout callout-warning">
     <h2>Not connected</h2>
     <p>Your browser does not expose WebMCP, and the fallback widget for desktop MCP clients is disabled on this site. You cannot pair from here right now.</p>
-    <p>Chrome ships WebMCP to users through an origin trial (from Chrome 149) on sites that send a trial token. To test without a token, turn on <code>chrome://flags/#enable-webmcp-testing</code> and relaunch. Cloudflare's Kitesurf agent browser also supports WebMCP. If you are the site owner, set <code>fallback_widget = true</code> in <code>webmcp.toml</code> and redeploy to enable the desktop pairing flow.</p>
+    <p>Chrome ships WebMCP to users through an origin trial (from Chrome 149) on sites that send a trial token. To test without a token, turn on <code>chrome://flags/#enable-webmcp-testing</code> and relaunch. Cloudflare's Kitesurf agent browser also supports WebMCP. If you are the site owner, set <code>fallback_widget = true</code> in <code>webmcp.toml</code>, pin and upload the widget (<code>npm run update-widget</code>, then <code>npm run upload-widget</code>) and redeploy to enable the desktop pairing flow.</p>
   </div>
 </div>
 
@@ -97,7 +83,7 @@ hr{border:none;border-top:1px solid #e5e7eb;margin:2.5rem 0}
 <p>WebMCP is a way for websites to expose structured tools that AI agents can call. There are two runtimes behind the same name, and they reach different agents.</p>
 <ul>
   <li><strong>The W3C draft</strong> (<a href="https://github.com/webmachinelearning/webmcp"><code>webmachinelearning/webmcp</code></a>): a browser API at <code>document.modelContext</code> (older builds expose the deprecated <code>navigator.modelContext</code> alias). Used by browser-native agents (Chrome, Cloudflare Kitesurf, Cloudflare Browser Run lab sessions). No pairing needed; tools register automatically when the page loads. <strong>Chrome ships WebMCP to users through an origin trial (from Chrome 149) on sites that send a trial token</strong>; without one, WebMCP is behind <code>chrome://flags/#enable-webmcp-testing</code>.</li>
-  <li><strong>The jasonjmcghee library</strong> (<a href="https://github.com/jasonjmcghee/WebMCP"><code>jasonjmcghee/WebMCP</code></a>): a localhost websocket bridge for desktop MCP clients (Claude Desktop, Cursor, Claude Code, Windsurf). Requires the one-time pairing flow above.</li>
+  <li><strong>The jasonjmcghee library</strong> (<a href="https://github.com/jasonjmcghee/WebMCP"><code>jasonjmcghee/WebMCP</code></a>): a localhost websocket bridge for desktop MCP clients (Claude Desktop, Cursor, Claude Code, Windsurf). Requires a one-time pairing flow.</li>
 </ul>
 <p class="muted">This site uses <a href="https://github.com/basgr/cf-webmcp">cf-webmcp</a> to expose both surfaces from a single config.</p>
 

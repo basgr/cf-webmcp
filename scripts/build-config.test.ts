@@ -813,7 +813,7 @@ describe("content-addressed widget", () => {
     });
 
     expect(exportedConst(files["config.ts"]!, "WIDGET_ASSET")).toBe(`widget.${(pin["served_sha256"] as string).slice(0, 16)}.js`);
-    expect(files["landing.html"]).toContain("webmcp-widget-mount");
+    expect(files["landing.html"]).toContain("new WebMCP(");
     const messages = warn.mock.calls.map((c) => String(c[0]));
     expect(messages.some((m) => /preamble/i.test(m) && /update-widget/.test(m))).toBe(true);
   });
@@ -824,6 +824,184 @@ describe("content-addressed widget", () => {
       widgetPinPath: await writePin("pin.json", fakePin("widget A")),
     });
     expect(warn.mock.calls.map((c) => String(c[0])).filter((m) => /widget|preamble/i.test(m))).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The fallback widget on the landing page: started, given this site's tools, and paired
+// through a bridge CLI pinned to the vendored widget's version.
+// ---------------------------------------------------------------------------
+
+/** MINIMAL plus two more tools, so "once per tool" and the order are visible. */
+const THREE_TOOLS = `${MINIMAL}
+[[tools]]
+name        = "list_pages"
+description = "List the pages."
+
+  [tools.input_schema]
+  type = "object"
+
+  [tools.executor]
+  type        = "sitemap_filter"
+  sitemap_url = "https://example.com/sitemap.xml"
+
+[[tools]]
+name        = "find_pages"
+description = "Find pages."
+
+  [tools.input_schema]
+  type = "object"
+
+  [tools.executor]
+  type        = "sitemap_filter"
+  sitemap_url = "https://example.com/sitemap.xml"
+`;
+
+/** The inline script that starts the widget, or undefined when the landing has none. */
+const widgetInit = (landing: string): string | undefined => inlineScripts(landing).find((s) => s.includes("new WebMCP("));
+
+/** From `var ORIGIN` to the end of run(): the exec client the bootstrap and the widget init share. */
+function execClient(js: string): string {
+  const start = js.indexOf("var ORIGIN = '';");
+  const runAt = js.indexOf("function run(endpoint, input) {");
+  const end = js.indexOf("\n  }\n", runAt);
+  if (start < 0 || runAt < 0 || end < 0) throw new Error("no exec client (ORIGIN + run) in this script");
+  return js.slice(start, end + 4);
+}
+
+describe("landing: the fallback widget is started and registers this site's tools", () => {
+  const pinFor = (version: string): Promise<string> =>
+    writePin(`pin-${version.replace(/[^a-z0-9]/gi, "_")}.json`, fakePin("widget A", { version }));
+
+  it("starts the widget only if its script ran: a typeof WebMCP guard, then new WebMCP(", async () => {
+    const { files } = await runBuild(await writeToml("wi-guard.toml", MINIMAL), { widgetPinPath: await pinFor("v0.1.13") });
+    const init = widgetInit(files["landing.html"]!);
+    expect(init).toBeDefined();
+    expect(init!.split("new WebMCP(")).toHaveLength(2);
+    expect(init).toContain("typeof WebMCP === 'undefined'");
+    expect(init!.indexOf("typeof WebMCP === 'undefined'")).toBeLessThan(init!.indexOf("new WebMCP("));
+  });
+
+  it("registers each tool once, in config order, after the widget's own script tag", async () => {
+    const { files } = await runBuild(await writeToml("wi-three.toml", THREE_TOOLS), { widgetPinPath: await pinFor("v0.1.13") });
+    const html = files["landing.html"]!;
+    const init = widgetInit(html)!;
+    expect(init.match(/registerTool\(/g)).toHaveLength(3);
+    const at = ["search_pages", "list_pages", "find_pages"].map((n) => init.indexOf(`registerTool(${JSON.stringify(n)},`));
+    expect(at.every((i) => i >= 0)).toBe(true);
+    expect([...at].sort((a, b) => a - b)).toEqual(at);
+    expect(html.indexOf(widgetScriptTag(html)!)).toBeLessThan(html.indexOf(init));
+  });
+
+  it("pins the bridge CLI to the version in the pin, without the leading v", async () => {
+    for (const [version, npm] of [
+      ["v0.1.13", "0.1.13"],
+      ["v2.3.4", "2.3.4"],
+    ] as const) {
+      const { files } = await runBuild(await writeToml(`wi-cli-${npm}.toml`, MINIMAL), { widgetPinPath: await pinFor(version) });
+      const html = files["landing.html"]!;
+      expect(html).toContain(`npx -y @jason.today/webmcp@${npm} --config claude`);
+      expect(html.match(/@jason\.today\/webmcp@/g)).toHaveLength(1);
+      expect(html).not.toContain("@latest");
+    }
+  });
+
+  it("keeps the pairing copy and the CLI line inside the pairing state", async () => {
+    const { files } = await runBuild(await writeToml("wi-state.toml", MINIMAL), { widgetPinPath: await pinFor("v0.1.13") });
+    const html = files["landing.html"]!;
+    const pair = html.slice(html.indexOf('id="state-pair"'), html.indexOf('id="state-disabled"'));
+    expect(pair).toContain("Pairing required");
+    expect(pair).toContain("npx -y @jason.today/webmcp@0.1.13");
+    expect(pair).toContain("new WebMCP(");
+    expect(html.indexOf("npx -y")).toBe(html.lastIndexOf("npx -y"));
+  });
+
+  it("drops the unused widget mount", async () => {
+    const { files } = await runBuild(await writeToml("wi-mount.toml", MINIMAL), { widgetPinPath: await pinFor("v0.1.13") });
+    expect(files["landing.html"]).not.toContain("webmcp-widget-mount");
+  });
+
+  it("calls exec on the page's own origin (root-relative under an opaque one), without credentials", async () => {
+    const custom = MINIMAL.replace(
+      'name   = "Example Co."',
+      'name   = "Example Co."\npublic_url = "https://www.example.com"',
+    ).concat('\n[paths]\nnamespace = "/_agents"\n');
+    const { files } = await runBuild(await writeToml("wi-origin.toml", custom), { widgetPinPath: await pinFor("v0.1.13") });
+    const init = widgetInit(files["landing.html"]!)!;
+    expect(init).toContain("location.origin !== 'null'");
+    expect(init).toContain("location.protocol + '//' + location.host");
+    expect(init).toContain("credentials: 'omit'");
+    expect(init).toContain("'content-type': 'application/json'");
+    expect(init).toContain('run("/_agents/exec/search_pages", input)');
+    expect(init).not.toContain("example.com");
+  });
+
+  it("shares the bootstrap's exec client byte for byte, so the two cannot drift", async () => {
+    const { files } = await runBuild(await writeToml("wi-shared.toml", MINIMAL), { widgetPinPath: await pinFor("v0.1.13") });
+    expect(execClient(widgetInit(files["landing.html"]!)!)).toBe(execClient(files["bootstrap.js"]!));
+  });
+
+  it("escapes a tool description that closes the script element", async () => {
+    const hostile = "</script><script>alert(1)</script>";
+    const toml = MINIMAL.replace('description = "Search the site."', `description = ${JSON.stringify(hostile)}`);
+    const { files } = await runBuild(await writeToml("wi-close.toml", toml), { widgetPinPath: await pinFor("v0.1.13") });
+    const html = files["landing.html"]!;
+    // Only the widget init and the state script: the description opened no script of its own.
+    const scripts = inlineScripts(html);
+    expect(scripts).toHaveLength(2);
+    const init = widgetInit(html)!;
+    expect(init).toContain("<\\/script><script>alert(1)<\\/script>");
+    expect(init).not.toContain("</");
+    expect(scripts.find((s) => s.includes("webmcp-diag"))).not.toContain("alert(1)");
+  });
+
+  it("escapes an HTML comment opener and the JavaScript line separators in a description", async () => {
+    const hostile = `<!--<script> a${String.fromCharCode(0x2028)}b${String.fromCharCode(0x2029)}c`;
+    const toml = MINIMAL.replace('description = "Search the site."', `description = ${JSON.stringify(hostile)}`);
+    const { files } = await runBuild(await writeToml("wi-comment.toml", toml), { widgetPinPath: await pinFor("v0.1.13") });
+    const init = widgetInit(files["landing.html"]!)!;
+    expect(init).not.toContain("<!--");
+    expect(init).not.toMatch(new RegExp("[" + String.fromCharCode(0x2028, 0x2029) + "]"));
+    expect(init).toContain("\\u2028");
+    expect(init).toContain("\\u2029");
+    expect(es5Violations(init)).toEqual([]);
+  });
+
+  it("is ES5, every inline script of a landing with the widget", async () => {
+    const { files } = await runBuild(await writeToml("wi-es5.toml", THREE_TOOLS), { widgetPinPath: await pinFor("v0.1.13") });
+    const scripts = inlineScripts(files["landing.html"]!);
+    expect(scripts).toHaveLength(2);
+    for (const s of scripts) expect(es5Violations(s)).toEqual([]);
+  });
+
+  describe("a landing without the widget has no pairing copy, no CLI line and no init", () => {
+    // The last field: whether the pin itself is unusable, which also leaves WIDGET_ASSET null.
+    // With the feature off, the build still names the asset; the router does not serve it.
+    const cases: Array<[string, string, () => Promise<string>, boolean]> = [
+      ["an unpinned pin", MINIMAL, () => writePin("pin.json", { version: "unpinned", sha256: "" }), true],
+      ["fallback_widget = false with a usable pin", `${MINIMAL}\n[features]\nfallback_widget = false\n`, () => pinFor("v0.1.13"), false],
+      ["a pin whose version is not a release version", MINIMAL, () => pinFor("main"), true],
+    ];
+    for (const [label, toml, pin, unusablePin] of cases) {
+      it(`with ${label}`, async () => {
+        vi.spyOn(console, "warn").mockImplementation(() => {});
+        const { files } = await runBuild(await writeToml("wi-off.toml", toml), { widgetPinPath: await pin() });
+        const html = files["landing.html"]!;
+        for (const gone of ["new WebMCP(", "registerTool(", "@jason.today/webmcp", "npx -y", "Pairing required", "webmcp-widget-mount", "widget below"]) {
+          expect(html, gone).not.toContain(gone);
+        }
+        expect(widgetScriptTag(html)).toBeUndefined();
+        expect(html).toContain("var widgetEnabled = false;");
+        if (unusablePin) expect(exportedConst(files["config.ts"]!, "WIDGET_ASSET")).toBeNull();
+      });
+    }
+
+    it("says why when the pin's version is not a release version", async () => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      await runBuild(await writeToml("wi-badver.toml", MINIMAL), { widgetPinPath: await pinFor("main") });
+      const messages = warn.mock.calls.map((c) => String(c[0]));
+      expect(messages.some((m) => /version/i.test(m) && m.includes('"main"') && /update-widget/.test(m))).toBe(true);
+    });
   });
 });
 

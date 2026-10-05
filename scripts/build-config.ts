@@ -284,6 +284,84 @@ export function defaultAnnotationsFor(executorType: string): {
 }
 
 /**
+ * A value as a JavaScript literal: its JSON. U+2028 and U+2029 are legal raw in a JSON string
+ * but end a line in a JavaScript string literal before ES2019, so a tool description that holds
+ * one would be a syntax error on an older engine. Both go out as escapes. (Built from char
+ * codes: the escapes themselves must not appear as raw characters in this source.)
+ */
+function jsLiteral(value: unknown): string {
+  const backslash = String.fromCharCode(92);
+  return JSON.stringify(value)
+    .split(String.fromCharCode(0x2028))
+    .join(backslash + "u2028")
+    .split(String.fromCharCode(0x2029))
+    .join(backslash + "u2029");
+}
+
+/**
+ * jsLiteral for a value written into an inline <script> of an HTML page. The HTML parser ends
+ * the element at the first `</script`, whatever JavaScript string it sits in, and after a `<!--`
+ * a `<script` inside makes it skip the next end tag. So `</` goes out as `<\/` and `<!--` as
+ * `<\!--`: inside a JavaScript string both escapes read as the characters they replace. Every
+ * `<` in JSON text is inside a string, so no other token changes.
+ */
+function inlineScriptLiteral(value: unknown): string {
+  const backslash = String.fromCharCode(92);
+  return jsLiteral(value)
+    .split("</")
+    .join("<" + backslash + "/")
+    .split("<!--")
+    .join("<" + backslash + "!--");
+}
+
+/**
+ * The exec client of the generated scripts: ORIGIN and run(endpoint, input), which POSTs the
+ * input to an exec endpoint and returns the MCP tool-result shape. The bootstrap and the
+ * landing's widget init both embed this one text, so the two cannot drift apart. Indented for
+ * the body of an IIFE.
+ *
+ * The exec endpoints are built at run time from the origin of the page the script runs on
+ * (`location.protocol + '//' + location.host`, else root-relative under an opaque origin) plus
+ * `<namespace>/exec/<tool>`, never from [site].domain: see buildBootstrap.
+ */
+const EXEC_CLIENT_JS = `  // The exec endpoints are paths. They are called on the origin of the page this
+  // script runs on, which is the host the visitor used (www, workers.dev, a
+  // preview host) and is not changed by a <base href>. Under an opaque origin
+  // (location.origin is the string 'null') or without a location, the path stays
+  // root-relative.
+  var ORIGIN = '';
+  try {
+    if (typeof location !== 'undefined' && location && location.origin !== 'null' && location.host && /^https?:$/.test(location.protocol)) {
+      ORIGIN = location.protocol + '//' + location.host;
+    }
+  } catch (e) {}
+  // Returns the WebMCP/MCP tool-result shape: a content array. The cf-webmcp
+  // executor envelope ({ ok, data | error }) is carried as the text payload so
+  // the agent retains structured success/error, and isError is set unless the
+  // envelope is an explicit ok:true.
+  function run(endpoint, input) {
+    return fetch(ORIGIN + endpoint, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(input || {}),
+      credentials: 'omit',
+    }).then(function (r) {
+      return r.json().catch(function () {
+        return { ok: false, error: { code: 'internal', message: 'invalid json from executor', retriable: false } };
+      });
+    }).catch(function (e) {
+      return { ok: false, error: { code: 'internal', message: String(e && e.message || e), retriable: true } };
+    }).then(function (envelope) {
+      return {
+        content: [{ type: 'text', text: JSON.stringify(envelope) }],
+        // Anything that is not an explicit ok:true counts as an error, so a
+        // structurally-broken envelope is never silently surfaced as success.
+        isError: !(envelope && envelope.ok === true),
+      };
+    });
+  }`;
+
+/**
  * The script body served at /<namespace>/bootstrap.<hash>.js.
  *
  * The exec endpoints it calls are built at run time from the origin of the page it runs on
@@ -323,16 +401,7 @@ function buildBootstrap(config: Config, configHash: string): string {
     };
   });
 
-  // U+2028 and U+2029 are legal raw in a JSON string but end a line in a JavaScript string
-  // literal before ES2019, so a tool description that holds one would be a syntax error on an
-  // older engine. Both go out as escapes. (Built from char codes: the escapes themselves must
-  // not appear as raw characters in this source.)
-  const backslash = String.fromCharCode(92);
-  const toolsJson = JSON.stringify(toolPayload)
-    .split(String.fromCharCode(0x2028))
-    .join(backslash + "u2028")
-    .split(String.fromCharCode(0x2029))
-    .join(backslash + "u2029");
+  const toolsJson = jsLiteral(toolPayload);
 
   // Worker serves this file with content-type application/javascript; charset=utf-8.
   // ES5 style for maximum browser reach (no arrow fns / spread).
@@ -383,42 +452,7 @@ function buildBootstrap(config: Config, configHash: string): string {
       if (nm) declared[nm] = true;
     }
   } catch (e) {}
-  // The exec endpoints are paths. They are called on the origin of the page this
-  // script runs on, which is the host the visitor used (www, workers.dev, a
-  // preview host) and is not changed by a <base href>. Under an opaque origin
-  // (location.origin is the string 'null') or without a location, the path stays
-  // root-relative.
-  var ORIGIN = '';
-  try {
-    if (typeof location !== 'undefined' && location && location.origin !== 'null' && location.host && /^https?:$/.test(location.protocol)) {
-      ORIGIN = location.protocol + '//' + location.host;
-    }
-  } catch (e) {}
-  // Returns the WebMCP/MCP tool-result shape: a content array. The cf-webmcp
-  // executor envelope ({ ok, data | error }) is carried as the text payload so
-  // the agent retains structured success/error, and isError is set unless the
-  // envelope is an explicit ok:true.
-  function run(endpoint, input) {
-    return fetch(ORIGIN + endpoint, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(input || {}),
-      credentials: 'omit',
-    }).then(function (r) {
-      return r.json().catch(function () {
-        return { ok: false, error: { code: 'internal', message: 'invalid json from executor', retriable: false } };
-      });
-    }).catch(function (e) {
-      return { ok: false, error: { code: 'internal', message: String(e && e.message || e), retriable: true } };
-    }).then(function (envelope) {
-      return {
-        content: [{ type: 'text', text: JSON.stringify(envelope) }],
-        // Anything that is not an explicit ok:true counts as an error, so a
-        // structurally-broken envelope is never silently surfaced as success.
-        isError: !(envelope && envelope.ok === true),
-      };
-    });
-  }
+${EXEC_CLIENT_JS}
   // One AbortController per tool: Chrome (153+) unregisters a tool when the
   // signal passed to registerTool aborts. Older builds ignore the second
   // argument (WebIDL drops extra arguments), so it is always passed. Nothing
@@ -607,13 +641,114 @@ function escapeHtml(s: string): string {
 }
 
 /**
- * The widget mount plus its <script>. With SRI the tag carries `integrity` and
- * `crossorigin="anonymous"`: the integrity value is the hash of the composed R2
- * object (preamble + widget), which the Worker serves unmodified.
+ * {{widget_block}}: the pairing instructions with the bridge CLI command, the widget's <script>
+ * and the inline script that starts the widget. It is built only when the widget ships (the
+ * feature is on and the pin is usable), so a landing without the widget carries no pairing copy
+ * and no CLI line.
+ *
+ * The CLI command names the bridge release of the vendored widget: the pin's version without
+ * its leading "v" (upstream tag v0.1.13 is npm version 0.1.13). The widget talks the bridge's own
+ * websocket protocol to the daemon this command starts. The client config that `--config` writes
+ * runs `@jason.today/webmcp@latest --mcp` (upstream src/config.js), so the client's MCP side is
+ * not pinned by this line.
+ *
+ * With SRI the widget's tag carries `integrity` and `crossorigin="anonymous"`: the integrity
+ * value is the hash of the composed R2 object (preamble + widget), which the Worker serves
+ * unmodified.
  */
-function buildWidgetBlock(widgetUrl: string, sri: string | null): string {
+function buildWidgetBlock(config: Config, widgetUrl: string, sri: string | null, cliVersion: string): string {
   const sriAttrs = sri ? ` integrity="${escapeHtml(sri)}" crossorigin="anonymous"` : "";
-  return `<div id="webmcp-widget-mount"></div><script src="${escapeHtml(widgetUrl)}" defer${sriAttrs}></script>`;
+  const cli = `npx -y @jason.today/webmcp@${cliVersion} --config claude`;
+  return [
+    `<h2>Pairing required</h2>`,
+    `    <p>Your browser does not expose WebMCP natively. A desktop MCP client (Claude Desktop, Cursor, Claude Code, Windsurf) can still reach this page's tools through a small localhost bridge. The bridge has two halves:</p>`,
+    `    <ul>`,
+    `      <li>A CLI you run in a terminal that opens a localhost MCP server and tells your client about it.</li>`,
+    `      <li>A widget on this page that opens a WebSocket to that local server and forwards tool calls.</li>`,
+    `    </ul>`,
+    `    <p>The widget itself is not your MCP client - it is the in-browser side of the wire. Three steps to pair:</p>`,
+    `    <ol>`,
+    `      <li>Install and start the localhost bridge. Run this in a terminal, replacing <code>claude</code> with <code>cursor</code>, <code>cline</code>, or <code>windsurf</code> as needed:`,
+    `        <pre>${escapeHtml(cli)}</pre>`,
+    `      </li>`,
+    `      <li>In your MCP client, ask for a pairing token (or run the bridge's pairing command directly).</li>`,
+    `      <li>Click the blue square in the bottom right corner of this page, paste the token and press Connect. The widget hands the connection to the bridge; from then on, your MCP client can list and call this site's tools. The token is single-use and discarded after pairing.</li>`,
+    `    </ol>`,
+    `    <script src="${escapeHtml(widgetUrl)}" defer${sriAttrs}></script>`,
+    `    <script>`,
+    buildWidgetInit(config),
+    `</script>`,
+  ].join("\n");
+}
+
+/**
+ * The inline script that starts the vendored widget (jasonjmcghee/WebMCP) and registers this
+ * site's tools with it, one `registerTool(name, description, inputSchema, execute)` call per
+ * tool. The widget sends what `execute` returns to the bridge as the tool result, and the bridge
+ * answers the MCP `tools/call` with that value unchanged, so `execute` returns an MCP
+ * CallToolResult: the bootstrap's run(), the envelope as text and isError unless ok:true.
+ *
+ * It runs on window load: the widget's script is deferred, so it has run by then unless it
+ * failed to load (the R2 object missing answers 503, an SRI mismatch), and then `WebMCP` is
+ * undefined and nothing starts. Nothing starts either when the browser has WebMCP of its own:
+ * the state script then shows Connected and the bootstrap has registered the tools there. Every
+ * step that can throw is caught, and the script is its own <script> element, so a widget failure
+ * never reaches the landing's state script.
+ *
+ * Every value from the config goes in through inlineScriptLiteral, so a description cannot end
+ * the <script> element. ES5, like the rest of the landing.
+ */
+function buildWidgetInit(config: Config): string {
+  const ns = config.paths.namespace;
+  const registrations = config.tools.map((t) => {
+    const name = inlineScriptLiteral(t.name);
+    const endpoint = inlineScriptLiteral(`${ns}/exec/${t.name}`);
+    return `    try {
+      w.registerTool(${name}, ${inlineScriptLiteral(t.description)}, ${inlineScriptLiteral(t.input_schema)}, function (input) { return run(${endpoint}, input); });
+    } catch (e) {
+      warn('could not register tool ' + ${name}, e);
+    }`;
+  });
+  return `(function () {
+  // cf-webmcp: starts the fallback widget and registers this site's tools with it.
+${EXEC_CLIENT_JS}
+  function warn(what, e) {
+    try {
+      if (typeof console !== 'undefined' && console.warn) console.warn('cf-webmcp: fallback widget: ' + what, e);
+    } catch (err) {}
+  }
+  // The same test the state script uses for Connected: document.modelContext with
+  // registerTool, else the deprecated navigator alias with it.
+  function hasNativeWebMCP() {
+    try {
+      var dmc = 'modelContext' in document ? document.modelContext : null;
+      if (dmc && typeof dmc.registerTool === 'function') return true;
+      var nmc = 'modelContext' in navigator ? navigator.modelContext : null;
+      return !!nmc && typeof nmc.registerTool === 'function';
+    } catch (e) {
+      return false;
+    }
+  }
+  function start() {
+    // The widget script did not load (503 from R2, SRI mismatch): nothing to start.
+    if (typeof WebMCP === 'undefined') return;
+    if (hasNativeWebMCP()) return;
+    var w;
+    try {
+      w = new WebMCP({});
+    } catch (e) {
+      warn('could not start', e);
+      return;
+    }
+${registrations.join("\n")}
+  }
+  try {
+    if (document.readyState === 'complete') start();
+    else window.addEventListener('load', start);
+  } catch (e) {
+    warn('could not start', e);
+  }
+})();`;
 }
 
 /**
@@ -643,8 +778,10 @@ function buildBootstrapBlock(bootstrapUrl: string, sri: string | null): string {
  *   {{site_description}}  - config.site.description (HTML-escaped)
  *   {{config_hash}}       - build-time hash
  *   {{tool_list}}         - pre-rendered <li>...</li> sequence
- *   {{widget_block}}      - the widget mount + script tag (empty if disabled, which
- *                           includes a missing or unpinned vendor/webmcp/current.json)
+ *   {{widget_block}}      - the pairing instructions with the bridge CLI command pinned to
+ *                           the widget's version, the widget <script> and the inline script
+ *                           that starts it (empty if disabled, which includes a missing or
+ *                           unpinned vendor/webmcp/current.json)
  *   {{widget_enabled_js}} - literal "true" or "false" for inline JS
  *   {{bootstrap_block}}   - the bootstrap <script>: root-relative src, deferred, with
  *                           integrity + crossorigin="anonymous" when
@@ -674,8 +811,11 @@ async function buildLanding(
     .join("");
   // The widget is shown only when the feature is on AND this build has a usable
   // pin; otherwise block, enabled flag and the Worker's widget route all agree on "off".
-  const showWidget = config.features.fallback_widget && widget.asset !== null;
-  const widgetBlock = showWidget ? buildWidgetBlock(`${ns}/${widget.asset}`, widget.sri) : "";
+  const widgetBlock =
+    config.features.fallback_widget && widget.asset !== null && widget.cliVersion !== null
+      ? buildWidgetBlock(config, `${ns}/${widget.asset}`, widget.sri, widget.cliVersion)
+      : "";
+  const showWidget = widgetBlock !== "";
 
   const templatePath = config.webmcp_landing.template
     ? path.resolve(path.dirname(tomlPath), config.webmcp_landing.template)
@@ -1079,25 +1219,31 @@ export function buildAiCatalog(config: Config): AiCatalogDoc {
   return { specVersion: "1.0", host, entries };
 }
 
-/** What this build ships for the widget. Both null when the widget is disabled for lack of a pin. */
+/** What this build ships for the widget. All null when the widget is disabled for lack of a usable pin. */
 interface WidgetBuild {
   /** R2 key / URL file name, widget.<served_sha256 16 hex>.js. */
   asset: string | null;
   /** served_sri from the pin, or null when subresource_integrity is off or there is no widget. */
   sri: string | null;
+  /** npm version of the bridge CLI that matches the widget: the pin's version without its "v". */
+  cliVersion: string | null;
 }
 
 const SERVED_SHA256_RE = /^[0-9a-f]{64}$/;
 const SERVED_SRI_RE = /^sha384-[A-Za-z0-9+/]{64}$/;
+/** A release tag (v0.1.13) or version (0.1.13); group 1 is the npm version. */
+const RELEASE_VERSION_RE = /^v?(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)$/;
 
 /**
  * Resolve the widget from vendor/webmcp/current.json, and only from there: the
  * vendored webmcp.js is gitignored and absent in CI, so the build never reads it.
  *
- * A pin that is missing, "unpinned", or lacks valid served_sha256 / served_sri
- * disables the widget consistently (no asset, no landing block, widget_enabled_js
- * false) with a warning when fallback_widget is on. The build still succeeds, so
- * a fresh checkout or CI smoke build works without a pinned widget.
+ * A pin that is missing, "unpinned", lacks valid served_sha256 / served_sri, or
+ * has a version that is not a release version (vX.Y.Z, from which the landing
+ * names the bridge CLI) disables the widget consistently (no asset, no landing
+ * block, widget_enabled_js false) with a warning when fallback_widget is on. The
+ * build still succeeds, so a fresh checkout or CI smoke build works without a
+ * pinned widget.
  */
 async function resolveWidget(config: Config, pinPath: string): Promise<WidgetBuild> {
   const wanted = config.features.fallback_widget;
@@ -1107,11 +1253,11 @@ async function resolveWidget(config: Config, pinPath: string): Promise<WidgetBui
       // eslint-disable-next-line no-console
       console.warn(
         `[build-config] [features].fallback_widget is on but ${reason}, so the widget is disabled in this build ` +
-          `(no widget route, no landing script, widget_enabled_js = false). ` +
+          `(no widget route, no pairing instructions or widget scripts on the landing, widget_enabled_js = false). ` +
           `Pin one with \`npm run update-widget -- --version=vX.Y.Z --sha256=<hex>\`, then \`npm run upload-widget\`.`,
       );
     }
-    return { asset: null, sri: null };
+    return { asset: null, sri: null, cliVersion: null };
   };
 
   let text: string;
@@ -1143,6 +1289,14 @@ async function resolveWidget(config: Config, pinPath: string): Promise<WidgetBui
   ) {
     return disable(`${rel} has no valid served_sha256 / served_sri (written by an older update-widget?)`);
   }
+  // The landing tells the visitor which bridge CLI to run, and that release must match the widget.
+  const version = pin["version"];
+  const release = typeof version === "string" ? RELEASE_VERSION_RE.exec(version) : null;
+  if (!release || !release[1]) {
+    return disable(
+      `${rel} has version ${JSON.stringify(version)}, which is not a release version (vX.Y.Z), so the landing cannot name the matching bridge CLI`,
+    );
+  }
 
   if (wanted && pin["preamble_sha256"] !== sha256Hex(LICENSE_PREAMBLE)) {
     // eslint-disable-next-line no-console
@@ -1155,6 +1309,7 @@ async function resolveWidget(config: Config, pinPath: string): Promise<WidgetBui
   return {
     asset: widgetAssetName(servedSha256),
     sri: config.features.subresource_integrity ? servedSri : null,
+    cliVersion: release[1],
   };
 }
 

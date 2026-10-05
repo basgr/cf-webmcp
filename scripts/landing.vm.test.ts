@@ -1,10 +1,12 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import vm from "node:vm";
+import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildConfig } from "./build-config";
+import { LICENSE_PREAMBLE } from "../src/widget-preamble";
 import { es5Violations, inlineScripts } from "../src/test-support/es5";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -39,22 +41,59 @@ description = "Search the site."
 
 const WIDGET_OFF = `${TOML}\n[features]\nfallback_widget = false\n`;
 
+/** A tool whose description tries to end the inline script, plus a second tool with a schema. */
+const HOSTILE_DESCRIPTION = "</script><script>alert(1)</script> <!--<script>";
+const TWO_TOOLS = `${TOML}
+[[tools]]
+name        = "list_pages"
+description = ${JSON.stringify(HOSTILE_DESCRIPTION)}
+  [tools.input_schema]
+  type     = "object"
+  required = ["q"]
+    [tools.input_schema.properties.q]
+    type = "string"
+  [tools.executor]
+  type        = "sitemap_filter"
+  sitemap_url = "https://example.com/sitemap.xml"
+
+[paths]
+namespace = "/_agents"
+`;
+
+/** The widget pin the build reads: a fake one, so these tests do not depend on vendor/webmcp/current.json. */
+function fakePin(): Record<string, unknown> {
+  const raw = Buffer.from("widget A", "utf8");
+  const composed = Buffer.concat([Buffer.from(LICENSE_PREAMBLE, "utf8"), raw]);
+  return {
+    version: "v0.1.13",
+    sha256: createHash("sha256").update(raw).digest("hex"),
+    served_sha256: createHash("sha256").update(composed).digest("hex"),
+    served_sri: `sha384-${createHash("sha384").update(composed).digest("base64")}`,
+    preamble_sha256: createHash("sha256").update(LICENSE_PREAMBLE, "utf8").digest("hex"),
+  };
+}
+
 let tmpDir = "";
+let pinPath = "";
 let landingWidgetOn = "";
 let landingWidgetOff = "";
+let landingTwoTools = "";
 
 async function buildLanding(name: string, toml: string): Promise<string> {
   const tomlPath = path.join(tmpDir, `${name}.toml`);
   await fs.writeFile(tomlPath, toml);
   const outDir = path.join(tmpDir, `out-${name}`);
-  await buildConfig({ tomlPath, outDir });
+  await buildConfig({ tomlPath, outDir, widgetPinPath: pinPath });
   return fs.readFile(path.join(outDir, "landing.html"), "utf8");
 }
 
 beforeAll(async () => {
   tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "cf-webmcp-landing-"));
+  pinPath = path.join(tmpDir, "pin.json");
+  await fs.writeFile(pinPath, JSON.stringify(fakePin(), null, 2) + "\n");
   landingWidgetOn = await buildLanding("on", TOML);
   landingWidgetOff = await buildLanding("off", WIDGET_OFF);
+  landingTwoTools = await buildLanding("two", TWO_TOOLS);
 });
 
 afterAll(async () => {
@@ -492,5 +531,274 @@ describe("the minimum viable template in docs/customisation.md", () => {
     expect(shown(landingOn, { document: {} })).toEqual(["state-pair"]);
     expect(shown(landingOff, {})).toEqual(["state-disabled"]);
     expect(shown(landingOff, { document: null })).toEqual(["state-disabled"]);
+  });
+});
+
+/**
+ * Runs the landing's widget init script in a vm with a fake WebMCP class (the vendored widget's
+ * API: `new WebMCP(options)`, `registerTool(name, description, inputSchema, execute)`) and a
+ * fake fetch. The execute function's return value is what the bridge receives as the tool
+ * result: the bridge passes it through unchanged as the MCP CallToolResult.
+ */
+describe("the fallback widget init script", () => {
+  interface Registered {
+    name: string;
+    description: string;
+    schema: unknown;
+    execute: (input?: unknown) => unknown;
+  }
+
+  interface WidgetRun {
+    constructed: unknown[];
+    registered: Registered[];
+    fetches: Array<{ url: string; init: Record<string, unknown> }>;
+    loadHandlers: Array<() => void>;
+    warnings: unknown[][];
+    /** Runs the load handlers, as the browser does after the deferred widget script ran. */
+    load(): void;
+  }
+
+  interface WidgetRunOptions {
+    /** The page's location; null for no location global at all. */
+    location?: Record<string, unknown> | null;
+    /** "absent": the widget script did not load (R2 503, SRI mismatch). */
+    webmcp?: "ok" | "absent" | "constructor-throws" | "first-register-throws";
+    /** What fetch answers; default a JSON envelope { ok: true, data: {} }. */
+    fetchImpl?: (url: string, init: Record<string, unknown>) => unknown;
+    readyState?: string;
+    /** document.modelContext / navigator.modelContext, as for the state script. */
+    documentModelContext?: Record<string, unknown> | null;
+    navigatorModelContext?: Record<string, unknown>;
+  }
+
+  const OK_ENVELOPE = { ok: true, data: { entries: [{ url: "https://example.com/a" }] } };
+  const okFetch = (): unknown => Promise.resolve({ json: () => Promise.resolve(OK_ENVELOPE) });
+
+  function initScriptOf(landing: string): string {
+    const script = inlineScripts(landing).find((s) => s.includes("new WebMCP("));
+    if (!script) throw new Error("the landing has no widget init script");
+    return script;
+  }
+
+  function runWidgetInit(landing: string, o: WidgetRunOptions = {}): WidgetRun {
+    const run: WidgetRun = {
+      constructed: [],
+      registered: [],
+      fetches: [],
+      loadHandlers: [],
+      warnings: [],
+      load: () => {
+        for (const fn of run.loadHandlers) fn();
+      },
+    };
+    const mode = o.webmcp ?? "ok";
+    class FakeWebMCP {
+      constructor(options: unknown) {
+        if (mode === "constructor-throws") throw new Error("widget constructor boom");
+        run.constructed.push(options);
+      }
+      registerTool(name: string, description: string, schema: unknown, execute: (input?: unknown) => unknown): void {
+        if (mode === "first-register-throws" && run.registered.length === 0 && !(this as { thrown?: boolean }).thrown) {
+          (this as { thrown?: boolean }).thrown = true;
+          throw new Error("registerTool boom");
+        }
+        run.registered.push({ name, description, schema, execute });
+      }
+    }
+    const doc: Record<string, unknown> = { readyState: o.readyState ?? "loading" };
+    if (o.documentModelContext !== undefined) doc["modelContext"] = o.documentModelContext;
+    const nav: Record<string, unknown> = {};
+    if (o.navigatorModelContext !== undefined) nav["modelContext"] = o.navigatorModelContext;
+    const globals: Record<string, unknown> = {
+      document: doc,
+      navigator: nav,
+      window: {
+        addEventListener: (type: string, fn: () => void) => {
+          if (type === "load") run.loadHandlers.push(fn);
+        },
+      },
+      fetch: (url: string, init: Record<string, unknown>) => {
+        run.fetches.push({ url, init });
+        return (o.fetchImpl ?? okFetch)(url, init);
+      },
+      console: { warn: (...args: unknown[]) => void run.warnings.push(args), info: () => {}, log: () => {} },
+    };
+    if (o.location !== null) {
+      globals["location"] = o.location ?? { protocol: "https:", host: "shop.example.com", origin: "https://shop.example.com" };
+    }
+    if (mode !== "absent") globals["WebMCP"] = FakeWebMCP;
+    vm.runInContext(initScriptOf(landing), vm.createContext(globals), { filename: "widget-init.js" });
+    return run;
+  }
+
+  it("does nothing before load, then starts the widget once with no options and registers every tool once", () => {
+    const run = runWidgetInit(landingTwoTools);
+    expect(run.constructed).toEqual([]);
+    expect(run.loadHandlers).toHaveLength(1);
+    run.load();
+    expect(run.constructed).toHaveLength(1);
+    expect(JSON.stringify(run.constructed[0])).toBe("{}");
+    expect(run.registered.map((r) => r.name)).toEqual(["search_pages", "list_pages"]);
+    expect(run.registered[0]!.description).toBe("Search the site.");
+    expect(JSON.parse(JSON.stringify(run.registered[1]!.schema))).toEqual({
+      type: "object",
+      required: ["q"],
+      properties: { q: { type: "string" } },
+    });
+  });
+
+  it("hands the widget a description that tried to end the script, unchanged", () => {
+    const run = runWidgetInit(landingTwoTools);
+    run.load();
+    expect(run.registered[1]!.description).toBe(HOSTILE_DESCRIPTION);
+  });
+
+  it("POSTs the input as JSON to <page origin><namespace>/exec/<tool>, without credentials", async () => {
+    const run = runWidgetInit(landingTwoTools);
+    run.load();
+    await run.registered[1]!.execute({ q: "blog" });
+    expect(run.fetches).toHaveLength(1);
+    expect(run.fetches[0]!.url).toBe("https://shop.example.com/_agents/exec/list_pages");
+    const init = JSON.parse(JSON.stringify(run.fetches[0]!.init));
+    expect(init).toEqual({
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ q: "blog" }),
+      credentials: "omit",
+    });
+  });
+
+  it("sends {} when the bridge passes no arguments", async () => {
+    const run = runWidgetInit(landingWidgetOn);
+    run.load();
+    await run.registered[0]!.execute(undefined);
+    expect(run.fetches[0]!.init["body"]).toBe("{}");
+  });
+
+  it("returns the MCP CallToolResult the bridge passes through: the envelope as text, isError false on ok:true", async () => {
+    const run = runWidgetInit(landingWidgetOn);
+    run.load();
+    const result = await run.registered[0]!.execute({ query: "a" });
+    expect(JSON.parse(JSON.stringify(result))).toEqual({
+      content: [{ type: "text", text: JSON.stringify(OK_ENVELOPE) }],
+      isError: false,
+    });
+  });
+
+  it("sets isError for an executor error envelope, a body that is not JSON and a failed fetch", async () => {
+    const errorEnvelope = { ok: false, error: { code: "invalid_input", message: "missing query", retriable: false } };
+    const cases: Array<[string, () => unknown, (text: string) => void]> = [
+      [
+        "an ok:false envelope",
+        () => Promise.resolve({ json: () => Promise.resolve(errorEnvelope) }),
+        (text) => expect(JSON.parse(text)).toEqual(errorEnvelope),
+      ],
+      [
+        "a body that is not JSON",
+        () => Promise.resolve({ json: () => Promise.reject(new SyntaxError("Unexpected token")) }),
+        (text) => expect(JSON.parse(text)).toMatchObject({ ok: false, error: { code: "internal", retriable: false } }),
+      ],
+      [
+        "a fetch that rejects",
+        () => Promise.reject(new TypeError("Failed to fetch")),
+        (text) => expect(JSON.parse(text)).toMatchObject({ ok: false, error: { message: "Failed to fetch", retriable: true } }),
+      ],
+      [
+        "an envelope without ok:true",
+        () => Promise.resolve({ json: () => Promise.resolve({ data: {} }) }),
+        (text) => expect(JSON.parse(text)).toEqual({ data: {} }),
+      ],
+    ];
+    for (const [label, fetchImpl, checkText] of cases) {
+      const run = runWidgetInit(landingWidgetOn, { fetchImpl });
+      run.load();
+      const result = JSON.parse(JSON.stringify(await run.registered[0]!.execute({ query: "a" }))) as {
+        content: Array<{ type: string; text: string }>;
+        isError: boolean;
+      };
+      expect(result.isError, label).toBe(true);
+      expect(result.content).toHaveLength(1);
+      expect(result.content[0]!.type, label).toBe("text");
+      checkText(result.content[0]!.text);
+    }
+  });
+
+  it.each([
+    ["an opaque origin", { protocol: "https:", host: "shop.example.com", origin: "null" }],
+    ["a file: page", { protocol: "file:", host: "", origin: "file://" }],
+    ["no location at all", null],
+  ] as const)("calls the endpoint root-relative under %s", async (_label, location) => {
+    const run = runWidgetInit(landingWidgetOn, { location: location as Record<string, unknown> | null });
+    run.load();
+    await run.registered[0]!.execute({ query: "a" });
+    expect(run.fetches[0]!.url).toBe("/_webmcp/exec/search_pages");
+  });
+
+  it("keeps a port in the page origin", async () => {
+    const run = runWidgetInit(landingWidgetOn, {
+      location: { protocol: "http:", host: "localhost:8787", origin: "http://localhost:8787" },
+    });
+    run.load();
+    await run.registered[0]!.execute({ query: "a" });
+    expect(run.fetches[0]!.url).toBe("http://localhost:8787/_webmcp/exec/search_pages");
+  });
+
+  it("does nothing, and throws nothing, when the widget script did not load", () => {
+    const run = runWidgetInit(landingWidgetOn, { webmcp: "absent" });
+    expect(() => run.load()).not.toThrow();
+    expect(run.constructed).toEqual([]);
+    expect(run.registered).toEqual([]);
+  });
+
+  it("throws nothing when the widget constructor throws, and says so in the console", () => {
+    const run = runWidgetInit(landingWidgetOn, { webmcp: "constructor-throws" });
+    expect(() => run.load()).not.toThrow();
+    expect(run.registered).toEqual([]);
+    expect(run.warnings.length).toBeGreaterThan(0);
+  });
+
+  it("registers the remaining tools when one registerTool call throws", () => {
+    const run = runWidgetInit(landingTwoTools, { webmcp: "first-register-throws" });
+    expect(() => run.load()).not.toThrow();
+    expect(run.registered.map((r) => r.name)).toEqual(["list_pages"]);
+    expect(run.warnings.length).toBeGreaterThan(0);
+  });
+
+  it("starts at once when the page has already loaded", () => {
+    const run = runWidgetInit(landingWidgetOn, { readyState: "complete" });
+    expect(run.loadHandlers).toHaveLength(0);
+    expect(run.registered.map((r) => r.name)).toEqual(["search_pages"]);
+  });
+
+  // Each case: the browser as the widget init sees it, the same browser as the state script sees
+  // it, and the state that script shows. The widget starts exactly when the pairing state shows.
+  const registers = { registerTool: (): undefined => undefined };
+  const browsers: Array<[string, WidgetRunOptions, RunOptions, string]> = [
+    ["document.modelContext", { documentModelContext: registers }, { document: {} }, "state-native"],
+    ["the navigator alias", { navigatorModelContext: registers }, { navigator: {} }, "state-native"],
+    [
+      "document.modelContext without registerTool plus the navigator alias",
+      { documentModelContext: {}, navigatorModelContext: registers },
+      { document: { registerTool: false }, navigator: {} },
+      "state-native",
+    ],
+    ["no WebMCP", {}, {}, "state-pair"],
+    ["a null document.modelContext", { documentModelContext: null }, { document: null }, "state-pair"],
+    ["document.modelContext without registerTool", { documentModelContext: {} }, { document: { registerTool: false } }, "state-pair"],
+  ];
+
+  it.each(browsers)("with %s, starts the widget exactly when the page shows the pairing state", (_label, init, state, shownState) => {
+    expect(runLanding(landingWidgetOn, state).active()).toEqual([shownState]);
+    const run = runWidgetInit(landingWidgetOn, init);
+    run.load();
+    expect(run.constructed).toHaveLength(shownState === "state-pair" ? 1 : 0);
+  });
+
+  it("is absent from a landing without the widget", () => {
+    expect(inlineScripts(landingWidgetOff).some((s) => s.includes("new WebMCP("))).toBe(false);
+  });
+
+  it("is ES5", () => {
+    for (const landing of [landingWidgetOn, landingTwoTools]) expect(es5Violations(initScriptOf(landing))).toEqual([]);
   });
 });

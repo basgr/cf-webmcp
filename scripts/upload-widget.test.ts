@@ -5,7 +5,14 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { LICENSE_PREAMBLE } from "../src/widget-preamble";
-import { objectKeyFor, readVendoredWidget, shellQuote, verifyComposedWidget, wranglerPutArgs } from "./upload-widget";
+import {
+  objectKeyFor,
+  readVendoredWidget,
+  shellQuote,
+  verifyComposedWidget,
+  wranglerConfigPath,
+  wranglerPutArgs,
+} from "./upload-widget";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -86,8 +93,33 @@ describe("readVendoredWidget", () => {
   });
 });
 
+describe("wranglerConfigPath", () => {
+  const root = path.join(os.tmpdir(), "repo");
+
+  it("uses wrangler.dev.toml for --local, the config `npm run dev:worker` starts wrangler dev with", () => {
+    expect(wranglerConfigPath({ local: true, root, env: {} })).toBe(path.join(root, "wrangler.dev.toml"));
+  });
+
+  it("uses wrangler.toml for a deploy upload", () => {
+    expect(wranglerConfigPath({ local: false, root, env: {} })).toBe(path.join(root, "wrangler.toml"));
+  });
+
+  it("lets CF_WEBMCP_WRANGLER_CONFIG override both, relative to the repo root", () => {
+    const env = { CF_WEBMCP_WRANGLER_CONFIG: "deploy/wrangler.prod.toml" };
+    expect(wranglerConfigPath({ local: true, root, env })).toBe(path.join(root, "deploy", "wrangler.prod.toml"));
+    expect(wranglerConfigPath({ local: false, root, env })).toBe(path.join(root, "deploy", "wrangler.prod.toml"));
+  });
+});
+
 describe("wranglerPutArgs", () => {
-  const base = { bucket: "my-bucket", key: "widget.0123456789abcdef.js", file: "/tmp/x.js" };
+  const base = { bucket: "my-bucket", key: "widget.0123456789abcdef.js", file: "/tmp/x.js", config: "/repo/wrangler.dev.toml" };
+
+  it("hands wrangler the config the bucket name was read from, so both name the same storage", () => {
+    for (const local of [true, false]) {
+      const args = wranglerPutArgs({ ...base, local });
+      expect(args[args.indexOf("--config") + 1]).toBe("/repo/wrangler.dev.toml");
+    }
+  });
 
   it("targets remote storage explicitly (wrangler 4 defaults r2 object put to local)", () => {
     const args = wranglerPutArgs({ ...base, local: false });

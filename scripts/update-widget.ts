@@ -4,9 +4,13 @@
  * Usage:
  *   npm run update-widget -- --version=v0.1.5 --sha256=<expected> [--release-url=https://...]
  *
- * The default download URL is the upstream release asset webmcp.js. Releases
- * without that asset (v0.1.13 is one) need --release-url, e.g.
+ * The default download URL is src/webmcp.js at the version's tag
+ * (defaultReleaseUrl), e.g.
  * https://raw.githubusercontent.com/jasonjmcghee/WebMCP/v0.1.13/src/webmcp.js
+ * Release v0.1.13 attaches no webmcp.js asset, so the release-asset URL answers
+ * 404 for it. Earlier releases attach a minified build under that name, which is
+ * a different file (a different sha256) from src/webmcp.js. --release-url
+ * overrides the default.
  *
  * Writes:
  *   vendor/webmcp/<version>/webmcp.js
@@ -40,6 +44,11 @@ interface Args {
   releaseUrl?: string;
 }
 
+/** Where the widget of a release lives upstream: src/webmcp.js at the release tag. */
+export function defaultReleaseUrl(version: string): string {
+  return `https://raw.githubusercontent.com/jasonjmcghee/WebMCP/${encodeURIComponent(version)}/src/webmcp.js`;
+}
+
 function parseArgs(argv: string[]): Args {
   const args: Record<string, string> = {};
   for (const a of argv) {
@@ -60,9 +69,7 @@ function parseArgs(argv: string[]): Args {
 
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
-  const url =
-    args.releaseUrl ??
-    `https://github.com/jasonjmcghee/WebMCP/releases/download/${args.version}/webmcp.js`;
+  const url = args.releaseUrl ?? defaultReleaseUrl(args.version);
 
   // eslint-disable-next-line no-console
   console.log(`[update-widget] downloading ${url}`);

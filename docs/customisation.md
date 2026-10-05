@@ -31,7 +31,7 @@ The build script does a literal `{{name}}` substitution. No conditionals, no loo
 | `{{site_description}}` | `site.description` | HTML-escaped. |
 | `{{config_hash}}` | Build-time hash of the TOML | 8 hex chars. Same value as in `<ETag>` and `/_webmcp/health`. |
 | `{{tool_list}}` | Pre-rendered `<li>` items | One per tool. Each is `<li><code>name</code> - description</li>`. **Not** HTML-escaped (it is already safe HTML). |
-| `{{widget_block}}` | The widget mount + script tag | Empty string if `[features].fallback_widget = false`. **Not** HTML-escaped. |
+| `{{widget_block}}` | The pairing instructions, the widget `<script>` tag and the inline script that starts the widget | A "Pairing required" heading, the three pairing steps with the bridge CLI command pinned to the vendored widget's version (`npx -y @jason.today/webmcp@<version> --config claude`), the widget's `<script>` (with `integrity` while `[features].subresource_integrity` is on), and an inline script that starts the widget on page load and registers this site's tools with it. Empty string if the widget is off: `[features].fallback_widget = false`, or no usable pin in `vendor/webmcp/current.json`. **Not** HTML-escaped (it is already safe HTML). |
 | `{{widget_enabled_js}}` | Literal `"true"` or `"false"` | For inlining into a JS expression. |
 | `{{bootstrap_block}}` | The bootstrap `<script>` tag | `<script src="/_webmcp/bootstrap.<hash>.js" defer integrity="sha384-..." crossorigin="anonymous"></script>`. The `src` is root-relative and follows `[paths].namespace`; `integrity` and `crossorigin` are present only while `[features].subresource_integrity` is on. **Not** HTML-escaped (it is already safe HTML). |
 
@@ -101,7 +101,7 @@ If you want **none** of the runtime branching (e.g. you are building a static "t
 </html>
 ```
 
-Keep `class="state"` on all three state divs: the CSS hides every `.state` div and the script shows the one that matches. The script picks its host the way the bootstrap does (`document.modelContext` when it can register tools, else the deprecated `navigator.modelContext` alias). A template that picks differently can say "Connected" while the bootstrap registers nothing, or the reverse.
+Keep `class="state"` on all three state divs: the CSS hides every `.state` div and the script shows the one that matches. Put `{{widget_block}}` inside the pairing div: it holds the pairing steps, and the widget it starts stays off on a browser with WebMCP of its own, the same browsers the script shows Connected to. The script picks its host the way the bootstrap does (`document.modelContext` when it can register tools, else the deprecated `navigator.modelContext` alias). A template that picks differently can say "Connected" while the bootstrap registers nothing, or the reverse.
 
 ## What to consider when customising
 
