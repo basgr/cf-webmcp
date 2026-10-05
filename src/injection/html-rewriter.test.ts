@@ -134,6 +134,79 @@ describe("matchGlob", () => {
       expect(matchGlob("/(?)", "/(x)")).toBe(true);
       expect(matchGlob("/(?)", "/x")).toBe(false);
     });
+
+    it("matches one code point, so a character outside the BMP is one character, not two", () => {
+      expect(matchGlob("/a?b", "/a\u{1F600}b")).toBe(true);
+      expect(matchGlob("/a??b", "/a\u{1F600}b")).toBe(false);
+      expect(matchGlob("/\u{1F600}*", "/\u{1F600}x")).toBe(true);
+      expect(matchGlob("/*\u{1F600}", "/x\u{1F600}")).toBe(true);
+    });
+  });
+
+  describe("runs in time linear in the pattern times the path, whatever the path", () => {
+    // Every proxied request runs every exclude_paths and [[forms]].paths pattern against its path,
+    // and the path is the visitor's to choose. A backtracking regex took seconds here.
+    it.each([
+      ["/*/*/*.pdf", "8,000 slashes", "/".repeat(8000)],
+      ["*/*.json", "16,000 slashes", "/".repeat(16_000)],
+      ["/*a*a*a*a*a*b", "/ and 16,000 a", "/" + "a".repeat(16_000)],
+      ["/shop/*/reviews/*x", "/shop/ and 2,000 /reviews", "/shop/" + "/reviews".repeat(2000)],
+      ["*?*?*?*?*?*!", "16,000 ?", "?".repeat(16_000)],
+    ])("%s against %s", (pattern, _label, path) => {
+      const start = performance.now();
+      expect(matchGlob(pattern, path)).toBe(false);
+      expect(performance.now() - start).toBeLessThan(50);
+    });
+  });
+
+  describe("agrees with a reference regex on random short inputs", () => {
+    /** The v0.6.0 regex implementation, kept as the oracle: * any run, ? one code point, the rest literal. */
+    function reference(pattern: string, input: string): boolean {
+      let source = "";
+      for (const ch of pattern) {
+        if (ch === "*") source += "[\\s\\S]*";
+        else if (ch === "?") source += "[\\s\\S]";
+        else source += ch.replace(/[.+^${}()|[\]\\]/g, "\\$&");
+      }
+      return new RegExp(`^${source}$`, "u").test(input);
+    }
+
+    /** mulberry32: a seeded generator, so a failure reproduces. */
+    function rng(seed: number): () => number {
+      let a = seed >>> 0;
+      return () => {
+        a = (a + 0x6d2b79f5) >>> 0;
+        let t = a;
+        t = Math.imul(t ^ (t >>> 15), t | 1);
+        t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+        return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+      };
+    }
+
+    const PATTERN_ALPHABET = ["a", "b", "/", ".", "*", "*", "?", "\u{1F600}", "(", "\\"];
+    const INPUT_ALPHABET = ["a", "b", "/", ".", "?", "*", "\u{1F600}", "(", "\\"];
+
+    it("on 20,000 random pattern and path pairs", () => {
+      const next = rng(0x5eed);
+      const pick = (alphabet: string[], max: number) => {
+        let s = "";
+        const n = Math.floor(next() * (max + 1));
+        for (let i = 0; i < n; i++) s += alphabet[Math.floor(next() * alphabet.length)];
+        return s;
+      };
+      const mismatches: string[] = [];
+      let matched = 0;
+      for (let i = 0; i < 20_000; i++) {
+        const pattern = pick(PATTERN_ALPHABET, 7);
+        const input = pick(INPUT_ALPHABET, 9);
+        const want = reference(pattern, input);
+        if (want) matched++;
+        if (matchGlob(pattern, input) !== want) mismatches.push(`${JSON.stringify(pattern)} vs ${JSON.stringify(input)}: want ${want}`);
+      }
+      expect(mismatches.slice(0, 10)).toEqual([]);
+      // The sample must exercise both answers, or the comparison proves little.
+      expect(matched).toBeGreaterThan(500);
+    });
   });
 });
 

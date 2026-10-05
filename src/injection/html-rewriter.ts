@@ -110,15 +110,57 @@ export function configLinkOptions(config: Config): ConfigLinkOptions {
  * character matches itself, the regex metacharacters escaped. The pattern must match the
  * whole path. The build warns about a pattern with `?` (globPatternWarnings), because
  * v0.5.1 read it as a regex quantifier.
+ *
+ * Characters are code points, so `?` matches a character outside the BMP as one. The match
+ * runs on two pointers and, on a mismatch, goes back only to the last `*` seen, which is
+ * enough for globs with no other operators: at most pattern length times path length steps,
+ * whatever the path holds. The path is the visitor's to choose, and every proxied request
+ * runs every pattern against it; a backtracking regex took seconds on a path of slashes.
  */
 export function matchGlob(pattern: string, input: string): boolean {
-  let source = "";
-  for (const ch of pattern) {
-    if (ch === "*") source += "[\\s\\S]*";
-    else if (ch === "?") source += "[\\s\\S]";
-    else source += ch.replace(/[.+^${}()|[\]\\]/g, "\\$&");
+  const p = compiledGlob(pattern);
+  const s = Array.from(input);
+  let pi = 0;
+  let si = 0;
+  // Where the last `*` is in the pattern, and the path position it has consumed up to.
+  let star = -1;
+  let starSi = 0;
+  while (si < s.length) {
+    const c = p[pi];
+    if (c === "*") {
+      star = pi++;
+      starSi = si;
+    } else if (c !== undefined && (c === "?" || c === s[si])) {
+      pi++;
+      si++;
+    } else if (star !== -1) {
+      // Let the last `*` take one more character and try the rest of the pattern again.
+      pi = star + 1;
+      si = ++starSi;
+    } else {
+      return false;
+    }
   }
-  return new RegExp(`^${source}$`, "u").test(input);
+  while (p[pi] === "*") pi++;
+  return pi === p.length;
+}
+
+/**
+ * A pattern split into code points, once per pattern: the patterns are the config's
+ * (exclude_paths and [[forms]].paths), a fixed set per deploy. Capped all the same, so a
+ * caller with an open-ended set of patterns cannot grow it without bound.
+ */
+const GLOB_CACHE = new Map<string, readonly string[]>();
+const GLOB_CACHE_MAX = 256;
+
+function compiledGlob(pattern: string): readonly string[] {
+  let compiled = GLOB_CACHE.get(pattern);
+  if (compiled === undefined) {
+    if (GLOB_CACHE.size >= GLOB_CACHE_MAX) GLOB_CACHE.clear();
+    compiled = Array.from(pattern);
+    GLOB_CACHE.set(pattern, compiled);
+  }
+  return compiled;
 }
 
 /**
