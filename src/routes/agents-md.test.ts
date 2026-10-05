@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { agentsMdResponse, agentsMdRedirect, mergeBlock } from "./agents-md";
 import type { Config } from "../config-types";
+import { makeConfig as configWith, type ConfigOverrides } from "../test-support/config";
 
 function makeConfig(overrides: Partial<Config> = {}): Config {
   return {
@@ -120,15 +121,117 @@ describe("agentsMdResponse", () => {
     expect(text).toContain("`contact` (form): Send a contact message.");
   });
 
-  it("describes browser-native agents by the runtime, document.modelContext, with no flag or browser named", async () => {
-    const proxy = async () => new Response("", { status: 404 });
-    const res = await agentsMdResponse(new Request("https://example.com/.well-known/agents.md"), makeConfig(), proxy);
-    const text = await res.text();
+});
+
+describe("agents.md says only what this config does", () => {
+  const LANDING = "https://example.com/mcp";
+  const RUNTIME = "`document.modelContext` (Chrome 146 to 149: the deprecated `navigator.modelContext`)";
+  const FORMS: ConfigOverrides = { forms: [{ name: "contact", description: "Send a contact message.", selector: "form#contact" }] };
+  const notFound = async () => new Response("", { status: 404 });
+  const block = async (overrides: ConfigOverrides = {}, widget = false, healthOpen?: boolean) =>
+    (
+      await agentsMdResponse(
+        new Request("https://example.com/.well-known/agents.md"),
+        configWith({ agents_md: { mode: "synthesize" }, ...overrides }),
+        notFound,
+        widget,
+        healthOpen,
+      )
+    ).text();
+  const lineStarting = (text: string, prefix: string) => text.split("\n").find((l) => l.startsWith(prefix));
+  const browserLine = (text: string) => lineStarting(text, "- **Browser-native agents**");
+
+  describe("the browser-native line", () => {
+    it("HTML injection on, no forms: the tools register on the pages that load the script", async () => {
+      expect(browserLine(await block())).toBe(
+        `- **Browser-native agents**: On pages that load this site's cf-webmcp script, the tools register on ${RUNTIME} when the page loads. No setup.`,
+      );
+    });
+
+    it("HTML injection on, with forms: the tools that are not forms, and a form tool only where its form is", async () => {
+      expect(browserLine(await block(FORMS))).toBe(
+        `- **Browser-native agents**: On pages that load this site's cf-webmcp script, the tools that are not forms register on ${RUNTIME} when the page loads. A form tool exists only on pages that carry its form. No setup.`,
+      );
+    });
+
+    it("names no flag and no browser product, and not navigator.modelContext as the place to look", async () => {
+      const line = browserLine(await block(FORMS))!;
+      expect(line).not.toMatch(/flag/i);
+      expect(line).not.toMatch(/Browser Run|Kitesurf|Chrome with/);
+      expect(line.indexOf("`document.modelContext`")).toBeLessThan(line.indexOf("`navigator.modelContext`"));
+    });
+
+    it("HTML injection off, default landing template: the tools register when the WebMCP page loads", async () => {
+      expect(browserLine(await block({ features: { inject_html: false } }))).toBe(
+        `- **Browser-native agents**: The tools register on ${RUNTIME} when the WebMCP page, [${LANDING}](${LANDING}), loads. No setup.`,
+      );
+    });
+
+    it("HTML injection off, custom landing template: no browser-native line, the WebMCP page is named", async () => {
+      const text = await block({ features: { inject_html: false }, webmcp_landing: { template: "custom.html" } });
+      expect(browserLine(text)).toBeUndefined();
+      expect(text).toContain(`- **WebMCP page**: [${LANDING}](${LANDING}).`);
+    });
+
+    it("HTML injection and the landing off: no connect section at all", async () => {
+      const text = await block({ features: { inject_html: false, webmcp_landing: false } });
+      expect(text).not.toContain("### How agents connect");
+      expect(browserLine(text)).toBeUndefined();
+    });
+  });
+
+  describe("form tools", () => {
+    it("are listed only while HTML injection is on, because only then does the Worker stamp them", async () => {
+      expect(await block(FORMS)).toContain("- `contact` (form): Send a contact message.");
+      expect(await block({ ...FORMS, features: { inject_html: false } })).not.toContain("(form)");
+    });
+
+    it("are left out of the exec line, the schema line and the WebMCP page line when they exist", async () => {
+      const text = await block(FORMS);
+      expect(text).toContain("- Calls to the tools that are not forms go to `POST /_webmcp/exec/<tool_name>` with a JSON body.");
+      expect(text).toContain("Full tool schema (the tools that are not forms): [https://example.com/.well-known/webmcp](https://example.com/.well-known/webmcp)");
+      expect(text).toContain(`- **WebMCP page**: [${LANDING}](${LANDING}) lists the tools that are not forms and shows whether your browser exposes WebMCP.`);
+    });
+
+    it("keep the plain wording when there are none", async () => {
+      const text = await block();
+      expect(text).toContain("- Tool calls go to `POST /_webmcp/exec/<tool_name>` with a JSON body.");
+      expect(text).toContain("Full tool schema: [https://example.com/.well-known/webmcp](https://example.com/.well-known/webmcp)");
+      expect(text).toContain(`- **WebMCP page**: [${LANDING}](${LANDING}) lists the tools and shows whether your browser exposes WebMCP.`);
+    });
+
+    it("the pairing bullet says the bridge reaches the tools that are not forms", async () => {
+      expect(lineStarting(await block(FORMS, true), "- **Desktop MCP clients**")).toBe(
+        `- **Desktop MCP clients** (Claude Desktop, Cursor, Claude Code, Windsurf): pair at [${LANDING}](${LANDING}). The pairing page hosts the localhost-bridge widget. The bridge reaches the tools that are not forms.`,
+      );
+    });
+  });
+
+  it("Retry-After: promised for this site's own rate limit only", async () => {
+    const text = await block();
     expect(text).toContain(
-      "- **Browser-native agents** (a browser or agent browser with the WebMCP runtime): tools auto-register via `document.modelContext` when the page loads. No setup.",
+      "- A `rate_limited` error (HTTP 429) from this site's own rate limit carries a `Retry-After` header; honour it. One that origin's rate limit caused has none.",
     );
-    expect(text).not.toContain("navigator.modelContext");
-    expect(text).not.toMatch(/flag|Chrome/i);
+    expect(text).toContain("- Do not retry a `rate_limited` error sooner than its `Retry-After` says; without one, back off before retrying.");
+  });
+
+  describe("the health line", () => {
+    const HEALTH = "- Operational health: [https://example.com/_webmcp/health](https://example.com/_webmcp/health).";
+
+    it("is there when the endpoint answers without a token", async () => {
+      expect(await block()).toContain(HEALTH);
+    });
+
+    it.each([
+      ["a [health].token is set", { health: { token: "secret" } } as ConfigOverrides],
+      ["[health].public is false", { health: { public: false } } as ConfigOverrides],
+    ])("is left out when %s", async (_label, overrides) => {
+      expect(await block(overrides)).not.toContain("Operational health");
+    });
+
+    it("is left out when the caller says the endpoint needs a token (the CF_WEBMCP_HEALTH_TOKEN secret)", async () => {
+      expect(await block({}, false, false)).not.toContain("Operational health");
+    });
   });
 });
 

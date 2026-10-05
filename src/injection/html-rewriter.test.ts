@@ -67,7 +67,6 @@ describe("matchGlob", () => {
   // One row per regex metacharacter: the pattern must match the path that holds the
   // character itself, and none of the paths the character would match as a regex.
   const literal: Array<[name: string, pattern: string, same: string, notSame: string[]]> = [
-    ["?", "/a?b", "/a?b", ["/ab", "/b", "/axb", "/a"]],
     [".", "/a.b", "/a.b", ["/axb"]],
     ["+", "/a+b", "/a+b", ["/ab", "/aab"]],
     ["(", "/a(b", "/a(b", ["/ab", "/a"]],
@@ -96,10 +95,45 @@ describe("matchGlob", () => {
     expect(matchGlob("blog", "/blog")).toBe(false);
   });
 
-  it("keeps * as the only wildcard, and it still matches ? and the other specials in the input", () => {
+  it("keeps * and ? as the only wildcards, and * still matches ? and the other specials in the input", () => {
     expect(matchGlob("/search*", "/search?q=1")).toBe(true);
     expect(matchGlob("/a*z", "/a.+(b)z")).toBe(true);
     expect(matchGlob("/a*z", "/b-z")).toBe(false);
+  });
+
+  describe("? matches exactly one character", () => {
+    it("matches any one character, / included (as * crosses / too)", () => {
+      expect(matchGlob("/a?b", "/axb")).toBe(true);
+      expect(matchGlob("/a?b", "/a/b")).toBe(true);
+      expect(matchGlob("/a?b", "/a?b")).toBe(true);
+      expect(matchGlob("/a?b", "/a.b")).toBe(true);
+      expect(matchGlob("/v?/x", "/v1/x")).toBe(true);
+    });
+
+    it("does not match zero characters", () => {
+      expect(matchGlob("/a?b", "/ab")).toBe(false);
+      expect(matchGlob("/search?", "/search")).toBe(false);
+      // v0.5.1 read `h?` as an optional h, so /search?* also excluded /search itself. Now it does not.
+      expect(matchGlob("/search?*", "/search")).toBe(false);
+      expect(matchGlob("/search?*", "/searc")).toBe(false);
+    });
+
+    it("does not match two characters", () => {
+      expect(matchGlob("/a?b", "/axxb")).toBe(false);
+      expect(matchGlob("/a??b", "/axxb")).toBe(true);
+    });
+
+    it("combines with *: ?* is one character or more", () => {
+      expect(matchGlob("/search?*", "/searchx")).toBe(true);
+      expect(matchGlob("/search?*", "/search/results")).toBe(true);
+    });
+
+    it("leaves the other metacharacters literal next to it", () => {
+      expect(matchGlob("/a?.b", "/ax.b")).toBe(true);
+      expect(matchGlob("/a?.b", "/axyb")).toBe(false);
+      expect(matchGlob("/(?)", "/(x)")).toBe(true);
+      expect(matchGlob("/(?)", "/x")).toBe(false);
+    });
   });
 });
 

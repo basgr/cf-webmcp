@@ -87,6 +87,16 @@ function parsesAsHttpOrigin(value: string): boolean {
   );
 }
 
+// [site].domain: a bare hostname with an optional port (see Site below).
+const DOMAIN_RE = /^[A-Za-z0-9.-]+(:\d+)?$/;
+
+function domainPortInRange(domain: string): boolean {
+  const colon = domain.indexOf(":");
+  if (colon === -1) return true;
+  const port = Number(domain.slice(colon + 1));
+  return Number.isInteger(port) && port >= 1 && port <= 65535;
+}
+
 const PublicUrl = z
   .string()
   .regex(
@@ -302,7 +312,12 @@ const Site = z.object({
     .string()
     .min(1)
     // Letter case in the class, not the i flag, which the generated JSON schema would lose.
-    .regex(/^[A-Za-z0-9.-]+(:\d+)?$/, "domain must be a bare hostname (optionally with port), no scheme or path"),
+    .regex(DOMAIN_RE, "domain must be a bare hostname (optionally with port), no scheme or path")
+    // Judged only once the regex passed, so a value gets one message. The port range is
+    // public_url's: 0 or over 65535 makes every https://<domain> URL unusable.
+    .refine((s) => !DOMAIN_RE.test(s) || domainPortInRange(s), {
+      message: "domain port must run from 1 to 65535",
+    }),
   name: z.string().min(1),
   description: z.string().default(""),
   locale: z.string().default("en"),

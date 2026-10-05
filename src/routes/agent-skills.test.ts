@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import { agentSkillsResponse, agentSkillsRedirect, mergeBlock, skillName } from "./agent-skills";
 import { slugify } from "../ard";
 import type { Config } from "../config-types";
+import { makeConfig as configWith, type ConfigOverrides } from "../test-support/config";
 
 function makeConfig(overrides: Partial<Config> = {}): Config {
   return {
@@ -98,20 +99,6 @@ describe("agentSkillsResponse", () => {
     expect(body).toContain("`list_posts()`");
     expect(body).toContain("Search the site.");
     expect(body).toContain("https://example.com/.well-known/webmcp.json");
-  });
-
-  it("names the runtime as document.modelContext, not the deprecated navigator alias", async () => {
-    const proxy = async () => new Response("", { status: 404 });
-    const res = await agentSkillsResponse(
-      new Request("https://example.com/.well-known/agent-skills/site/SKILL.md"),
-      makeConfig(),
-      proxy,
-    );
-    const body = await res.text();
-    expect(body).toContain(
-      "Browser-native agents register these automatically via `document.modelContext` when the WebMCP runtime is present.",
-    );
-    expect(body).not.toContain("navigator.modelContext");
   });
 
   it("uses explicit name and description overrides when set", async () => {
@@ -375,5 +362,70 @@ describe("skillName", () => {
     const proxy = async () => new Response("", { status: 404 });
     const body = await (await agentSkillsResponse(new Request("https://example.com/.well-known/agent-skills/site/SKILL.md"), config, proxy)).text();
     expect(body).toMatch(/^---\nname: "cafe"\n/);
+  });
+});
+
+describe("SKILL.md says only what this config does", () => {
+  const LANDING = "https://example.com/mcp";
+  const RUNTIME = "`document.modelContext` (Chrome 146 to 149: the deprecated `navigator.modelContext`)";
+  const FORMS: ConfigOverrides = { forms: [{ name: "contact", description: "Send a contact message.", selector: "form#contact" }] };
+  const notFound = async () => new Response("", { status: 404 });
+  const skill = async (overrides: ConfigOverrides = {}, widget = false) =>
+    (
+      await agentSkillsResponse(
+        new Request("https://example.com/.well-known/agent-skills/site/SKILL.md"),
+        configWith({ agent_skills: { mode: "synthesize" }, ...overrides }),
+        notFound,
+        widget,
+      )
+    ).text();
+  /** The paragraph between the "Tools available" heading and the tool list. */
+  const intro = (text: string) => text.split("## Tools available on this site\n\n")[1]!.split("\n\n")[0]!;
+
+  it("HTML injection on, no forms: the tools register on the pages that load the script, and the WebMCP page lists them", async () => {
+    expect(intro(await skill())).toBe(
+      `On pages that load this site's cf-webmcp script, the tools register on ${RUNTIME} when the page loads. The tools are also listed at <${LANDING}>.`,
+    );
+  });
+
+  it("HTML injection on, with forms: the tools that are not forms, a form tool only where its form is", async () => {
+    const text = await skill(FORMS);
+    expect(intro(text)).toBe(
+      `On pages that load this site's cf-webmcp script, the tools that are not forms register on ${RUNTIME} when the page loads. A form tool exists only on pages that carry its form. The tools that are not forms are also listed at <${LANDING}>.`,
+    );
+    expect(text).toContain("- `contact` (form) - Send a contact message.");
+    expect(text).toContain("## Full machine-readable tool schema\n\nThe tools that are not forms:\n\n<https://example.com/.well-known/webmcp>");
+  });
+
+  it("the pairing sentence says the bridge reaches the tools that are not forms", async () => {
+    expect(intro(await skill(FORMS, true))).toContain(
+      `Desktop MCP clients can pair at <${LANDING}> and call the tools that are not forms through the localhost bridge.`,
+    );
+  });
+
+  it("names no flag and no browser product in the intro", async () => {
+    const text = intro(await skill(FORMS));
+    expect(text).not.toMatch(/flag/i);
+    expect(text).not.toMatch(/Browser Run|Kitesurf|Chrome with/);
+  });
+
+  it("HTML injection off, default landing template: the tools register when the WebMCP page loads; no form tools", async () => {
+    const text = await skill({ ...FORMS, features: { inject_html: false } });
+    expect(intro(text)).toBe(
+      `The tools register on ${RUNTIME} when the WebMCP page, <${LANDING}>, loads. The tools are also listed at <${LANDING}>.`,
+    );
+    expect(text).not.toContain("(form)");
+    expect(text).not.toContain("The tools that are not forms:");
+  });
+
+  it("HTML injection off, custom landing template: only the WebMCP page is named", async () => {
+    expect(intro(await skill({ features: { inject_html: false }, webmcp_landing: { template: "custom.html" } }))).toBe(
+      `The WebMCP page is <${LANDING}>.`,
+    );
+  });
+
+  it("HTML injection and the landing off: no intro paragraph, the tool list follows the heading", async () => {
+    const text = await skill({ features: { inject_html: false, webmcp_landing: false } });
+    expect(text).toContain("## Tools available on this site\n\n- `search_pages");
   });
 });

@@ -117,6 +117,17 @@ const cases: RouteCase[] = [
 
 const readAll = async (res: Response): Promise<number> => new Uint8Array(await res.arrayBuffer()).byteLength;
 
+/**
+ * Index of the first byte at which `a` and `b` differ, -1 when they are the same bytes. A plain
+ * loop: toEqual on a 1 MiB Uint8Array compares element by element through the matcher and takes
+ * seconds, close to the test timeout under a loaded run.
+ */
+function firstDifference(a: Uint8Array, b: Uint8Array): number {
+  const n = Math.min(a.byteLength, b.byteLength);
+  for (let i = 0; i < n; i++) if (a[i] !== b[i]) return i;
+  return a.byteLength === b.byteLength ? -1 : n;
+}
+
 describe.each(cases)("$name: the cap on origin's file", (c) => {
   const config = () => makeConfig(c.merge);
 
@@ -229,7 +240,9 @@ describe.each(cases)("$name: the cap on origin's file", (c) => {
   it("merges a body of 1 MiB + 1 byte as an oversize body: relayed untouched", async () => {
     const doc = c.document(MIB + 1);
     const res = await c.call(config(), async () => new Response(doc, { status: 200, headers: { "content-type": c.contentType } }));
-    expect(new Uint8Array(await res.arrayBuffer())).toEqual(doc);
+    const got = new Uint8Array(await res.arrayBuffer());
+    expect(got.byteLength).toBe(doc.byteLength);
+    expect(firstDifference(got, doc)).toBe(-1);
   });
 
   describe("X-Robots-Tag", () => {

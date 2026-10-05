@@ -22,7 +22,7 @@ import { healthResponse } from "./routes/health";
 import { widgetResponse } from "./routes/widget";
 import { llmsTxtResponse, type LlmsTxtTokenHints } from "./routes/llms-txt";
 import { robotsTxtResponse } from "./routes/robots-txt";
-import { agentsMdResponse, agentsMdRedirect } from "./routes/agents-md";
+import { agentsMdResponse, agentsMdRedirect, healthAnswersWithoutToken } from "./routes/agents-md";
 import { apiCatalogResponse } from "./routes/api-catalog";
 import { aiCatalogResponse, ardRedirect } from "./routes/ai-catalog";
 import { agentSkillsResponse, agentSkillsRedirect } from "./routes/agent-skills";
@@ -165,7 +165,13 @@ export function createHandler(deps: HandlerDeps): Required<Pick<ExportedHandler<
         case "robots_txt":
           return robotsTxtResponse(request, config, (u) => proxyToOrigin(u, env));
         case "agents_md":
-          return agentsMdResponse(request, config, (u) => proxyToOrigin(u, env), widget);
+          return agentsMdResponse(
+            request,
+            config,
+            (u) => proxyToOrigin(u, env),
+            widget,
+            healthAnswersWithoutToken(config, env.CF_WEBMCP_HEALTH_TOKEN),
+          );
         case "agents_md_redirect":
           return agentsMdRedirect(config);
         case "api_catalog":

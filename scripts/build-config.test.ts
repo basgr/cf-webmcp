@@ -589,6 +589,14 @@ describe("ai_catalog generation (ARD v0.91 ard.json)", () => {
   }
   const ard = (files: Record<string, string>) => JSON.parse(files["ard.json"]!);
 
+  it("lists form tools in capabilities only while HTML injection is on (the Worker stamps no form otherwise)", async () => {
+    const form = `\n[[forms]]\nname = "contact"\ndescription = "Contact us."\nselector = "form#contact"\n`;
+    const on = ard((await runBuild(await writeToml("ard-forms-on.toml", ardToml([], form)))).files);
+    expect(on.entries[0].capabilities).toEqual(["search_pages", "contact"]);
+    const off = ard((await runBuild(await writeToml("ard-forms-off.toml", ardToml([], `inject_html = false\n${form}`)))).files);
+    expect(off.entries[0].capabilities).toEqual(["search_pages"]);
+  });
+
   it("emits { host, entries } with one skill entry, no specVersion", async () => {
     const toml = await writeToml("ard.toml", WITH_AI_CATALOG);
     const { files } = await runBuild(toml);
@@ -705,9 +713,13 @@ describe("ai_catalog generation (ARD v0.91 ard.json)", () => {
       expect((err as Error).message.split("\n").filter((l) => l.startsWith("  - "))).toHaveLength(1);
     });
 
-    it('domain = "example.com:99999"', async () => {
-      const toml = await writeToml("ard-bad-port.toml", ardToml().replace('domain = "example.com"', 'domain = "example.com:99999"'));
-      await expect(runBuild(toml)).rejects.toThrow(/\[build-config\] \[site\]\.domain "example\.com:99999"/);
+    // So does the schema with a [site].domain port out of range, for every config, ARD on or off.
+    it.each(['domain = "example.com:99999"', 'domain = "example.com:0"'])("%s", async (line) => {
+      const toml = await writeToml("ard-bad-port.toml", ardToml().replace('domain = "example.com"', line));
+      const err = await runBuild(toml).catch((e: Error) => e);
+      expect(err).toBeInstanceOf(Error);
+      expect((err as Error).message).toMatch(/config validation failed:\n {2}- site\.domain: domain port must run from 1 to 65535/);
+      expect((err as Error).message.split("\n").filter((l) => l.startsWith("  - "))).toHaveLength(1);
     });
   });
 
@@ -2987,5 +2999,49 @@ forward_cookies = ${value}`);
     vi.spyOn(console, "warn").mockImplementation(() => {});
     const on = await runBuild(await writeToml("fc-hash-on.toml", withCookies("true")));
     expect(on.files["config.ts"]).toContain('"forward_cookies": true');
+  });
+});
+
+describe("a ? in a path glob gets a warning: it matches one character, and a path has no query string", () => {
+  const globWarnings = () =>
+    (console.warn as unknown as { mock: { calls: unknown[][] } }).mock.calls
+      .map((c) => String(c[0]))
+      .filter((m) => m.includes("matches exactly one character"));
+  const withExclude = (patterns: string) => `${MINIMAL}
+[injection]
+exclude_paths = ${patterns}
+`;
+  const withForm = (patterns: string) => `${MINIMAL}
+[[forms]]
+name        = "contact"
+description = "Contact us."
+selector    = "form#contact"
+paths       = ${patterns}
+`;
+
+  it("warns for [injection].exclude_paths, naming the field and the pattern", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    await runBuild(await writeToml("glob-ex.toml", withExclude('["/search?*", "/wp-admin/*"]')));
+    const warnings = globWarnings();
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("[injection].exclude_paths");
+    expect(warnings[0]).toContain('"/search?*"');
+    expect(warnings[0]).toContain("query string");
+    expect(warnings[0]).not.toContain("/wp-admin/*");
+  });
+
+  it("warns for [[forms]].paths, naming the form, the field and the pattern", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    await runBuild(await writeToml("glob-form.toml", withForm('["/contact?"]')));
+    const warnings = globWarnings();
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain('[[forms]] "contact" paths');
+    expect(warnings[0]).toContain('"/contact?"');
+  });
+
+  it("is silent for patterns without ?", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    await runBuild(await writeToml("glob-quiet.toml", withExclude('["/wp-admin/*", "/login"]')));
+    expect(globWarnings()).toEqual([]);
   });
 });

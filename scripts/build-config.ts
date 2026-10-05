@@ -43,6 +43,7 @@ import {
 import { LICENSE_PREAMBLE } from "../src/widget-preamble.js";
 import { widgetEnabled } from "../src/widget-state.js";
 import { apiCatalogServed, skillsIndexServed } from "../src/served.js";
+import { formToolsStamped } from "../src/runtime-copy.js";
 import { cachesResults } from "../src/tool-cache.js";
 import { configLinkOptions } from "../src/injection/html-rewriter.js";
 import { bridgeNpmVersion, sha256Hex, widgetAssetName } from "./widget-pin.js";
@@ -871,7 +872,8 @@ function escapeHtml(s: string): string {
 }
 
 /**
- * How long the widget stays connected without mouse or keyboard activity on the page: 30
+ * How long the widget stays connected without activity on the page (the widget resets its timer
+ * on mousemove, keypress, click and scroll, webmcp.js:636-639): 30
  * minutes, in milliseconds, for the vendored widget's `inactivityTimeout` option (webmcp.js:17;
  * its default is 5 minutes). A tool call does not reset that timer. Well below 2147483647, the
  * largest delay setTimeout keeps (a larger one fires at once).
@@ -1508,9 +1510,10 @@ export interface AiCatalogEntry {
 
 /**
  * The did:web host and the urn:air publisher of the ARD manifest, or a build
- * error naming the [site] field that cannot be used: a [site].domain whose port
- * is out of range. [site].public_url never fails here, because the schema only
- * accepts an http(s) origin.
+ * error naming the [site] field that cannot be used: a [site].domain the URL
+ * parser refuses as a host (an invalid IPv4 address such as 1.2.3.4.5). The schema
+ * already refuses a [site].domain port outside 1 to 65535, and accepts only an
+ * http(s) origin as [site].public_url.
  */
 function ardHosts(config: Config): { host: string; publisher: string } {
   try {
@@ -1576,6 +1579,28 @@ export function deadConfigWarnings(config: Config): string[] {
         `the visitor's cookies, whatever this says (they build their own requests, so a cached tool answer is the same for every visitor), ` +
         `and proxied requests reach origin exactly as the visitor sent them, cookies included. Remove the line.`,
     );
+  }
+  return out;
+}
+
+/**
+ * A `?` in a path glob ([injection].exclude_paths, [[forms]].paths). matchGlob compares the
+ * pattern with the pathname only, which never holds a query string, and reads `?` as exactly
+ * one character. v0.5.1 read it as a regex quantifier (the previous character optional), so a
+ * pattern written for that, or one meant to match a query string, matches something else now.
+ * One warning per pattern, naming the field and the pattern.
+ */
+export function globPatternWarnings(config: Config): string[] {
+  const out: string[] = [];
+  const warn = (field: string, pattern: string) =>
+    out.push(
+      `[build-config] ${field} pattern ${JSON.stringify(pattern)} contains "?", which matches exactly one character ` +
+        `(any character, "/" included). Patterns are matched against the path only, never a query string. Before v0.6.0 ` +
+        `"?" made the previous character optional; check that the pattern still matches the pages you mean.`,
+    );
+  for (const p of config.injection.exclude_paths) if (p.includes("?")) warn("[injection].exclude_paths", p);
+  for (const f of config.forms) {
+    for (const p of f.paths) if (p.includes("?")) warn(`[[forms]] ${JSON.stringify(f.name)} paths`, p);
   }
   return out;
 }
@@ -1662,9 +1687,11 @@ export function buildAiCatalog(config: Config): AiCatalogDoc {
   };
   const entries: AiCatalogEntry[] = [];
   if (config.features.agent_skills) {
+    // A form tool exists only while the Worker stamps forms (src/runtime-copy.ts), as in
+    // agents.md and SKILL.md.
     const capabilities = [
       ...config.tools.map((t) => t.name),
-      ...config.forms.map((f) => f.name),
+      ...(formToolsStamped(config) ? config.forms.map((f) => f.name) : []),
     ];
     const entry: AiCatalogEntry = {
       // The same name as the SKILL.md frontmatter and the skills index.
@@ -1997,6 +2024,7 @@ export async function buildConfig(opts: BuildOptions): Promise<void> {
     ...toolCacheWarnings(config),
     ...declaredInputWarnings(config),
     ...deadConfigWarnings(config),
+    ...globPatternWarnings(config),
   ]) {
     // eslint-disable-next-line no-console
     console.warn(warning);

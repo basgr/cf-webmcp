@@ -23,6 +23,7 @@
 import type { Config } from "../config-types";
 import { buildCacheControl } from "../cache";
 import { ORIGIN_FAILURE_CACHE_CONTROL, readTextCapped } from "./read-capped";
+import { browserRegistration, defaultLandingTemplate, formToolsStamped, scriptTools } from "../runtime-copy";
 
 const BEGIN = "<!-- cf-webmcp:begin -->";
 const END = "<!-- cf-webmcp:end -->";
@@ -32,14 +33,20 @@ const END = "<!-- cf-webmcp:end -->";
  * the feature on and a widget in the build). Only then does the block tell desktop MCP clients
  * to pair on the landing page; otherwise the landing is described as the page it is. Without
  * an answer it follows [features].fallback_widget.
+ *
+ * `healthOpen` says whether /_webmcp/health answers without a bearer token; only then does the
+ * block link it. The handler works it out with the CF_WEBMCP_HEALTH_TOKEN secret, which only the
+ * Worker sees (this document is built per request, so it can). Without an answer it follows
+ * the TOML alone.
  */
 export async function agentsMdResponse(
   _request: Request,
   config: Config,
   proxyToOrigin: (url: URL) => Promise<Response>,
   widget: boolean = config.features.fallback_widget,
+  healthOpen: boolean = healthAnswersWithoutToken(config, undefined),
 ): Promise<Response> {
-  const block = buildBlock(config, widget);
+  const block = buildBlock(config, widget, healthOpen);
   // The document without origin's file: the block between its markers.
   const standalone = `${BEGIN}\n${block}\n${END}\n`;
   let body: string;
@@ -115,12 +122,26 @@ export function mergeBlock(original: string, block: string): string {
   return `${trimmed}\n${BEGIN}\n${block}\n${END}\n`;
 }
 
-function buildBlock(config: Config, widget: boolean): string {
+/**
+ * Whether /_webmcp/health answers without a bearer token: [health].public on and no token, the
+ * CF_WEBMCP_HEALTH_TOKEN secret (`envToken`, an empty string counts as unset) or [health].token.
+ * The same rule as healthResponse in src/routes/health.ts.
+ */
+export function healthAnswersWithoutToken(config: Config, envToken: string | undefined): boolean {
+  return config.health.public && !(envToken || config.health.token);
+}
+
+function buildBlock(config: Config, widget: boolean, healthOpen: boolean): string {
   const base = config.site.public_url ?? `https://${config.site.domain}`;
   const ns = config.paths.namespace;
   const manifestUrl = `${base}${config.manifest.path}`;
   const landingUrl = `${base}${config.webmcp_landing.path}`;
+  const landingLink = `[${landingUrl}](${landingUrl})`;
   const healthUrl = `${base}${ns}/health`;
+  // Form tools exist only while the Worker stamps them; everything else here (the bootstrap, the
+  // manifest, the exec route, the landing's list, the widget) knows the [[tools]] only.
+  const forms = formToolsStamped(config);
+  const tools = scriptTools(config);
 
   const lines: string[] = [
     `## WebMCP on this site`,
@@ -134,45 +155,53 @@ function buildBlock(config: Config, widget: boolean): string {
   for (const t of config.tools) {
     lines.push(`- \`${t.name}\`: ${t.description}`);
   }
-  // Surface form-injected tools too, since they're equally agent-callable.
-  for (const f of config.forms) {
-    lines.push(`- \`${f.name}\` (form): ${f.description}`);
+  // Form tools are as agent-callable as the others, on the pages that carry their form.
+  if (forms) {
+    for (const f of config.forms) {
+      lines.push(`- \`${f.name}\` (form): ${f.description}`);
+    }
   }
 
   if (config.features.manifest) {
-    lines.push(``, `Full tool schema: [${manifestUrl}](${manifestUrl})`);
+    lines.push(``, `Full tool schema${forms ? " (the tools that are not forms)" : ""}: [${manifestUrl}](${manifestUrl})`);
   }
 
-  lines.push(
-    ``,
-    `### How agents connect`,
-    ``,
-    `- **Browser-native agents** (a browser or agent browser with the WebMCP runtime): tools auto-register via \`document.modelContext\` when the page loads. No setup.`,
-  );
-  // The landing page: a pairing page only while the widget is on; with it off the page lists
-  // the tools and says whether the browser exposes WebMCP, and nothing here says to pair. With
-  // the landing off it is not mentioned at all.
+  const connect: string[] = [];
+  const browser = browserRegistration(config, landingLink);
+  if (browser !== null) connect.push(`- **Browser-native agents**: ${browser} No setup.`);
+  // The landing page: a pairing page only while the widget is on; with it off the default page
+  // lists the tools and says whether the browser exposes WebMCP, and nothing here says to pair.
+  // A custom template is only named. With the landing off it is not mentioned at all.
   if (config.features.webmcp_landing) {
-    lines.push(
-      widget
-        ? `- **Desktop MCP clients** (Claude Desktop, Cursor, Claude Code, Windsurf): pair at [${landingUrl}](${landingUrl}). The pairing page hosts the localhost-bridge widget.`
-        : `- **WebMCP page**: [${landingUrl}](${landingUrl}) lists these tools and shows whether your browser exposes WebMCP.`,
-    );
+    if (widget) {
+      connect.push(
+        `- **Desktop MCP clients** (Claude Desktop, Cursor, Claude Code, Windsurf): pair at ${landingLink}. The pairing page hosts the localhost-bridge widget.` +
+          (forms ? ` The bridge reaches ${tools}.` : ""),
+      );
+    } else if (defaultLandingTemplate(config)) {
+      connect.push(`- **WebMCP page**: ${landingLink} lists ${tools} and shows whether your browser exposes WebMCP.`);
+    } else {
+      connect.push(`- **WebMCP page**: ${landingLink}.`);
+    }
   }
+  if (connect.length > 0) lines.push(``, `### How agents connect`, ``, ...connect);
 
   lines.push(
     ``,
     `### Operational notes`,
     ``,
-    `- Tool calls go to \`POST ${ns}/exec/<tool_name>\` with a JSON body.`,
+    `- ${forms ? `Calls to ${tools}` : "Tool calls"} go to \`POST ${ns}/exec/<tool_name>\` with a JSON body.`,
     `- Responses use a stable envelope: \`{ ok: true, data }\` or \`{ ok: false, error: { code, message, retriable } }\`.`,
-    `- Rate-limited responses include a \`Retry-After\` header; honour it.`,
-    `- Operational health: [${healthUrl}](${healthUrl}).`,
+    // The exec route's own limiter sets Retry-After; an origin 429 becomes the same error without it.
+    `- A \`rate_limited\` error (HTTP 429) from this site's own rate limit carries a \`Retry-After\` header; honour it. One that origin's rate limit caused has none.`,
+  );
+  if (healthOpen) lines.push(`- Operational health: [${healthUrl}](${healthUrl}).`);
+  lines.push(
     ``,
     `### What to avoid`,
     ``,
     `- Do not call \`${ns}/exec/*\` from cross-origin JS unless the publisher has configured \`[cors].allowed_origins\`.`,
-    `- Do not retry on \`rate_limited\` errors faster than \`Retry-After\` indicates.`,
+    `- Do not retry a \`rate_limited\` error sooner than its \`Retry-After\` says; without one, back off before retrying.`,
   );
   if (widget && config.features.webmcp_landing) {
     lines.push(`- The fallback widget only initialises on the pairing page above.`);

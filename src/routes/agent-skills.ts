@@ -21,6 +21,7 @@ import type { Config } from "../config-types";
 import { buildCacheControl } from "../cache";
 import { SKILL_NAME_MAX, slugify } from "../ard";
 import { ORIGIN_FAILURE_CACHE_CONTROL, readTextCapped } from "./read-capped";
+import { browserRegistration, defaultLandingTemplate, formToolsStamped, scriptTools } from "../runtime-copy";
 
 const BEGIN = "<!-- cf-webmcp:begin -->";
 const END = "<!-- cf-webmcp:end -->";
@@ -172,34 +173,45 @@ export function buildFrontmatter(config: Config): string {
  * answer it follows [features].fallback_widget.
  *
  * The landing page and the manifest are named only while their features are on. The landing
- * is a place to pair only while the widget is on; otherwise it is the page that lists the tools.
+ * is a place to pair only while the widget is on; otherwise it is the page that lists the tools
+ * (the default template) or, for a custom template, only named. Where the tools register and
+ * which of them exist follows src/runtime-copy.ts.
  */
 export function buildSkillBody(config: Config, widget: boolean = config.features.fallback_widget): string {
   const base = config.site.public_url ?? `https://${config.site.domain}`;
   const manifestUrl = `${base}${config.manifest.path}`;
   const landingUrl = `${base}${config.webmcp_landing.path}`;
 
-  const intro = [
-    `Browser-native agents register these automatically via \`document.modelContext\` when the WebMCP runtime is present.`,
-  ];
+  // Form tools exist only while the Worker stamps them; the bootstrap, the manifest, the
+  // landing's list and the widget know the [[tools]] only (src/runtime-copy.ts).
+  const forms = formToolsStamped(config);
+  const tools = scriptTools(config);
+  const intro: string[] = [];
+  const browser = browserRegistration(config, `<${landingUrl}>`);
+  if (browser !== null) intro.push(browser);
   if (config.features.webmcp_landing) {
-    intro.push(
-      widget
-        ? `Desktop MCP clients can pair at <${landingUrl}> and call the tools through the localhost bridge.`
-        : `The tools are also listed at <${landingUrl}>.`,
-    );
+    if (widget) {
+      intro.push(`Desktop MCP clients can pair at <${landingUrl}> and call ${tools} through the localhost bridge.`);
+    } else if (defaultLandingTemplate(config)) {
+      intro.push(`${tools.charAt(0).toUpperCase()}${tools.slice(1)} are also listed at <${landingUrl}>.`);
+    } else {
+      intro.push(`The WebMCP page is <${landingUrl}>.`);
+    }
   }
-  const lines: string[] = [`# ${config.site.name}`, ``, `## Tools available on this site`, ``, intro.join(" "), ``];
+  const lines: string[] = [`# ${config.site.name}`, ``, `## Tools available on this site`, ``];
+  if (intro.length > 0) lines.push(intro.join(" "), ``);
 
-  if (config.tools.length === 0 && config.forms.length === 0) {
+  if (config.tools.length === 0 && !forms) {
     lines.push(`_No tools currently exposed._`);
   } else {
     for (const t of config.tools) {
       const sig = toolSignature(t);
       lines.push(`- \`${sig}\` - ${t.description}`);
     }
-    for (const f of config.forms) {
-      lines.push(`- \`${f.name}\` (form) - ${f.description}`);
+    if (forms) {
+      for (const f of config.forms) {
+        lines.push(`- \`${f.name}\` (form) - ${f.description}`);
+      }
     }
   }
 
@@ -208,7 +220,7 @@ export function buildSkillBody(config: Config, widget: boolean = config.features
   }
 
   if (config.features.manifest) {
-    lines.push(``, `## Full machine-readable tool schema`, ``, `<${manifestUrl}>`, ``);
+    lines.push(``, `## Full machine-readable tool schema`, ``, ...(forms ? [`The tools that are not forms:`, ``] : []), `<${manifestUrl}>`, ``);
   } else {
     lines.push(``);
   }

@@ -47,6 +47,19 @@ describe("site.domain validation", () => {
     expect(() => ConfigSchema.parse({ ...minimal, site: { domain: "https://example.com", name: "x" } })).toThrow();
     expect(() => ConfigSchema.parse({ ...minimal, site: { domain: "example.com/foo", name: "x" } })).toThrow();
   });
+
+  it.each(["example.com:0", "example.com:65536", "example.com:99999", "example.com:00"])(
+    "rejects %s: a port must run from 1 to 65535, as in public_url",
+    (domain) => {
+      const r = ConfigSchema.safeParse({ ...minimal, site: { domain, name: "x" } });
+      expect(r.success).toBe(false);
+      expect(JSON.stringify(r.error?.issues)).toContain("port");
+    },
+  );
+
+  it.each(["example.com:1", "example.com:65535", "localhost:8787"])("accepts the port of %s", (domain) => {
+    expect(ConfigSchema.parse({ ...minimal, site: { domain, name: "x" } }).site.domain).toBe(domain);
+  });
 });
 
 describe("site.public_url validation", () => {

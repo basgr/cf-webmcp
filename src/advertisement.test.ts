@@ -189,7 +189,7 @@ describe("features.webmcp_landing = false removes the landing advertisement", ()
       expect(off).not.toContain(LANDING_URL);
       expect(off).not.toMatch(/pair/i);
       expect(off).not.toContain("bridge");
-      expect(off).toContain("Browser-native agents register these automatically");
+      expect(off).toContain("On pages that load this site's cf-webmcp script, the tools register on `document.modelContext`");
     }
   });
 
@@ -236,7 +236,7 @@ describe("the widget wording follows whether the widget is on", () => {
     const off = await skill(WIDGET_ON, false);
     expect(off).not.toMatch(/pair|bridge|Desktop MCP clients/i);
     expect(off).toContain(`<${LANDING_URL}>`);
-    expect(off).toContain("Browser-native agents register these automatically");
+    expect(off).toContain("On pages that load this site's cf-webmcp script, the tools register on `document.modelContext`");
   });
 
   it("the body the skills index digest is taken over carries the same wording as the served one", async () => {
@@ -310,6 +310,21 @@ describe("through the handler", () => {
       expect(text).toContain(LANDING_URL);
     }
     expect(llmsText).toContain(pairing ? "Pairing page:" : "WebMCP page:");
+  });
+
+  it("agents.md links /_webmcp/health only when it answers without a token, the CF_WEBMCP_HEALTH_TOKEN secret included", async () => {
+    stubOrigin();
+    const health = "- Operational health: [https://example.com/_webmcp/health](https://example.com/_webmcp/health).";
+    const fetchAgents = (e: Env) =>
+      createHandler(makeDeps(synth, { meta: { WIDGET_ASSET: null } })).fetch(
+        new Request(urls.agents) as Request<unknown, IncomingRequestCfProperties>,
+        e,
+        ctx(),
+      );
+    expect(await (await fetchAgents(env)).text()).toContain(health);
+    expect(await (await fetchAgents({ ...env, CF_WEBMCP_HEALTH_TOKEN: "s3cret" })).text()).not.toContain("Operational health");
+    // An empty secret counts as unset, as in the health route.
+    expect(await (await fetchAgents({ ...env, CF_WEBMCP_HEALTH_TOKEN: "" })).text()).toContain(health);
   });
 
   it("with features.manifest = false the proxied page and its Link header carry no rel=webmcp", async () => {

@@ -104,20 +104,21 @@ export function configLinkOptions(config: Config): ConfigLinkOptions {
 }
 
 /**
- * Glob match for [injection].exclude_paths and [[forms]].paths: `*` matches any run of
- * characters (including none and `/`), and every other character matches itself. The
- * regex metacharacters, `?` among them, are escaped before `*` is turned into `.*`, so
- * a path such as /search?x is text, not a quantifier. The pattern must match the whole path.
+ * Glob match for [injection].exclude_paths and [[forms]].paths, against the pathname only
+ * (a pathname never holds a query string): `*` matches any run of characters (including
+ * none and `/`), `?` matches exactly one character (`/` included), and every other
+ * character matches itself, the regex metacharacters escaped. The pattern must match the
+ * whole path. The build warns about a pattern with `?` (globPatternWarnings), because
+ * v0.5.1 read it as a regex quantifier.
  */
 export function matchGlob(pattern: string, input: string): boolean {
-  const re = new RegExp(
-    "^" +
-      pattern
-        .replace(/[.+?^${}()|[\]\\]/g, "\\$&")
-        .replace(/\*/g, ".*") +
-      "$",
-  );
-  return re.test(input);
+  let source = "";
+  for (const ch of pattern) {
+    if (ch === "*") source += "[\\s\\S]*";
+    else if (ch === "?") source += "[\\s\\S]";
+    else source += ch.replace(/[.+^${}()|[\]\\]/g, "\\$&");
+  }
+  return new RegExp(`^${source}$`, "u").test(input);
 }
 
 /**

@@ -41,8 +41,9 @@ export function landingResponse(
 }
 
 /**
- * The 308 from "/mcp" to "/mcp/". Like the page, it exists only for requests the router
- * gave to the landing, so it varies on Accept. no-store because a browser would
+ * The 308 from the slash-less form of a landing path that ends in "/" ("/agents" to "/agents/"
+ * for [webmcp_landing].path = "/agents/"); the default path, "/mcp", has none. Like the page,
+ * it exists only for requests the router gave to the landing, so it varies on Accept. no-store because a browser would
  * otherwise cache a 308 for good and send every later GET on this path, text/event-stream
  * ones included, to the page; the cost of never caching it is one cheap Worker answer.
  */
