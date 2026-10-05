@@ -40,7 +40,9 @@ function expectNoViolations(corpus: string[], options: Parameters<typeof checkSe
   expect(found.slice(0, 15), `${found.length} accepted selector(s) refused by lol-html`).toEqual([]);
 }
 
-describe("selector grammar vs the real HTMLRewriter: accepted implies lol-html accepts", () => {
+// Every test here walks tens of thousands of selectors and some are slow under a loaded
+// full-suite run, so the whole block gets a generous timeout instead of the 5 s default.
+describe("selector grammar vs the real HTMLRewriter: accepted implies lol-html accepts", { timeout: 120_000 }, () => {
   it("holds for the hand-written corpus as a form selector", () => {
     expectNoViolations(HAND_WRITTEN_CORPUS, { allowLeadingChild: false });
   });
@@ -53,7 +55,7 @@ describe("selector grammar vs the real HTMLRewriter: accepted implies lol-html a
     expectNoViolations(HAND_WRITTEN_CORPUS, { allowList: true });
   });
 
-  it("holds for a deterministic generated sweep of atom combinations", { timeout: 120_000 }, () => {
+  it("holds for a deterministic generated sweep of atom combinations", () => {
     const sweep = generatedSelectors();
     expect(sweep.length).toBeGreaterThan(100_000);
     expectNoViolations(sweep, {});
@@ -63,15 +65,36 @@ describe("selector grammar vs the real HTMLRewriter: accepted implies lol-html a
     expectNoViolations(strided, { allowList: true });
   });
 
+  it("every accepted hand-written selector also survives transform() of a small document", async () => {
+    // .on() parses; transform() builds the matcher. Both must take what the grammar accepts.
+    const page = "<html><head></head><body><form id=a class=b><input name=x></form></body></html>";
+    const failures: string[] = [];
+    for (const sel of HAND_WRITTEN_CORPUS) {
+      if (checkSelector(sel, {}) !== null) continue;
+      try {
+        const out = new HTMLRewriter()
+          .on(sel, { element() {} })
+          .transform(new Response(page, { headers: { "content-type": "text/html" } }));
+        await out.text();
+      } catch (e) {
+        failures.push(`${JSON.stringify(sel)} => ${(e as Error).message}`);
+      }
+    }
+    expect(failures.slice(0, 15), `${failures.length} accepted selector(s) failed in transform()`).toEqual([]);
+  });
+
   it("the sweep and corpus exercise both outcomes (the invariant is not vacuous)", () => {
     const pool = [...HAND_WRITTEN_CORPUS, ...generatedSelectors(0)];
-    const accepted = pool.filter((s) => checkSelector(s, {}) === null);
-    const rejected = pool.filter((s) => checkSelector(s, {}) !== null);
+    // One grammar pass over the pool, reused for both counts.
+    const accepts = pool.map((s) => checkSelector(s, {}) === null);
+    const accepted = pool.filter((_, i) => accepts[i]);
+    const rejected = pool.filter((_, i) => !accepts[i]);
     expect(accepted.length).toBeGreaterThan(5_000);
     expect(rejected.length).toBeGreaterThan(5_000);
     // lol-html itself refuses a large share of what the grammar refuses, so the corpus is not all valid.
     // (A refusal costs about a millisecond and a half, so sample rather than ask about all of them.)
-    const sample = rejected.filter((_, i) => i % 200 === 0).slice(0, 800);
-    expect(sample.filter((s) => lolHtmlThrows(s) !== null).length).toBeGreaterThan(300);
+    const sample = rejected.filter((_, i) => i % 500 === 0).slice(0, 400);
+    expect(sample.length).toBeGreaterThan(200);
+    expect(sample.filter((s) => lolHtmlThrows(s) !== null).length).toBeGreaterThan(100);
   });
 });

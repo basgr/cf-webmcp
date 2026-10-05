@@ -369,6 +369,23 @@ describe("a selector HTMLRewriter cannot parse skips only its own form or param"
     expect(logged).toHaveLength(1);
   });
 
+  it("keeps each skip log line on one line, even when a selector or name contains newlines", async () => {
+    // \n and \f are legal whitespace inside a selector, so a param selector can carry them.
+    const { logged } = await run([
+      form("f", "form#a", [
+        { selector: "input\n:has(a)", description: "d" },
+        { selector: "input\f:has(b)", description: "d" },
+      ]),
+      form("odd\nname", "form:has(input)"),
+    ]);
+
+    expect(logged).toHaveLength(3);
+    for (const line of logged) expect(line).not.toMatch(/[\r\n\f\u2028\u2029]/);
+    // The escaped form is still readable in the log.
+    expect(logged[0]).toContain("input\\n:has(a)");
+    expect(logged[1]).toContain("input\\f:has(b)");
+  });
+
   it("logs the reason without a stack", async () => {
     const { logged } = await run([form("bad", "form:has(input)")]);
 

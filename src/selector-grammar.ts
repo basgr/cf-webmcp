@@ -29,6 +29,14 @@
  * brackets, quotes and parentheses, and any character outside the selector
  * alphabet. Whitespace is space, tab, LF, CR and FF only.
  *
+ * Also rejected, each because the real rewriter fails on it (see the ground-truth
+ * test): uppercase ASCII letters in an attribute NAME (lol-html throws "explicit
+ * namespaces" once an operator follows; HTML attribute names match
+ * case-insensitively, so lowercase loses nothing), lone UTF-16 surrogates, and
+ * selectors over 1024 characters or 64 compounds (a chain of a few thousand
+ * compounds takes the worker process down in transform(), where no guard can
+ * catch it).
+ *
  * Top-level commas are rejected unless `allowList` is set: a form-param selector
  * is composed as `${form.selector} ${param.selector}`, where a comma list would
  * bind to the wrong half of the compound selector. dom_extract selectors stand
@@ -48,6 +56,12 @@ export interface SelectorCheckOptions {
 /** How deep `:not(:not(...))` may nest; bounds recursion on hostile input. */
 const MAX_NESTING = 16;
 
+/** Longest selector accepted, in UTF-16 code units. */
+const MAX_LENGTH = 1024;
+
+/** Most compounds in one selector, counted across the whole input including inside `:not()` and list entries. */
+const MAX_COMPOUNDS = 64;
+
 const SUPPORTED_LIST = ":first-child, :first-of-type, :nth-child(), :nth-of-type() and :not()";
 
 const IDENT_START = /[\p{L}_]/u;
@@ -59,8 +73,19 @@ const LIST_MESSAGE =
 const END_COMBINATOR_MESSAGE = "selector must not end with a combinator";
 const DOUBLE_COMBINATOR_MESSAGE = "selector has two combinators in a row";
 const NAMESPACE_MESSAGE = "namespaced selectors (`ns|name`) are not supported by Cloudflare HTMLRewriter";
+const BACKSLASH_MESSAGE =
+  'backslash escapes are not supported; match the attribute instead, e.g. [class~="sm:flex"] or [id="123"]';
+const UPPERCASE_ATTRIBUTE_MESSAGE =
+  'attribute names must be lowercase: HTML attribute names match case-insensitively, so [action="..."] also matches ACTION in the markup, while an uppercase name in the selector never matches';
 
-class Rejected extends Error {}
+/**
+ * Thrown by fail(). Deliberately not an Error: it is control flow inside this module,
+ * and skipping the stack capture makes rejecting a selector about ten times cheaper,
+ * which matters for the ground-truth sweep over a few hundred thousand strings.
+ */
+class Rejected {
+  constructor(readonly message: string) {}
+}
 
 function fail(message: string): never {
   throw new Rejected(message);
@@ -72,6 +97,7 @@ function siblingMessage(ch: string): string {
 
 class Parser {
   private i = 0;
+  private compounds = 0;
 
   constructor(
     private readonly s: string,
@@ -79,7 +105,11 @@ class Parser {
   ) {}
 
   run(): void {
+    if (this.s.length > MAX_LENGTH) fail(`selector is too long (limit ${MAX_LENGTH} characters)`);
     if (this.s.trim() === "") fail("selector must not be empty");
+    // A lone surrogate (for instance from a TOML "\uD800" escape) is not valid UTF-8 for
+    // lol-html; a valid pair is one code point of another category and passes.
+    if (/\p{Cs}/u.test(this.s)) fail("selector contains a lone surrogate (invalid UTF-16)");
     this.list(false, this.opts.allowLeadingChild === true, 0);
     // list() stops at the end of input or at a `)` it does not own.
     if (this.i < this.s.length) fail("selector has an unbalanced `)`");
@@ -112,11 +142,17 @@ class Parser {
     while (this.i < this.s.length && IDENT_CHAR.test(this.s[this.i]!)) this.i++;
   }
 
+  /** fail(), except that a backslash at the current position gets the escape message with its workaround. */
+  private failHere(message: string): never {
+    if (this.peek() === "\\") fail(BACKSLASH_MESSAGE);
+    return fail(message);
+  }
+
   private unexpected(): never {
     const c = this.peek();
     if (c === undefined) fail("selector ends unexpectedly");
     if (c === "/" && this.peek(1) === "*") fail("comments are not supported in selectors");
-    if (c === "\\") fail("backslash escapes are not supported in selectors");
+    if (c === "\\") fail(BACKSLASH_MESSAGE);
     if (c === "|") fail(NAMESPACE_MESSAGE);
     if (c === '"' || c === "'") fail("quoted strings are only allowed as attribute values");
     if (c === "]") fail("selector has an unbalanced `]`");
@@ -171,6 +207,9 @@ class Parser {
   }
 
   private compound(depth: number): void {
+    if (++this.compounds > MAX_COMPOUNDS) {
+      fail(`selector has too many compounds (limit ${MAX_COMPOUNDS}, counting those inside :not())`);
+    }
     let parts = 0;
     if (this.peek() === "*") {
       this.i++;
@@ -201,15 +240,19 @@ class Parser {
   }
 
   private requireIdent(message: string): void {
-    if (!this.identStartAt(this.i)) fail(message);
+    if (!this.identStartAt(this.i)) this.failHere(message);
     this.ident();
   }
 
   private attribute(): void {
     this.i++; // [
     this.ws();
-    if (!this.identStartAt(this.i)) fail("attribute selector must start with an attribute name (an identifier)");
+    if (!this.identStartAt(this.i)) {
+      this.failHere("attribute selector must start with an attribute name (an identifier)");
+    }
+    const nameStart = this.i;
     this.ident();
+    if (/[A-Z]/.test(this.s.slice(nameStart, this.i))) fail(UPPERCASE_ATTRIBUTE_MESSAGE);
     this.ws();
     const c = this.peek();
     if (c === "]") {
@@ -223,7 +266,7 @@ class Parser {
     } else if (c === "|") {
       fail(NAMESPACE_MESSAGE);
     } else {
-      fail("attribute selector expects `]` or one of the operators = ~= ^= $= *= |= after the name");
+      this.failHere("attribute selector expects `]` or one of the operators = ~= ^= $= *= |= after the name");
     }
     this.ws();
     const v = this.peek();
@@ -232,7 +275,7 @@ class Parser {
     } else if (this.identStartAt(this.i)) {
       this.ident();
     } else {
-      fail(
+      this.failHere(
         "attribute value must be an identifier or a quoted string; quote values that start with a digit or contain characters such as / . : ( )",
       );
     }
@@ -246,7 +289,7 @@ class Parser {
       }
     }
     if (this.peek() !== "]") {
-      fail("attribute selector must end with `]` (only one case flag, `i` or `s`, may follow the value)");
+      this.failHere("attribute selector must end with `]` (only one case flag, `i` or `s`, may follow the value)");
     }
     this.i++;
   }
@@ -261,7 +304,7 @@ class Parser {
         this.i++;
         return;
       }
-      if (c === "\\") fail("backslash escapes are not supported in selectors");
+      if (c === "\\") fail(BACKSLASH_MESSAGE);
       const code = c.charCodeAt(0);
       if ((code < 0x20 && c !== "\t") || code === 0x7f) {
         fail("control characters and line breaks are not allowed inside quoted strings");
@@ -294,6 +337,7 @@ class Parser {
         if (close < 0) fail("selector has an unclosed `(`");
         const arg = this.s.slice(this.i + 1, close);
         if (!NTH_ARG.test(arg)) {
+          if (arg.includes("\\")) fail(BACKSLASH_MESSAGE);
           fail(`\`:${name}(${arg.trim()})\` is not valid; use an+b (2n+1, -n+3), odd, even or a number`);
         }
         this.i = close + 1;

@@ -214,7 +214,7 @@ export function injectIntoHtml(response: Response, opts: InjectOptions): Respons
     // must not cost injection everywhere: skip only the form or param it
     // belongs to. A failed .on() leaves the rewriter unchanged and usable.
     if (
-      !tryOn(`form "${form.name}"`, form.selector, () => {
+      !tryOn(`form ${JSON.stringify(form.name)}`, form.selector, () => {
         rewriter = rewriter.on(form.selector, {
           element(el) {
             if (!el.getAttribute("toolname")) {
@@ -240,7 +240,8 @@ export function injectIntoHtml(response: Response, opts: InjectOptions): Respons
     // descendant CSS selector that HTMLRewriter understands.
     for (const param of form.params) {
       const compound = `${form.selector} ${param.selector}`;
-      tryOn(`param "${param.selector}" of form "${form.name}"`, compound, () => {
+      // JSON.stringify keeps the log line on one line: \n and \f are legal whitespace in a selector.
+      tryOn(`param ${JSON.stringify(param.selector)} of form ${JSON.stringify(form.name)}`, compound, () => {
         rewriter = rewriter.on(compound, {
           element(el) {
             if (!el.getAttribute("toolparamdescription")) {

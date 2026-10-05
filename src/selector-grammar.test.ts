@@ -181,7 +181,7 @@ describe("checkSelector rejects what lol-html cannot handle", () => {
     "form()",
     'form "x"',
     "form\u000binput",
-    "form input",
+    "form\u00a0input",
     'form/*"*/:hover/*"*/',
     "form/*[*/:hover/*]*/",
     "form/*x*/",
@@ -252,9 +252,157 @@ describe("checkSelector rejects what lol-html cannot handle", () => {
   });
 
   it("rejects pathological nesting instead of recursing without bound", () => {
-    const deep = ":not(".repeat(200) + ".a" + ")".repeat(200);
-    expect(checkSelector(deep, {})).toMatch(/nested/);
+    const nest = (n: number) => ":not(".repeat(n) + ".a" + ")".repeat(n);
+    expect(checkSelector(nest(16), {})).toBeNull();
+    expect(lolHtmlAccepts(nest(16))).toBe(true);
+    expect(checkSelector(nest(17), {})).toMatch(/nested/);
+    // Far deeper than that is stopped by the length cap before the parser recurses at all.
+    expect(checkSelector(nest(200), {})).not.toBeNull();
   });
+});
+
+describe("uppercase", () => {
+  // lol-html throws "explicit namespaces are not supported" for an uppercase attribute NAME
+  // once an operator and value follow; every one of these used to pass the grammar.
+  const uppercaseAttributeNames = [
+    'form[ACTION="/contact"]',
+    'form[data-formId="12"]',
+    'form[METHOD="post" i]',
+    'input[autoComplete="email"]',
+    'input[NAME="email"]',
+    'input[Name="email"]',
+    "input[TYPE=email]",
+    "INPUT[NAME=EMAIL]",
+    "[aB=c]",
+    "[aB~=c]",
+    "[aB^=c]",
+    "[aB$=c]",
+    "[aB*=c]",
+    "[aB|=c]",
+    "[A=b]",
+    "[data-X=y]",
+    "[-A=b]",
+    "[_A=b]",
+    "[a-B=c]",
+    "[A|=b]",
+    ":not([aB=c])",
+    "[A$=-n\n]",
+    // Name-only forms are fine in lol-html, but one simple rule beats two.
+    "[A]",
+    "form[ACTION]",
+  ];
+  for (const sel of uppercaseAttributeNames) {
+    it(`rejects an uppercase attribute name in ${JSON.stringify(sel)}`, () => {
+      expect(checkSelector(sel, form)).toMatch(/lowercase/);
+    });
+  }
+
+  it("names the HTML reason in the message", () => {
+    expect(checkSelector('input[NAME="email"]', form)).toMatch(/case-insensitive/);
+  });
+
+  it("accepts uppercase in type selectors, ids and classes, alone and next to attribute selectors", () => {
+    for (const sel of [
+      "FORM",
+      "FORM#X.Y > INPUT[name=z]",
+      "A:NOT(B)",
+      "form#ID",
+      "form.CLASS",
+      "FORM[name=x]",
+      "form[name=X]",
+      '[a="B"]',
+      "[a=bC i]",
+      "form.A[b=c]",
+      "[É=a]",
+    ]) {
+      expect(checkSelector(sel, form), sel).toBeNull();
+      expect(lolHtmlAccepts(sel), sel).toBe(true);
+    }
+  });
+});
+
+describe("surrogates", () => {
+  it("rejects a lone surrogate anywhere in the input (reachable from a TOML \\uD800 escape)", () => {
+    for (const sel of ['[a="\ud800"]', '[a="\udc00x"]', "form.\ud800", "form#\ud800", 'form[a="x\udc00"]']) {
+      expect(checkSelector(sel, form), JSON.stringify(sel)).toMatch(/surrogate/);
+      expect(lolHtmlAccepts(sel), JSON.stringify(sel)).toBe(false);
+    }
+  });
+
+  it("accepts a valid surrogate pair inside a quoted value", () => {
+    expect(checkSelector('[a="\ud83d\ude00"]', form)).toBeNull();
+    expect(checkSelector('form[title="café \ud83d\ude00"]', form)).toBeNull();
+    expect(lolHtmlAccepts('[a="\ud83d\ude00"]')).toBe(true);
+  });
+});
+
+describe("size caps", () => {
+  const compounds = (n: number, sep = " ") => Array.from({ length: n }, () => "a").join(sep);
+
+  it("accepts exactly 1024 characters and rejects 1025", () => {
+    expect(checkSelector("a".repeat(1024), form)).toBeNull();
+    expect(checkSelector("a".repeat(1025), form)).toMatch(/1024/);
+  });
+
+  it("accepts exactly 64 compounds and rejects 65, for descendant and child chains", () => {
+    expect(checkSelector(compounds(64), form)).toBeNull();
+    expect(checkSelector(compounds(65), form)).toMatch(/64/);
+    expect(checkSelector(compounds(64, " > "), form)).toBeNull();
+    expect(checkSelector(compounds(65, " > "), form)).toMatch(/64/);
+  });
+
+  it("rejects the chains that took the worker process down in transform()", () => {
+    expect(checkSelector("a ".repeat(3000) + "a", form)).toMatch(/too (long|many)/);
+    expect(checkSelector("a > ".repeat(3000) + "a", form)).toMatch(/too (long|many)/);
+  });
+
+  it("counts compounds inside :not() against the same limit", () => {
+    // 31 outer compounds + the one carrying :not( + 32 inside = 64, then 65.
+    const inner = (n: number) => `${"a ".repeat(31)}:not(${compounds(n)})`;
+    expect(checkSelector(inner(32), form)).toBeNull();
+    expect(checkSelector(inner(33), form)).toMatch(/64/);
+  });
+
+  it("counts every entry of a list", () => {
+    expect(checkSelector(compounds(64, ", "), { allowList: true })).toBeNull();
+    expect(checkSelector(compounds(65, ", "), { allowList: true })).toMatch(/64/);
+  });
+
+  it("a selector at the compound cap works in the real rewriter, transform included", async () => {
+    const selector = compounds(64);
+    expect(checkSelector(selector, form)).toBeNull();
+    const out = new HTMLRewriter()
+      .on(selector, { element() {} })
+      .transform(new Response("<a><a></a></a>", { headers: { "content-type": "text/html" } }));
+    expect(await out.text()).toBe("<a><a></a></a>");
+  });
+
+  it("leaves every shipped default and template selector well inside the caps", () => {
+    for (const sel of ["main, article, [role=main]", "nav", "footer", "aside", "script", "style", "noscript", "form.wpcf7-form"]) {
+      expect(checkSelector(sel, { allowList: true }), sel).toBeNull();
+    }
+  });
+});
+
+describe("backslash messages name the attribute workaround", () => {
+  const cases: Array<[string, RegExp]> = [
+    ["form.sm\\:flex", /\[class~=/],
+    ["form[wire\\:submit]", /\[class~=|attribute/],
+    ["form#\\31 23", /\[id=/],
+    ['form[a="x\\y"]', /\[class~=/],
+    ["form.a\\+b", /\[class~=/],
+    ["form[\\31 a]", /\[id=|attribute/],
+    ["form:nth-child(\\31)", /\[id=|attribute|backslash/],
+  ];
+  for (const [sel, extra] of cases) {
+    it(`explains ${JSON.stringify(sel)}`, () => {
+      const message = checkSelector(sel, form);
+      expect(message).toMatch(/backslash/);
+      expect(message).toMatch(extra);
+      expect(message).toMatch(/\[id="123"\]/);
+      expect(message).not.toMatch(/[\u2013\u2014]/);
+    });
+  }
 });
 
 describe("checkSelector treats quoted strings and nested groups as opaque", () => {

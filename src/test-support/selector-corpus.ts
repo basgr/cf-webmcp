@@ -84,9 +84,9 @@ export const CONTRIVED_SELECTORS: string[] = [
   "form?",
   "form:",
   "form:-x",
-  "form. a",
-  "form#a ",
-  "form input",
+  "form.\u2028a",
+  "form#a\u2028",
+  "form\u00a0input",
   "**",
   "form*",
   "svg:rect",
@@ -303,6 +303,8 @@ const ATOMS: string[] = [
   ":first-child", ":hover", ":has(", ":not(", ":not(.a)", ":nth-child(", "2n+1", "odd", " of .a", "n", ":", "::", "::before",
   ">", " > ", " ", "  ", "+", "~", ",", ", ", '"', "'", "\\", "/*", "*/", "|", "!", "-", "_", "é", "1", "=", "~=", "|=",
   "\t", "\n", "\u000b", "i", "s", " i", "|a",
+  // Uppercase (lol-html refuses an uppercase attribute NAME once an operator follows) and surrogates.
+  "A", "B", "[A]", "[A=b]", "[aB=c]", ":NOT(", "\ud800", "\ud83d\ude00", '[a="\ud800"]',
 ];
 
 /** Deterministic PRNG so the generated sweep is the same on every run. */
@@ -340,6 +342,41 @@ export function generatedSelectors(randomCount = 20_000): string[] {
   return out;
 }
 
+/**
+ * Uppercase in every position. lol-html takes it in type selectors, ids and classes,
+ * and in a bare attribute name (`[A]`), but throws "explicit namespaces" for an
+ * uppercase attribute name followed by an operator and value.
+ */
+export const UPPERCASE_SELECTORS: string[] = [
+  "FORM", "Form", "A", "INPUT", "FORM#x", "FORM.x", "FORM > INPUT", "A:NOT(B)", "A:not(B)", "FORM:FIRST-CHILD",
+  "form#ID", "form#Id", "form.CLASS", "form.aB.Cd", "#A", ".A", "form#A.B",
+  "FORM[name=x]", "form[NAME]", "form[name=X]", "FORM#X[name=y]", "form.A[b=c]", "form#A[b=c]",
+  "[A]", "[aB]", "[ACTION]", "form[ACTION]", "[data-X]", "[-A]", "[_A]", "[a-B]",
+  "[A=b]", "[aB=c]", "[aB~=c]", "[aB^=c]", "[aB$=c]", "[aB*=c]", "[aB|=c]", "[A|=b]", '[A="b"]', '[aB="c" i]',
+  "[a=B]", '[a="B"]', "[a=bC]", "[a=bC i]",
+  'form[ACTION="/contact"]', 'form[data-formId="12"]', 'form[METHOD="post" i]', 'input[autoComplete="email"]',
+  'input[NAME="email"]', 'input[Name="email"]', "input[TYPE=email]", "INPUT[NAME=EMAIL]",
+  "[data-X=y]", "[-A=b]", "[_A=b]", "[a-B=c]", ":not([aB=c])", "[A$=-n\n]",
+  "[é=a]", "[É=a]", "[aÉ=b]", "[É]",
+];
+
+/** Lone surrogates (reachable from TOML escapes like "\uD800") and valid pairs. */
+export const SURROGATE_SELECTORS: string[] = [
+  '[a="\ud800"]',
+  '[a="\udc00x"]',
+  "form.\ud800",
+  "form#\ud800",
+  '[a="\ud83d\ude00"]',
+  "form#\ud83d\ude00",
+  "\ud83d\ude00",
+];
+
 export const HAND_WRITTEN_CORPUS: string[] = [
-  ...new Set([...REALISTIC_SELECTORS, ...CONTRIVED_SELECTORS, ...PROBED_SELECTORS]),
+  ...new Set([
+    ...REALISTIC_SELECTORS,
+    ...CONTRIVED_SELECTORS,
+    ...PROBED_SELECTORS,
+    ...UPPERCASE_SELECTORS,
+    ...SURROGATE_SELECTORS,
+  ]),
 ];
