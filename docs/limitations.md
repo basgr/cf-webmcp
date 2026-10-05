@@ -36,7 +36,9 @@ The bootstrap `<script>` does not depend on `<head>`. It goes before `</body>`, 
 
 ## HTML injection fails open only on setup errors
 
-If building the HTML rewriter throws (for example a `[[forms]]` selector that Cloudflare's HTMLRewriter cannot parse), the Worker logs the error and serves the origin page unchanged, without the injected tags and form attributes. Selectors are also validated when the config is compiled, so the build rejects `:has()`, `+` and `~` combinators, pseudo-elements and selector lists before they can reach production.
+Selectors in `[[forms]]` and `dom_extract` are checked against a strict grammar when the config is compiled (see [`docs/form-injection.md`](form-injection.md)), so most typos fail the build. Because the check cannot promise that Cloudflare's HTMLRewriter takes everything it accepts, the Worker also guards each form selector and each param selector separately at request time: when HTMLRewriter rejects one, only that form or param is skipped (one log line names it), and the bootstrap script, the `<link>` tags and the other forms are injected as usual.
+
+If building the HTML rewriter throws for any other reason, the Worker logs the error and serves the origin page unchanged, without the injected tags and form attributes.
 
 An error raised while the response body is already streaming to the visitor cannot be recovered this way: the status line and headers have been sent. The Worker does not use `ctx.passThroughOnException()` as a second net. It forwards to the zone's origin server rather than to `[origin].base_url`, and it does nothing on Custom Domains and `workers.dev` routes.
 

@@ -104,16 +104,18 @@ class State {
  * injectIntoHtml, failing open: if building the rewriter throws synchronously,
  * the untouched origin response is returned and the error is logged.
  *
- * `HTMLRewriter.on(selector)` parses the selector eagerly and throws for
- * anything outside lol-html's subset (`form:has(input)`, `form + form`). That
- * happens before `transform()` touches the body, so `upstream` is still intact
- * and the visitor gets the origin page without WebMCP instead of an error page.
+ * This is the outer net. A form or param selector that HTMLRewriter rejects is
+ * already contained inside injectIntoHtml (only that form or param is skipped,
+ * the bootstrap and link tags still go in); what reaches here is any other
+ * synchronous failure while the rewriter is being built. That happens before
+ * `transform()` touches the body, so `upstream` is still intact and the visitor
+ * gets the origin page without WebMCP instead of an error page.
  *
- * Only synchronous throws are caught here. An error raised while the body
- * streams surfaces later, in the response body the visitor is already reading,
- * and cannot be intercepted at this point. Selectors are therefore validated at
- * build time (src/selector-grammar.ts); this wrapper is the net for the ones
- * that still get through.
+ * Only synchronous throws are caught. An error raised while the body streams
+ * surfaces later, in the response body the visitor is already reading, and
+ * cannot be intercepted at this point. Selectors are therefore validated at
+ * build time (src/selector-grammar.ts), and this wrapper plus the per-selector
+ * guard are the nets for what still gets through.
  *
  * Deliberately no `ctx.passThroughOnException()` as an additional net: it falls
  * back to the zone's origin server, not to `[origin].base_url`, so it would hit
@@ -205,36 +207,70 @@ export function injectIntoHtml(response: Response, opts: InjectOptions): Respons
   for (const form of opts.forms) {
     // Stamp attributes on the matched form element. Skip if the publisher has
     // already stamped them by hand.
-    rewriter = rewriter.on(form.selector, {
-      element(el) {
-        if (!el.getAttribute("toolname")) {
-          el.setAttribute("toolname", form.name);
-        }
-        if (!el.getAttribute("tooldescription")) {
-          el.setAttribute("tooldescription", form.description);
-        }
-        if (form.autosubmit && el.getAttribute("toolautosubmit") === null) {
-          el.setAttribute("toolautosubmit", "");
-        }
-      },
-    });
+    //
+    // HTMLRewriter parses a selector eagerly in .on() and throws for one it
+    // cannot handle. The build-time grammar (selector-grammar.ts) keeps those
+    // out, but forms[].paths defaults to every page, so one that slips through
+    // must not cost injection everywhere: skip only the form or param it
+    // belongs to. A failed .on() leaves the rewriter unchanged and usable.
+    if (
+      !tryOn(`form "${form.name}"`, form.selector, () => {
+        rewriter = rewriter.on(form.selector, {
+          element(el) {
+            if (!el.getAttribute("toolname")) {
+              el.setAttribute("toolname", form.name);
+            }
+            if (!el.getAttribute("tooldescription")) {
+              el.setAttribute("tooldescription", form.description);
+            }
+            if (form.autosubmit && el.getAttribute("toolautosubmit") === null) {
+              el.setAttribute("toolautosubmit", "");
+            }
+          },
+        });
+      })
+    ) {
+      // Every param selector is appended to this one, so they would all fail the
+      // same way; skip them without a second log line.
+      continue;
+    }
 
     // Stamp toolparamdescription on each named input inside the form.
     // The form's selector + a single space + the param's selector gives a
     // descendant CSS selector that HTMLRewriter understands.
     for (const param of form.params) {
       const compound = `${form.selector} ${param.selector}`;
-      rewriter = rewriter.on(compound, {
-        element(el) {
-          if (!el.getAttribute("toolparamdescription")) {
-            el.setAttribute("toolparamdescription", param.description);
-          }
-        },
+      tryOn(`param "${param.selector}" of form "${form.name}"`, compound, () => {
+        rewriter = rewriter.on(compound, {
+          element(el) {
+            if (!el.getAttribute("toolparamdescription")) {
+              el.setAttribute("toolparamdescription", param.description);
+            }
+          },
+        });
       });
     }
   }
 
   return rewriter.transform(response);
+}
+
+/**
+ * Runs `register` (a rewriter.on call). On a synchronous throw logs one line
+ * naming `what` and the selector and returns false; otherwise true.
+ */
+function tryOn(what: string, selector: string, register: () => void): boolean {
+  try {
+    register();
+    return true;
+  } catch (e) {
+    console.error(
+      `cf-webmcp: skipping ${what}: HTMLRewriter rejected the selector ${JSON.stringify(selector)}: ${
+        e instanceof Error ? e.message : String(e)
+      }`,
+    );
+    return false;
+  }
 }
 
 export function escapeAttr(s: string): string {

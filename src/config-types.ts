@@ -8,6 +8,18 @@ import { checkSelector, type SelectorCheckOptions } from "./selector-grammar";
 
 // ---------- Reusable shapes ----------
 
+/**
+ * Adds an issue carrying checkSelector's message. Selectors are checked at build
+ * time because HTMLRewriter throws on anything outside its streaming subset, and
+ * a selector it rejects costs the injection it was meant for.
+ */
+function selectorIssue(opts: SelectorCheckOptions) {
+  return (selector: string, ctx: z.RefinementCtx) => {
+    const message = checkSelector(selector, opts);
+    if (message !== null) ctx.addIssue({ code: z.ZodIssueCode.custom, message });
+  };
+}
+
 // Characters we explicitly reject in any PathString. Beyond the standard
 // query/fragment/traversal exclusions, this set covers anything that would
 // be unsafe to embed in:
@@ -76,8 +88,12 @@ const RssExecutor = z.object({
 const DomExtractExecutor = z.object({
   type: z.literal("dom_extract"),
   url_template: z.string().min(1),
-  selector: z.string().default("main, article, [role=main]"),
-  strip: z.array(z.string()).default(["nav", "footer", "aside", "script", "style", "noscript"]),
+  // Both go straight to HTMLRewriter.on(), each on its own, so a comma list is fine here
+  // (unlike a form selector, which is composed with its params).
+  selector: z.string().superRefine(selectorIssue({ allowList: true })).default("main, article, [role=main]"),
+  strip: z
+    .array(z.string().superRefine(selectorIssue({ allowList: true })))
+    .default(["nav", "footer", "aside", "script", "style", "noscript"]),
   max_chars: z.number().int().positive().max(100_000).default(8_000),
 });
 
@@ -440,18 +456,6 @@ const RateLimitBlock = z.object({
 // toolparamdescription on inputs). The publisher would normally hand-stamp
 // these in their HTML. With a [[forms]] block, cf-webmcp does the stamping
 // at the edge so existing CMS forms become WebMCP tools with no template edit.
-
-/**
- * Adds an issue carrying checkSelector's message. Selectors are checked at build
- * time because HTMLRewriter throws on anything outside its streaming subset, and
- * that used to surface as an error on every page the selector matched.
- */
-function selectorIssue(opts: SelectorCheckOptions) {
-  return (selector: string, ctx: z.RefinementCtx) => {
-    const message = checkSelector(selector, opts);
-    if (message !== null) ctx.addIssue({ code: z.ZodIssueCode.custom, message });
-  };
-}
 
 const FormParamInjection = z.object({
   // Params are composed as `${form.selector} ${param.selector}`, so a leading

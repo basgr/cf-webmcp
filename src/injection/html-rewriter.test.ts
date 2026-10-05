@@ -290,65 +290,129 @@ describe("injectIntoHtml", () => {
   });
 });
 
-describe("safeInject (fail open on synchronous rewriter errors)", () => {
-  const page = "<html><head></head><body><form id=a></form><form id=b></form></body></html>";
+describe("a selector HTMLRewriter cannot parse skips only its own form or param", () => {
+  const page =
+    "<html><head></head><body>" +
+    "<form id=a><input name=x><input name=y></form>" +
+    "<form id=b><input name=z></form>" +
+    "</body></html>";
   const response = () => new Response(page, { status: 200, headers: { "content-type": "text/html" } });
-  const form = (selector: string, params: FormInjectionConfig["params"] = []): FormInjectionConfig => ({
-    name: "f",
-    description: "d",
-    selector,
-    paths: [],
-    autosubmit: false,
-    params,
+  const form = (
+    name: string,
+    selector: string,
+    params: FormInjectionConfig["params"] = [],
+  ): FormInjectionConfig => ({ name, description: "d " + name, selector, paths: [], autosubmit: false, params });
+
+  async function run(forms: FormInjectionConfig[]) {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    const body = await injectIntoHtml(response(), { ...opts, forms }).text();
+    const logged = errors.mock.calls.map((c) => c.join(" "));
+    errors.mockRestore();
+    return { body, logged };
+  }
+
+  it("proves the premise: the real rewriter throws synchronously on these selectors", () => {
+    expect(() => new HTMLRewriter().on("form:has(input)", {})).toThrow();
+    expect(() => new HTMLRewriter().on("form + form", {})).toThrow();
+    expect(() => new HTMLRewriter().on("form[action=/contact]", {})).toThrow();
   });
 
-  it("proves the premise: lol-html rejects these selectors synchronously", () => {
-    expect(() => injectIntoHtml(response(), { ...opts, forms: [form("form:has(input)")] })).toThrow();
-    expect(() => injectIntoHtml(response(), { ...opts, forms: [form("form + form")] })).toThrow();
+  it("does not throw for a bad form selector and still injects the link tags and the script", async () => {
+    const { body, logged } = await run([form("bad", "form:has(input)")]);
+
+    expect(body).toContain('<link rel="webmcp"');
+    expect(body).toMatch(/<script[^>]+bootstrap[^>]+><\/script><\/body>/);
+    expect(body).not.toContain("toolname=");
+    expect(logged).toHaveLength(1);
+    expect(logged[0]).toContain("bad");
+    expect(logged[0]).toContain("form:has(input)");
   });
 
-  it("returns the origin response unchanged and logs when a form selector is unsupported", async () => {
+  it("stamps the other forms when one form selector is bad (either order)", async () => {
+    for (const forms of [
+      [form("bad", "form + form"), form("good", "form#b")],
+      [form("good", "form#b"), form("bad", "form + form")],
+    ]) {
+      const { body, logged } = await run(forms);
+      expect(body).toMatch(/<form id="?b"?[^>]*toolname="good"/);
+      expect(body).not.toContain('toolname="bad"');
+      expect(body).toContain('<link rel="webmcp"');
+      expect(logged).toHaveLength(1);
+    }
+  });
+
+  it("skips only the bad param: the form and the other params are still stamped", async () => {
+    const { body, logged } = await run([
+      form("f", "form#a", [
+        { selector: "input[name=x]", description: "Param x." },
+        { selector: "input:has(a)", description: "Param bad." },
+        { selector: "input[name=y]", description: "Param y." },
+      ]),
+    ]);
+
+    expect(body).toMatch(/<form[^>]+toolname="f"/);
+    expect(body).toMatch(/name="?x"?[^>]*toolparamdescription="Param x\."/);
+    expect(body).toMatch(/name="?y"?[^>]*toolparamdescription="Param y\."/);
+    expect(body).not.toContain("Param bad");
+    expect(logged).toHaveLength(1);
+    expect(logged[0]).toContain("input:has(a)");
+  });
+
+  it("does not try the params of a form whose own selector failed (one log line, not two)", async () => {
+    const { body, logged } = await run([
+      form("bad", "form:has(input)", [{ selector: "input[name=x]", description: "Param x." }]),
+      form("good", "form#b", [{ selector: "input[name=z]", description: "Param z." }]),
+    ]);
+
+    expect(body).not.toContain("Param x");
+    expect(body).toMatch(/name="?z"?[^>]*toolparamdescription="Param z\."/);
+    expect(logged).toHaveLength(1);
+  });
+
+  it("logs the reason without a stack", async () => {
+    const { logged } = await run([form("bad", "form:has(input)")]);
+
+    expect(logged[0]).toContain("Unsupported pseudo-class");
+    expect(logged[0]).not.toMatch(/\n\s+at /);
+  });
+
+  it("reports a failure once per bad selector, however many forms are fine", async () => {
+    const { logged } = await run([
+      form("bad1", "form + form"),
+      form("good", "form#a"),
+      form("bad2", "form[action=/x]"),
+    ]);
+
+    expect(logged).toHaveLength(2);
+  });
+});
+
+describe("safeInject (outer guard for synchronous rewriter errors)", () => {
+  const page = "<html><head></head><body><form id=a></form></body></html>";
+  const response = () => new Response(page, { status: 200, headers: { "content-type": "text/html" } });
+
+  it("returns the origin response unchanged and logs when injection throws synchronously", async () => {
     const errors = vi.spyOn(console, "error").mockImplementation(() => {});
     const upstream = response();
 
-    const out = safeInject(upstream, { ...opts, forms: [form("form:has(input)")] });
+    // A manifestUrl that is not a string makes escapeAttr throw before the rewriter exists:
+    // a stand-in for any unexpected synchronous failure that no per-selector guard covers.
+    const out = safeInject(upstream, { ...opts, manifestUrl: undefined as unknown as string });
 
     expect(out).toBe(upstream);
     expect(await out.text()).toBe(page);
     expect(errors).toHaveBeenCalledTimes(1);
-    expect(String(errors.mock.calls[0]!.join(" "))).toContain("Unsupported pseudo-class");
-    errors.mockRestore();
-  });
-
-  it("fails open on an unsupported combinator in a form selector", async () => {
-    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
-    const upstream = response();
-
-    const out = safeInject(upstream, { ...opts, forms: [form("form + form")] });
-
-    expect(out).toBe(upstream);
-    expect(await out.text()).toBe(page);
-    errors.mockRestore();
-  });
-
-  it("fails open when only a param selector is unsupported", async () => {
-    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
-    const upstream = response();
-
-    const out = safeInject(upstream, {
-      ...opts,
-      forms: [form("form#a", [{ selector: "input:has(a)", description: "d" }])],
-    });
-
-    expect(out).toBe(upstream);
-    expect(await out.text()).toBe(page);
+    expect(String(errors.mock.calls[0]!.join(" "))).toContain("serving the origin response unchanged");
     errors.mockRestore();
   });
 
   it("injects normally when nothing throws", async () => {
     const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    const forms: FormInjectionConfig[] = [
+      { name: "f", description: "d", selector: "form#a", paths: [], autosubmit: false, params: [] },
+    ];
 
-    const out = safeInject(response(), { ...opts, forms: [form("form#a")] });
+    const out = safeInject(response(), { ...opts, forms });
 
     const body = await out.text();
     expect(body).toContain('<link rel="webmcp"');

@@ -1,29 +1,38 @@
 /**
- * Build-time check for the CSS selectors in `[[forms]]`.
+ * Build-time check for the CSS selectors in the config (`[[forms]]` selectors,
+ * `dom_extract` selector and strip entries).
  *
  * Cloudflare's HTMLRewriter (lol-html) parses a selector eagerly and throws for
- * anything outside its streaming subset. At runtime that used to surface as an
- * error on every matching page, so the selectors are validated when the config
- * is compiled instead. The subset lol-html supports:
+ * anything outside its streaming subset. This is a POSITIVE grammar: it accepts
+ * exactly the constructs below and rejects everything else, so a typo cannot
+ * slip through just because nobody thought to list it as forbidden. The
+ * invariant it must keep (and which src/selector-grammar.ground-truth.test.ts
+ * checks against the real rewriter) is one-directional: whatever this accepts,
+ * lol-html accepts too. Being stricter than lol-html is fine.
  *
- *   type, `*`, `#id`, `.class`, attribute selectors (`=` `~=` `^=` `$=` `*=`
- *   `|=`, optional ` i` / ` s` flag), descendant (whitespace) and child (`>`)
- *   combinators, `:nth-child()`, `:first-child`, `:nth-of-type()`,
- *   `:first-of-type` and `:not(<simple selector>)`.
+ *   selector      := complex ("," complex)*          (list only when allowed, or inside :not)
+ *   complex       := [">"] compound (combinator compound)*
+ *   combinator    := whitespace | ">"
+ *   compound      := (type | "*") (#id | .class | [attr] | :pseudo)*
+ *   type, id, class, attr name: CSS identifier, no escapes, no namespace (`ns|x`)
+ *   [attr]        := [name] | [name op value]; op is = ~= ^= $= *= |=;
+ *                    value is an identifier or a quoted string, then an optional
+ *                    case flag ` i` or ` s`
+ *   :pseudo       := :first-child | :first-of-type          (no argument)
+ *                  | :nth-child(an+b) | :nth-of-type(an+b)  (an+b, odd, even)
+ *                  | :not(<selector list>)                  (non-empty)
  *
- * Not supported: the sibling combinators `+` and `~`, pseudo-elements (`::x`),
- * `:has()` and every other pseudo-class (`:hover`, `:last-child`, `:is()`, ...).
+ * Rejected: the sibling combinators `+` and `~`, `::pseudo-elements`, `:has()`
+ * and every other pseudo-class, comments, backslash escapes, namespaces, unquoted
+ * attribute values that are not identifiers (`[a=/x]`, `[a=1]`), identifiers that
+ * start with a digit or are empty (`#1`, `.`), `:nth-child(... of S)`, malformed
+ * brackets, quotes and parentheses, and any character outside the selector
+ * alphabet. Whitespace is space, tab, LF, CR and FF only.
  *
- * Top-level commas are rejected too, although lol-html accepts a selector list
- * on its own: a param selector is composed as `${form.selector} ${param.selector}`,
- * and a comma list there would bind to the wrong half of the compound selector.
- *
- * The combinators `+` and `~` and the comma are judged only at depth 0 (outside
- * quotes, `[...]` and `(...)`). Quoted strings are opaque, so `[href="/a,b"]`
- * and `:nth-child(2n+1)` pass. Pseudo-classes and pseudo-elements are also
- * judged inside parentheses, because lol-html rejects an unsupported one
- * wherever it appears: `:not(:hover)` and `:not(:has(a))` fail here instead of
- * at request time.
+ * Top-level commas are rejected unless `allowList` is set: a form-param selector
+ * is composed as `${form.selector} ${param.selector}`, where a comma list would
+ * bind to the wrong half of the compound selector. dom_extract selectors stand
+ * alone and may be lists.
  */
 
 export interface SelectorCheckOptions {
@@ -32,139 +41,291 @@ export interface SelectorCheckOptions {
    * selectors set this because they are appended to the form selector.
    */
   allowLeadingChild?: boolean;
+  /** Allow a top-level comma list (`main, article`). Inside `:not(...)` lists are always allowed. */
+  allowList?: boolean;
 }
 
-const SUPPORTED_PSEUDO = new Set(["first-child", "first-of-type", "nth-child", "nth-of-type", "not"]);
+/** How deep `:not(:not(...))` may nest; bounds recursion on hostile input. */
+const MAX_NESTING = 16;
 
-const SUPPORTED_LIST =
-  ":first-child, :first-of-type, :nth-child(), :nth-of-type() and :not()";
+const SUPPORTED_LIST = ":first-child, :first-of-type, :nth-child(), :nth-of-type() and :not()";
 
-/** Index of the quote that closes the string opened at `open`, or -1 if unterminated. */
-function closingQuote(s: string, open: number): number {
-  const quote = s[open];
-  for (let i = open + 1; i < s.length; i++) {
-    if (s[i] === "\\") {
-      i++;
-      continue;
-    }
-    if (s[i] === quote) return i;
+const IDENT_START = /[\p{L}_]/u;
+const IDENT_CHAR = /[\p{L}\p{M}\p{N}_-]/u;
+const NTH_ARG = /^[ \t\n\r\f]*(?:odd|even|[+-]?\d+|[+-]?\d*n(?:[ \t\n\r\f]*[+-][ \t\n\r\f]*\d+)?)[ \t\n\r\f]*$/i;
+
+const LIST_MESSAGE =
+  "selector lists (top-level commas) are not supported here; give each form its own [[forms]] entry and each param its own [[forms.params]] entry";
+const END_COMBINATOR_MESSAGE = "selector must not end with a combinator";
+const DOUBLE_COMBINATOR_MESSAGE = "selector has two combinators in a row";
+const NAMESPACE_MESSAGE = "namespaced selectors (`ns|name`) are not supported by Cloudflare HTMLRewriter";
+
+class Rejected extends Error {}
+
+function fail(message: string): never {
+  throw new Rejected(message);
+}
+
+function siblingMessage(ch: string): string {
+  return `the \`${ch}\` combinator is not supported by Cloudflare HTMLRewriter; use a descendant (space) or child (\`>\`) combinator`;
+}
+
+class Parser {
+  private i = 0;
+
+  constructor(
+    private readonly s: string,
+    private readonly opts: SelectorCheckOptions,
+  ) {}
+
+  run(): void {
+    if (this.s.trim() === "") fail("selector must not be empty");
+    this.list(false, this.opts.allowLeadingChild === true, 0);
+    // list() stops at the end of input or at a `)` it does not own.
+    if (this.i < this.s.length) fail("selector has an unbalanced `)`");
   }
-  return -1;
+
+  private peek(offset = 0): string | undefined {
+    return this.s[this.i + offset];
+  }
+
+  /** Skips whitespace; true if any was skipped. */
+  private ws(): boolean {
+    const start = this.i;
+    while (this.i < this.s.length && " \t\n\r\f".includes(this.s[this.i]!)) this.i++;
+    return this.i > start;
+  }
+
+  private atListEnd(): boolean {
+    const c = this.peek();
+    return c === undefined || c === "," || c === ")";
+  }
+
+  private identStartAt(index: number): boolean {
+    let c = this.s[index];
+    if (c === "-") c = this.s[index + 1];
+    return c !== undefined && IDENT_START.test(c);
+  }
+
+  private ident(): void {
+    if (this.peek() === "-") this.i++;
+    while (this.i < this.s.length && IDENT_CHAR.test(this.s[this.i]!)) this.i++;
+  }
+
+  private unexpected(): never {
+    const c = this.peek();
+    if (c === undefined) fail("selector ends unexpectedly");
+    if (c === "/" && this.peek(1) === "*") fail("comments are not supported in selectors");
+    if (c === "\\") fail("backslash escapes are not supported in selectors");
+    if (c === "|") fail(NAMESPACE_MESSAGE);
+    if (c === '"' || c === "'") fail("quoted strings are only allowed as attribute values");
+    if (c === "]") fail("selector has an unbalanced `]`");
+    if (c === ")") fail("selector has an unbalanced `)`");
+    if (c === "+" || c === "~") fail(siblingMessage(c));
+    return fail(`unexpected character ${JSON.stringify(c)} at position ${this.i}`);
+  }
+
+  private list(inNot: boolean, leadingAllowed: boolean, depth: number): void {
+    let leading = leadingAllowed;
+    for (;;) {
+      this.complex(leading, depth);
+      leading = false;
+      this.ws();
+      if (this.peek() !== ",") return;
+      if (!inNot && !this.opts.allowList) fail(LIST_MESSAGE);
+      this.i++;
+      this.ws();
+      if (this.atListEnd()) fail("selector list has an empty entry");
+    }
+  }
+
+  private complex(leadingAllowed: boolean, depth: number): void {
+    this.ws();
+    const first = this.peek();
+    if (first === ">") {
+      if (!leadingAllowed) fail("selector must not start with a combinator");
+      this.i++;
+      this.ws();
+      if (this.atListEnd()) fail(END_COMBINATOR_MESSAGE);
+      if (this.peek() === ">") fail(DOUBLE_COMBINATOR_MESSAGE);
+    } else if (first === "+" || first === "~") {
+      fail(siblingMessage(first));
+    }
+    this.compound(depth);
+    for (;;) {
+      const hadWhitespace = this.ws();
+      if (this.atListEnd()) return;
+      const c = this.peek()!;
+      if (c === ">") {
+        this.i++;
+        this.ws();
+        if (this.atListEnd()) fail(END_COMBINATOR_MESSAGE);
+        if (this.peek() === ">") fail(DOUBLE_COMBINATOR_MESSAGE);
+        this.compound(depth);
+        continue;
+      }
+      if (c === "+" || c === "~") fail(siblingMessage(c));
+      if (!hadWhitespace) this.unexpected();
+      this.compound(depth);
+    }
+  }
+
+  private compound(depth: number): void {
+    let parts = 0;
+    if (this.peek() === "*") {
+      this.i++;
+      parts++;
+    } else if (this.identStartAt(this.i)) {
+      this.ident();
+      parts++;
+    }
+    if (parts === 1 && this.peek() === "|") fail(NAMESPACE_MESSAGE);
+    for (;;) {
+      const c = this.peek();
+      if (c === "#") {
+        this.i++;
+        this.requireIdent("`#` must be followed by an identifier (not empty, not starting with a digit)");
+      } else if (c === ".") {
+        this.i++;
+        this.requireIdent("`.` must be followed by a class name (not empty, not starting with a digit)");
+      } else if (c === "[") {
+        this.attribute();
+      } else if (c === ":") {
+        this.pseudo(depth);
+      } else {
+        break;
+      }
+      parts++;
+    }
+    if (parts === 0) this.unexpected();
+  }
+
+  private requireIdent(message: string): void {
+    if (!this.identStartAt(this.i)) fail(message);
+    this.ident();
+  }
+
+  private attribute(): void {
+    this.i++; // [
+    this.ws();
+    if (!this.identStartAt(this.i)) fail("attribute selector must start with an attribute name (an identifier)");
+    this.ident();
+    this.ws();
+    const c = this.peek();
+    if (c === "]") {
+      this.i++;
+      return;
+    }
+    if (c === "=") {
+      this.i++;
+    } else if (c !== undefined && "~^$*|".includes(c) && this.peek(1) === "=") {
+      this.i += 2;
+    } else if (c === "|") {
+      fail(NAMESPACE_MESSAGE);
+    } else {
+      fail("attribute selector expects `]` or one of the operators = ~= ^= $= *= |= after the name");
+    }
+    this.ws();
+    const v = this.peek();
+    if (v === '"' || v === "'") {
+      this.quoted();
+    } else if (this.identStartAt(this.i)) {
+      this.ident();
+    } else {
+      fail(
+        "attribute value must be an identifier or a quoted string; quote values that start with a digit or contain characters such as / . : ( )",
+      );
+    }
+    const hadWhitespace = this.ws();
+    const flag = this.peek();
+    if (hadWhitespace && flag !== undefined && "iIsS".includes(flag)) {
+      const after = this.peek(1);
+      if (after === "]" || (after !== undefined && " \t\n\r\f".includes(after))) {
+        this.i++;
+        this.ws();
+      }
+    }
+    if (this.peek() !== "]") {
+      fail("attribute selector must end with `]` (only one case flag, `i` or `s`, may follow the value)");
+    }
+    this.i++;
+  }
+
+  private quoted(): void {
+    const quote = this.s[this.i]!;
+    this.i++;
+    for (;;) {
+      if (this.i >= this.s.length) fail("selector contains an unterminated quoted string");
+      const c = this.s[this.i]!;
+      if (c === quote) {
+        this.i++;
+        return;
+      }
+      if (c === "\\") fail("backslash escapes are not supported in selectors");
+      const code = c.charCodeAt(0);
+      if ((code < 0x20 && c !== "\t") || code === 0x7f) {
+        fail("control characters and line breaks are not allowed inside quoted strings");
+      }
+      this.i++;
+    }
+  }
+
+  private pseudo(depth: number): void {
+    this.i++; // :
+    if (this.peek() === ":") fail("pseudo-elements (`::name`) are not supported by Cloudflare HTMLRewriter");
+    const start = this.i;
+    while (this.i < this.s.length && IDENT_CHAR.test(this.s[this.i]!)) this.i++;
+    const name = this.s.slice(start, this.i).toLowerCase();
+    if (name === "") fail("`:` must be followed by a pseudo-class name");
+    if (name === "has") {
+      fail("`:has()` is not supported by Cloudflare HTMLRewriter (it cannot look ahead in a streamed document)");
+    }
+
+    switch (name) {
+      case "first-child":
+      case "first-of-type":
+        if (this.peek() === "(") fail(`\`:${name}\` takes no argument`);
+        return;
+
+      case "nth-child":
+      case "nth-of-type": {
+        if (this.peek() !== "(") fail(`\`:${name}\` needs an argument such as (2n+1), (odd) or (3)`);
+        const close = this.s.indexOf(")", this.i);
+        if (close < 0) fail("selector has an unclosed `(`");
+        const arg = this.s.slice(this.i + 1, close);
+        if (!NTH_ARG.test(arg)) {
+          fail(`\`:${name}(${arg.trim()})\` is not valid; use an+b (2n+1, -n+3), odd, even or a number`);
+        }
+        this.i = close + 1;
+        return;
+      }
+
+      case "not": {
+        if (this.peek() !== "(") fail("`:not` needs an argument in parentheses");
+        if (depth + 1 > MAX_NESTING) fail("selector is nested too deeply");
+        this.i++;
+        this.ws();
+        if (this.peek() === ")") fail("`:not()` needs a non-empty argument");
+        this.list(true, false, depth + 1);
+        this.ws();
+        if (this.peek() !== ")") fail("selector has an unclosed `(`");
+        this.i++;
+        return;
+      }
+
+      default:
+        fail(`pseudo-class \`:${name}\` is not supported by Cloudflare HTMLRewriter (supported: ${SUPPORTED_LIST})`);
+    }
+  }
 }
 
 /** Returns null when the selector is acceptable, otherwise a message naming the problem. */
 export function checkSelector(sel: string, opts: SelectorCheckOptions = {}): string | null {
-  const s = sel.trim();
-  if (s === "") return "selector must not be empty";
-
-  let bracketDepth = 0;
-  let parenDepth = 0;
-  // Combinator placement: a `>` needs a compound selector on its left (except a
-  // leading one, when allowed) and on its right.
-  let tokens = 0;
-  let hasCompound = false;
-  let afterChild = false;
-
-  for (let i = 0; i < s.length; i++) {
-    const ch = s[i]!;
-
-    if (ch === "\\") {
-      // Escaped character: part of an identifier, never structure.
-      i++;
-      hasCompound = true;
-      afterChild = false;
-      continue;
-    }
-
-    if (ch === '"' || ch === "'") {
-      const end = closingQuote(s, i);
-      if (end < 0) return "selector contains an unterminated quoted string";
-      i = end;
-      hasCompound = true;
-      afterChild = false;
-      continue;
-    }
-
-    if (bracketDepth > 0) {
-      if (ch === "]") bracketDepth--;
-      continue;
-    }
-    if (ch === "[") {
-      bracketDepth++;
-      if (parenDepth === 0) {
-        hasCompound = true;
-        afterChild = false;
-      }
-      continue;
-    }
-
-    if (ch === "(") {
-      parenDepth++;
-      continue;
-    }
-    if (ch === ")") {
-      if (parenDepth === 0) return "selector has an unbalanced `)`";
-      parenDepth--;
-      continue;
-    }
-
-    if (ch === ":") {
-      // Pseudo-classes are judged at any paren depth: lol-html rejects an
-      // unsupported one wherever it appears (`:not(:hover)` throws too).
-      if (s[i + 1] === ":") {
-        return "pseudo-elements (`::name`) are not supported by Cloudflare HTMLRewriter";
-      }
-      const name = /^[A-Za-z0-9_-]*/.exec(s.slice(i + 1))![0].toLowerCase();
-      if (name === "") return "selector has a `:` that is not followed by a pseudo-class name";
-      if (name === "has") {
-        return "`:has()` is not supported by Cloudflare HTMLRewriter (it cannot look ahead in a streamed document)";
-      }
-      if (!SUPPORTED_PSEUDO.has(name)) {
-        return `pseudo-class \`:${name}\` is not supported by Cloudflare HTMLRewriter (supported: ${SUPPORTED_LIST})`;
-      }
-      i += name.length;
-      if (parenDepth === 0) {
-        tokens++;
-        hasCompound = true;
-        afterChild = false;
-      }
-      continue;
-    }
-
-    if (parenDepth > 0) continue;
-
-    // Depth 0 from here on.
-    if (ch === "]") return "selector has an unbalanced `]`";
-    if (/\s/.test(ch)) continue;
-
-    if (ch === ",") {
-      return "selector lists (top-level commas) are not supported; give each form its own [[forms]] entry and each param its own [[forms.params]] entry";
-    }
-
-    if (ch === "+" || ch === "~") {
-      return `the \`${ch}\` combinator is not supported by Cloudflare HTMLRewriter; use a descendant (space) or child (\`>\`) combinator`;
-    }
-
-    if (ch === ">") {
-      if (!hasCompound) {
-        if (afterChild) return "selector has two combinators in a row";
-        if (tokens === 0 && !opts.allowLeadingChild) {
-          return "selector must not start with a combinator";
-        }
-      }
-      tokens++;
-      hasCompound = false;
-      afterChild = true;
-      continue;
-    }
-
-    tokens++;
-    hasCompound = true;
-    afterChild = false;
+  try {
+    new Parser(sel, opts).run();
+    return null;
+  } catch (e) {
+    if (e instanceof Rejected) return e.message;
+    throw e;
   }
-
-  if (bracketDepth > 0) return "selector has an unclosed `[`";
-  if (parenDepth > 0) return "selector has an unclosed `(`";
-  if (!hasCompound) return "selector must not end with a combinator";
-  return null;
 }

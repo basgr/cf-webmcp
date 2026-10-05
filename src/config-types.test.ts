@@ -100,6 +100,93 @@ describe("forms selector grammar", () => {
   });
 });
 
+describe("positive selector grammar in forms", () => {
+  const form = (selector: string, params: Array<{ selector: string; description: string }> = []) => ({
+    ...minimal,
+    forms: [{ name: "contact", description: "Contact form.", selector, params }],
+  });
+
+  it("rejects typos that make HTMLRewriter throw, at the build", () => {
+    for (const sel of [
+      "form[action=/contact]",
+      "form[data-id=123]",
+      "input[name=2fa]",
+      "form#123",
+      "form.",
+      "form:not()",
+      "form:nth-child(foo)",
+      "form:first-child(x)",
+      "form/* x */",
+    ]) {
+      const selector = sel.startsWith("form") ? sel : `form ${sel}`;
+      const r = ConfigSchema.safeParse(form(selector));
+      expect(r.success, selector).toBe(false);
+    }
+  });
+
+  it("rejects the same typos in a param selector, at the param path", () => {
+    const r = ConfigSchema.safeParse(form("form#c", [{ selector: "input[name=2fa]", description: "d" }]));
+    expect(r.success).toBe(false);
+    if (!r.success) {
+      const issue = r.error.issues.find((i) => i.path.join(".") === "forms.0.params.0.selector");
+      expect(issue).toBeDefined();
+      expect(issue!.message).toMatch(/quote/);
+    }
+  });
+});
+
+describe("dom_extract selector and strip", () => {
+  const withExecutor = (executor: Record<string, unknown>) => ({
+    ...minimal,
+    tools: [
+      {
+        name: "read_page",
+        description: "x",
+        input_schema: { type: "object", required: [], properties: {} },
+        executor: { type: "dom_extract", url_template: "https://example.com/page", ...executor },
+      },
+    ],
+  });
+
+  it("accepts the defaults and a comma list (the selector stands alone, so a list is fine)", () => {
+    expect(ConfigSchema.safeParse(withExecutor({})).success).toBe(true);
+    expect(ConfigSchema.safeParse(withExecutor({ selector: "main, article, [role=main]" })).success).toBe(true);
+    expect(ConfigSchema.safeParse(withExecutor({ selector: "article.post > div.content" })).success).toBe(true);
+    expect(
+      ConfigSchema.safeParse(withExecutor({ strip: ["nav", "footer", ".cookie-banner", "div[aria-hidden=true]", "a, b"] }))
+        .success,
+    ).toBe(true);
+  });
+
+  it("rejects an unsupported selector, naming the construct at the selector path", () => {
+    const r = ConfigSchema.safeParse(withExecutor({ selector: "main:has(a)" }));
+    expect(r.success).toBe(false);
+    if (!r.success) {
+      const issue = r.error.issues.find((i) => i.path.join(".") === "tools.0.executor.selector");
+      expect(issue).toBeDefined();
+      expect(issue!.message).toContain(":has");
+    }
+  });
+
+  it("rejects an unsupported entry in strip, at the index of the bad entry", () => {
+    const r = ConfigSchema.safeParse(withExecutor({ strip: ["nav", "aside:hover", "footer"] }));
+    expect(r.success).toBe(false);
+    if (!r.success) {
+      const paths = r.error.issues.map((i) => i.path.join("."));
+      expect(paths).toContain("tools.0.executor.strip.1");
+      expect(paths).not.toContain("tools.0.executor.strip.0");
+      expect(paths).not.toContain("tools.0.executor.strip.2");
+    }
+  });
+
+  it("rejects sibling combinators, a leading combinator and an empty selector", () => {
+    for (const selector of ["main + p", "main ~ p", "> main", "", "main[role=]"]) {
+      expect(ConfigSchema.safeParse(withExecutor({ selector })).success, JSON.stringify(selector)).toBe(false);
+    }
+    expect(ConfigSchema.safeParse(withExecutor({ strip: [""] })).success).toBe(false);
+  });
+});
+
 describe("ai_catalog config", () => {
   it("defaults: feature off, canonical path, synthesize mode, empty optionals", () => {
     const c = ConfigSchema.parse(minimal);

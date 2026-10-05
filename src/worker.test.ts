@@ -163,23 +163,32 @@ describe("worker proxy", () => {
 });
 
 describe("worker fails open", () => {
-  it("serves the origin HTML unchanged, with the Link header, when a form selector makes HTMLRewriter throw", async () => {
+  it("a form selector HTMLRewriter rejects skips only that form: the page still gets the script, link tags and Link header", async () => {
     const errors = vi.spyOn(console, "error").mockImplementation(() => {});
-    stubOrigin({ "https://example.com/page": () => htmlResponse("<html><head></head><body><form id=a></form></body></html>") });
+    stubOrigin({
+      "https://example.com/page": () =>
+        htmlResponse("<html><head></head><body><form id=a></form><form id=b></form></body></html>"),
+    });
     const deps = makeDeps();
-    // Bypass the schema (which now rejects this selector at build time) to model a
-    // selector that slips through, e.g. an older generated config.
+    // Bypass the schema (which rejects these selectors at build time) to model a
+    // selector that slips through, e.g. an older generated config. paths is empty,
+    // so both forms apply to every page.
     deps.config.forms = [
-      { name: "contact", description: "d", selector: "form:has(input)", paths: [], autosubmit: false, params: [] },
+      { name: "broken", description: "d", selector: "form:has(input)", paths: [], autosubmit: false, params: [] },
+      { name: "contact", description: "Contact us.", selector: "form#b", paths: [], autosubmit: false, params: [] },
     ];
     const handler = createHandler(deps);
 
     const res = await call(handler, "https://example.com/page");
+    const body = await res.text();
 
     expect(res.status).toBe(200);
-    expect(await res.text()).toBe("<html><head></head><body><form id=a></form></body></html>");
+    expect(body).toContain("/_webmcp/bootstrap.test.js");
+    expect(body).toContain('<link rel="webmcp"');
+    expect(body).toMatch(/<form id="?b"?[^>]*toolname="contact"/);
+    expect(body).not.toContain('toolname="broken"');
     expect(res.headers.get("link")).toContain('rel="webmcp"');
-    expect(errors).toHaveBeenCalled();
+    expect(errors).toHaveBeenCalledTimes(1);
     errors.mockRestore();
   });
 

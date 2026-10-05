@@ -11,8 +11,11 @@
  */
 
 import type { ExecutorContext } from "./common";
-import { fromErr, mapOriginStatus, originFetch, resolveUrl } from "./common";
+import { fromErr, mapOriginStatus, originFetch, readFailure, readWithLimit, resolveUrl } from "./common";
 import { err, ok, type Envelope } from "../envelope";
+
+/** Largest JSON body we will read and parse. */
+export const MAX_JSON_BYTES = 2 * 1024 * 1024;
 
 export interface HttpJsonConfig {
   url_template: string;
@@ -39,11 +42,18 @@ export async function runHttpJson(
   const mapped = mapOriginStatus(res.status);
   if (mapped) return fromErr(mapped);
 
+  // Bounded read first, then parse: res.json() would buffer a body of any size.
+  const body = await readWithLimit(res, MAX_JSON_BYTES, ctx.signal);
+  if (!body.ok) return fromErr(readFailure(body, ctx, MAX_JSON_BYTES, "response"));
+
   let parsed: unknown;
   try {
-    parsed = await res.json();
+    parsed = JSON.parse(body.text);
   } catch (e) {
-    return err("schema_mismatch", `origin did not return valid JSON: ${(e as Error).message}`, false);
+    // The parser's message quotes the origin's bytes ("Unexpected token <, ..."); keep it
+    // out of the envelope the agent sees and log it instead.
+    console.error(`cf-webmcp: http_json origin response is not valid JSON: ${(e as Error).message}`);
+    return err("schema_mismatch", "origin did not return valid JSON", false);
   }
 
   const proj = config.project ?? { type: "raw" };

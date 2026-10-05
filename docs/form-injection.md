@@ -54,13 +54,17 @@ autosubmit  = false
 The selectors must work in Cloudflare HTMLRewriter, which supports a subset of CSS Selectors Level 4:
 
 - Element names: `form`, `input`, `select`, `textarea`, and `*`
-- IDs: `#myform`
+- IDs: `#myform`. Identifiers (ids, classes, element and attribute names) must not be empty or start with a digit, and may not use backslash escapes.
 - Classes: `.contact-form`
-- Attribute selectors: `[name=email]`, `[action="/contact"]`, `[type^="email"]`, with the operators `=`, `~=`, `^=`, `$=`, `*=`, `|=` and an optional `i` or `s` flag
+- Attribute selectors: `[name=email]`, `[action="/contact"]`, `[type^="email"]`, with the operators `=`, `~=`, `^=`, `$=`, `*=`, `|=` and an optional `i` or `s` flag. An unquoted value must be an identifier: write `[name="2fa"]` and `[action="/contact"]`, not `[name=2fa]` or `[action=/contact]`.
 - Descendant (space) and child (`>`) combinators. The form selector and each param selector are joined with a descendant combinator: `form#contact input[name=email]`. A param selector may start with `>` to mean a direct child: `> input[name=email]`.
-- `:nth-child()`, `:first-child`, `:nth-of-type()`, `:first-of-type` and `:not(...)`
+- `:nth-child()` and `:nth-of-type()` with `an+b`, `odd`, `even` or a number (no `of S` clause), `:first-child` and `:first-of-type` (no argument), and `:not(...)` with a non-empty argument
 
-Not supported: the sibling combinators `+` and `~`, pseudo-elements (`::before`), `:has()`, every other pseudo-class (`:hover`, `:last-child`, `:is()`), and comma lists. Quoted attribute values may contain any of these characters (`[action="/a,b"]` is fine). The build checks every selector and fails with a message naming the construct, so an unsupported selector is caught at deploy time rather than on live pages. If your form does not have a stable id/class/attribute, the easiest fix is to add one on the origin side.
+Not supported: the sibling combinators `+` and `~`, pseudo-elements (`::before`), `:has()`, every other pseudo-class (`:hover`, `:last-child`, `:is()`), comma lists, comments, namespaces (`svg|rect`) and backslash escapes. Quoted attribute values may contain any of these characters (`[action="/a,b"]` is fine), except backslashes and line breaks.
+
+The build checks every selector against exactly this list and fails with a message naming the problem, so a typo is caught when you build rather than on live pages. The check is deliberately strict: it accepts only what Cloudflare's HTMLRewriter is known to take. It is a safeguard, not a guarantee; if a selector still gets past it and HTMLRewriter rejects it at request time, the Worker skips only that form (or that one param), logs a line naming it, and injects everything else on the page as usual. If your form does not have a stable id/class/attribute, the easiest fix is to add one on the origin side.
+
+The `selector` and `strip` entries of a `dom_extract` tool go through the same check, except that they may be comma lists (`main, article`), because each one is handed to HTMLRewriter on its own.
 
 ## Path scoping with `paths`
 
