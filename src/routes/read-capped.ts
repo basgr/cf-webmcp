@@ -8,7 +8,8 @@
  * A body that fails before the cap is a failed origin: the caller serves what it serves when
  * origin has no file, with ORIGIN_FAILURE_CACHE_CONTROL so origin's own file is back within
  * a minute once origin is. Without this a failing read throws out of the route, and the
- * platform's error page that answers carries no X-Robots-Tag.
+ * platform's error page that answers carries no X-Robots-Tag. robots.txt is the exception: its
+ * stand-in would drop origin's Disallow rules, so it answers 503 instead (src/routes/robots-txt.ts).
  */
 
 /** Origin documents over this many bytes are relayed, not merged. */

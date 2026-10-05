@@ -1,14 +1,21 @@
 /**
  * GET /robots.txt handler. Same merge model as llms.txt, with a hash-marker
  * pair since robots.txt comments start with `#`. Same 1 MiB cap on origin's file too:
- * a larger one is relayed as origin sent it, and one whose body fails mid-read is
- * answered with the block alone, cached for a minute only.
+ * a larger one is relayed as origin sent it. One whose body fails mid-read is NOT answered
+ * with the block alone, as llms.txt is: that would be a robots.txt without origin's own
+ * Disallow rules, more permissive than the site's. It answers 503 with Retry-After instead: a
+ * server error, which crawlers treat as temporary and never as permission (Google reads a 5xx
+ * robots.txt as "disallow everything" until the file answers again). Stricter for a moment,
+ * never more permissive.
  */
 
 import type { Config } from "../config-types";
 import { buildCacheControl } from "../cache";
 import { applyRobotsTagRule } from "../robots-tag";
-import { ORIGIN_FAILURE_CACHE_CONTROL, readTextCapped } from "./read-capped";
+import { readTextCapped } from "./read-capped";
+
+/** Seconds a crawler is asked to wait after a 503 for a robots.txt whose origin body failed. */
+export const ROBOTS_RETRY_AFTER_SECONDS = 60;
 
 const BEGIN = "# cf-webmcp:begin";
 const END = "# cf-webmcp:end";
@@ -22,7 +29,7 @@ export async function robotsTxtResponse(
   // The document without origin's file: the block between its markers.
   const standalone = `${BEGIN}\n${block}\n${END}\n`;
   let body: string;
-  let cacheControl = buildCacheControl({
+  const cacheControl = buildCacheControl({
     max_age: config.cache.robots_txt_max_age,
     s_maxage: config.cache.robots_txt_s_maxage,
     swr: config.cache.robots_txt_swr,
@@ -41,9 +48,18 @@ export async function robotsTxtResponse(
       // Over the cap: origin's file, not ours to merge into. Same header policy as any answer here.
       return applyRobotsTagRule(read.upstream, config, config.robots_txt.path);
     } else {
-      // The body failed mid-read: the block alone, for a minute.
-      body = standalone;
-      cacheControl = ORIGIN_FAILURE_CACHE_CONTROL;
+      // The body failed mid-read. The block alone would drop origin's Disallow rules, so a crawler
+      // gets a temporary failure instead, never cached. Same header policy as any answer here.
+      const unavailable = new Response("origin's robots.txt could not be read; try again later\n", {
+        status: 503,
+        headers: {
+          "content-type": "text/plain; charset=utf-8",
+          "retry-after": String(ROBOTS_RETRY_AFTER_SECONDS),
+          "cache-control": "no-store",
+          "x-content-type-options": "nosniff",
+        },
+      });
+      return applyRobotsTagRule(unavailable, config, config.robots_txt.path);
     }
   } else {
     // Relay origin's answer. At its apex path this route never carries X-Robots-Tag, so

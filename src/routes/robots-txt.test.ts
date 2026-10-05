@@ -119,3 +119,41 @@ describe("robotsTxtResponse", () => {
     expect(beginCount).toBe(1);
   });
 });
+
+describe("robotsTxtResponse when origin's file fails while it is read", () => {
+  /** An origin 200 text/plain whose stream errors after the first chunk. */
+  const failingAfterFirstChunk = async () =>
+    new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode("User-agent: *\nDisallow: /private/\n"));
+        },
+        pull(controller) {
+          controller.error(new Error("connection reset"));
+        },
+      }),
+      { status: 200, headers: { "content-type": "text/plain" } },
+    );
+
+  it("answers 503 with Retry-After: 60 and no-store, never a file without origin's Disallow rules", async () => {
+    const res = await robotsTxtResponse(new Request("https://example.com/robots.txt"), makeConfig(), failingAfterFirstChunk);
+    const text = await res.text();
+
+    expect(res.status).toBe(503);
+    expect(res.headers.get("retry-after")).toBe("60");
+    expect(res.headers.get("cache-control")).toBe("no-store");
+    expect(res.headers.get("content-type")).toBe("text/plain; charset=utf-8");
+    expect(text).not.toContain("Disallow");
+    expect(text).not.toContain("cf-webmcp:begin");
+  });
+
+  it("carries no X-Robots-Tag at the apex path, and noindex under a protected prefix", async () => {
+    const apex = await robotsTxtResponse(new Request("https://example.com/robots.txt"), makeConfig(), failingAfterFirstChunk);
+    expect(apex.headers.has("x-robots-tag")).toBe(false);
+
+    const moved = { ...makeConfig(), robots_txt: { path: "/_webmcp/robots.txt", mode: "merge" as const } };
+    const under = await robotsTxtResponse(new Request("https://example.com/_webmcp/robots.txt"), moved, failingAfterFirstChunk);
+    expect(under.status).toBe(503);
+    expect(under.headers.get("x-robots-tag")).toBe("noindex");
+  });
+});

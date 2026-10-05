@@ -7,7 +7,9 @@
  *     origin sent it (status, headers, every byte), with the route's X-Robots-Tag policy;
  *   - a body that fails before the cap is a failed origin: the route serves what it serves
  *     when origin has no file, with Cache-Control public, max-age=60, s-maxage=60, instead of
- *     throwing to the platform error page (which carries no noindex).
+ *     throwing to the platform error page (which carries no noindex). robots.txt is the
+ *     exception: the block alone would drop origin's Disallow rules, so it answers 503 with
+ *     Retry-After: 60 and no-store, which crawlers read as "try again later".
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -55,6 +57,8 @@ interface RouteCase {
   contentType: string;
   /** `apex`: no X-Robots-Tag at its usual path (llms.txt, robots.txt). `always`: noindex. */
   robots: "apex" | "always";
+  /** What a body that fails before the cap gets: the stand-in with the short cache, or a 503 (robots.txt). */
+  failedRead: "stand-in" | "503";
   call: (config: ReturnType<typeof makeConfig>, proxy: Proxy) => Promise<Response>;
   /** A mergeable origin document of exactly `size` bytes. */
   document: (size: number) => Uint8Array;
@@ -74,6 +78,7 @@ const cases: RouteCase[] = [
     protectedPath: { llms_txt: { mode: "merge", path: "/.well-known/llms.txt" } },
     contentType: "text/plain; charset=utf-8",
     robots: "apex",
+    failedRead: "stand-in",
     call: (config, proxy) => llmsTxtResponse(new Request("https://example.com/llms.txt"), config, proxy),
     document: (size) => padded("# Origin llms.txt\n", size),
   },
@@ -83,6 +88,7 @@ const cases: RouteCase[] = [
     protectedPath: { robots_txt: { mode: "merge", path: "/_webmcp/robots.txt" } },
     contentType: "text/plain",
     robots: "apex",
+    failedRead: "503",
     call: (config, proxy) => robotsTxtResponse(new Request("https://example.com/robots.txt"), config, proxy),
     document: (size) => padded("User-agent: *\nDisallow: /private/\n", size),
   },
@@ -92,6 +98,7 @@ const cases: RouteCase[] = [
     protectedPath: {},
     contentType: "text/markdown; charset=utf-8",
     robots: "always",
+    failedRead: "stand-in",
     call: (config, proxy) => agentsMdResponse(new Request("https://example.com/.well-known/agents.md"), config, proxy),
     document: (size) => padded("# Origin agents.md\n", size),
   },
@@ -101,6 +108,7 @@ const cases: RouteCase[] = [
     protectedPath: {},
     contentType: "application/linkset+json",
     robots: "always",
+    failedRead: "stand-in",
     call: (config, proxy) => apiCatalogResponse(new Request("https://example.com/.well-known/api-catalog"), config, proxy),
     document: (size) => padded('{"linkset":[{"anchor":"https://example.com/api","service-doc":[{"href":"https://example.com/docs"}]}]}', size),
   },
@@ -110,6 +118,7 @@ const cases: RouteCase[] = [
     protectedPath: {},
     contentType: "text/markdown",
     robots: "always",
+    failedRead: "stand-in",
     call: (config, proxy) => agentSkillsResponse(new Request("https://example.com/.well-known/agent-skills/site/SKILL.md"), config, proxy),
     document: (size) => padded("---\nname: origin\ndescription: Origin skill\n---\n\n# Origin\n", size),
   },
@@ -193,34 +202,59 @@ describe.each(cases)("$name: the cap on origin's file", (c) => {
     expect(bytes.every((b) => b === 0x61)).toBe(true);
   });
 
-  it("serves what the route serves when origin has no file, with the 60 second cache, when the body fails mid-stream", async () => {
-    const expected = await standIn();
-    const upstream = new Response(body(10 * 64 * 1024, { failAfter: 2 * 64 * 1024 }), { status: 200, headers: { "content-type": c.contentType } });
-
-    const res = await c.call(config(), async () => upstream);
-
-    expect(res.status).toBe(200);
-    expect(await res.text()).toBe(expected.text);
-    expect(res.headers.get("cache-control")).toBe(SHORT_CACHE);
-    expect(res.headers.get("content-type")).toBe(expected.contentType);
-    // The ordinary stand-in keeps the ordinary cache.
-    expect(expected.cacheControl).not.toBe(SHORT_CACHE);
-  });
-
-  it("also falls back when the very first read fails", async () => {
-    const expected = await standIn();
-    const broken = new ReadableStream<Uint8Array>({
+  const brokenAtOnce = () =>
+    new ReadableStream<Uint8Array>({
       start(controller) {
         controller.error(new Error("socket closed"));
       },
     });
 
-    const res = await c.call(config(), async () => new Response(broken, { status: 200, headers: { "content-type": c.contentType } }));
+  if (c.failedRead === "stand-in") {
+    it("serves what the route serves when origin has no file, with the 60 second cache, when the body fails mid-stream", async () => {
+      const expected = await standIn();
+      const upstream = new Response(body(10 * 64 * 1024, { failAfter: 2 * 64 * 1024 }), { status: 200, headers: { "content-type": c.contentType } });
 
-    expect(res.status).toBe(200);
-    expect(await res.text()).toBe(expected.text);
-    expect(res.headers.get("cache-control")).toBe(SHORT_CACHE);
-  });
+      const res = await c.call(config(), async () => upstream);
+
+      expect(res.status).toBe(200);
+      expect(await res.text()).toBe(expected.text);
+      expect(res.headers.get("cache-control")).toBe(SHORT_CACHE);
+      expect(res.headers.get("content-type")).toBe(expected.contentType);
+      // The ordinary stand-in keeps the ordinary cache.
+      expect(expected.cacheControl).not.toBe(SHORT_CACHE);
+    });
+
+    it("also falls back when the very first read fails", async () => {
+      const expected = await standIn();
+
+      const res = await c.call(config(), async () => new Response(brokenAtOnce(), { status: 200, headers: { "content-type": c.contentType } }));
+
+      expect(res.status).toBe(200);
+      expect(await res.text()).toBe(expected.text);
+      expect(res.headers.get("cache-control")).toBe(SHORT_CACHE);
+    });
+  } else {
+    // The stand-in here would be the Worker's block alone, which drops origin's Disallow rules:
+    // a more permissive robots.txt than the site's. A 503 tells a crawler to come back instead.
+    it("answers 503 with Retry-After: 60 and no-store when the body fails mid-stream", async () => {
+      const upstream = new Response(body(10 * 64 * 1024, { failAfter: 2 * 64 * 1024 }), { status: 200, headers: { "content-type": c.contentType } });
+
+      const res = await c.call(config(), async () => upstream);
+
+      expect(res.status).toBe(503);
+      expect(res.headers.get("retry-after")).toBe("60");
+      expect(res.headers.get("cache-control")).toBe("no-store");
+      expect(await res.text()).not.toContain("cf-webmcp:begin");
+    });
+
+    it("answers the same 503 when the very first read fails", async () => {
+      const res = await c.call(config(), async () => new Response(brokenAtOnce(), { status: 200, headers: { "content-type": c.contentType } }));
+
+      expect(res.status).toBe(503);
+      expect(res.headers.get("retry-after")).toBe("60");
+      expect(res.headers.get("cache-control")).toBe("no-store");
+    });
+  }
 
   it("merges a body of exactly 1 MiB, with the ordinary cache", async () => {
     const expected = await standIn();
@@ -298,7 +332,7 @@ describe("through the handler: a failing or oversize origin file never throws", 
     ["SKILL.md", "https://example.com/.well-known/agent-skills/site/SKILL.md", "text/markdown", { agent_skills: { mode: "merge" } }],
   ];
 
-  it.each(urls)("%s: a body that fails mid-stream is a 200 with the short cache", async (_name, url, contentType, overrides) => {
+  it.each(urls)("%s: a body that fails mid-stream is a 200 with the short cache (robots.txt: a 503)", async (name, url, contentType, overrides) => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async () => new Response(body(MIB, { failAfter: 64 * 1024 }), { status: 200, headers: { "content-type": contentType } })),
@@ -307,8 +341,15 @@ describe("through the handler: a failing or oversize origin file never throws", 
 
     const res = await handler.fetch(new Request(url) as Request<unknown, IncomingRequestCfProperties>, env, ctx());
 
-    expect(res.status).toBe(200);
-    expect(res.headers.get("cache-control")).toBe(SHORT_CACHE);
+    if (name === "robots.txt") {
+      expect(res.status).toBe(503);
+      expect(res.headers.get("retry-after")).toBe("60");
+      expect(res.headers.get("cache-control")).toBe("no-store");
+      expect(res.headers.has("x-robots-tag")).toBe(false);
+    } else {
+      expect(res.status).toBe(200);
+      expect(res.headers.get("cache-control")).toBe(SHORT_CACHE);
+    }
     expect((await res.text()).length).toBeGreaterThan(0);
   });
 
