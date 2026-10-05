@@ -5,6 +5,26 @@ export interface HealthOptions {
   schemaVersion: number;
   deployedAt: string;
   preflight?: { ran_at: string | null; collisions: string[]; warnings: string[]; config_hash?: string };
+  /** Content-addressed widget object key this build serves, or null when it ships no widget. */
+  widgetAsset?: string | null;
+  /** The CF_WEBMCP_ASSETS R2 binding, used only to probe for the widget object. */
+  bucket?: Pick<R2Bucket, "head">;
+}
+
+/**
+ * Whether the widget object this build expects exists in R2. null means "not
+ * applicable or unknown": feature off, no widget in this build, no binding, or
+ * the probe itself failed (a bucket outage must not turn the health check into
+ * a 500). Never calls head() without a key.
+ */
+async function widgetAssetPresent(config: Config, opts: HealthOptions): Promise<boolean | null> {
+  if (!config.features.fallback_widget) return null;
+  if (!opts.widgetAsset || !opts.bucket) return null;
+  try {
+    return (await opts.bucket.head(opts.widgetAsset)) !== null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -26,7 +46,7 @@ function timingSafeEqual(a: string, b: string): boolean {
  * If [health].token is set, requires Authorization: Bearer <token>.
  * If [health].public is false (and no token), refuses.
  */
-export function healthResponse(request: Request, config: Config, opts: HealthOptions): Response {
+export async function healthResponse(request: Request, config: Config, opts: HealthOptions): Promise<Response> {
   if (!config.health.public && !config.health.token) {
     return new Response("health endpoint disabled", {
       status: 404,
@@ -48,6 +68,7 @@ export function healthResponse(request: Request, config: Config, opts: HealthOpt
     config_hash: opts.configHash,
     deployed_at: opts.deployedAt,
     preflight: opts.preflight ?? { ran_at: null, collisions: [], warnings: [] },
+    widget_asset_present: await widgetAssetPresent(config, opts),
     executors: config.tools.map((t) => ({ name: t.name, ok_24h: null, err_24h: null, p95_ms_24h: null })),
   };
   return new Response(JSON.stringify(body, null, 2), {

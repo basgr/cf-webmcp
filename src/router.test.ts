@@ -91,9 +91,45 @@ describe("matchRoute", () => {
     expect(matchRoute(baseConfig, url(`/_webmcp/${WIDGET}`), BOOTSTRAP, WIDGET).kind).toBe("widget");
   });
 
-  it("does not route widget when feature off", () => {
+  it("does not serve the widget when feature off, and never proxies the widget path to origin", () => {
     const off = { ...baseConfig, features: { ...baseConfig.features, fallback_widget: false } };
-    expect(matchRoute(off, url(`/_webmcp/${WIDGET}`), BOOTSTRAP, WIDGET).kind).toBe("proxy");
+    expect(matchRoute(off, url(`/_webmcp/${WIDGET}`), BOOTSTRAP, WIDGET).kind).toBe("asset_not_found");
+  });
+
+  it("answers a stale bootstrap hash with asset_not_found instead of proxying it", () => {
+    expect(matchRoute(baseConfig, url("/_webmcp/bootstrap.0000000000000000.js"), BOOTSTRAP, WIDGET).kind).toBe(
+      "asset_not_found",
+    );
+  });
+
+  it("answers a stale widget hash with asset_not_found instead of proxying it", () => {
+    expect(matchRoute(baseConfig, url("/_webmcp/widget.0000000000000000.js"), BOOTSTRAP, WIDGET).kind).toBe(
+      "asset_not_found",
+    );
+  });
+
+  it("answers any widget path with asset_not_found when no widget asset is built", () => {
+    expect(matchRoute(baseConfig, url("/_webmcp/widget.anything.js"), BOOTSTRAP, null).kind).toBe("asset_not_found");
+    expect(matchRoute(baseConfig, url(`/_webmcp/${WIDGET}`), BOOTSTRAP, null).kind).toBe("asset_not_found");
+    // The bootstrap is unaffected by a missing widget.
+    expect(matchRoute(baseConfig, url(`/_webmcp/${BOOTSTRAP}`), BOOTSTRAP, null).kind).toBe("bootstrap");
+  });
+
+  it("only treats single-segment bootstrap.<x>.js and widget.<x>.js under the namespace as assets", () => {
+    // No hash segment, a nested path, a trailing segment, and a path outside the namespace all keep their old routing.
+    expect(matchRoute(baseConfig, url("/_webmcp/bootstrap.js"), BOOTSTRAP, WIDGET).kind).toBe("proxy");
+    expect(matchRoute(baseConfig, url("/_webmcp/widget.js"), BOOTSTRAP, WIDGET).kind).toBe("proxy");
+    expect(matchRoute(baseConfig, url("/_webmcp/sub/bootstrap.abc.js"), BOOTSTRAP, WIDGET).kind).toBe("proxy");
+    expect(matchRoute(baseConfig, url("/_webmcp/bootstrap.abc.js/extra"), BOOTSTRAP, WIDGET).kind).toBe("proxy");
+    expect(matchRoute(baseConfig, url("/other/bootstrap.abc.js"), BOOTSTRAP, WIDGET).kind).toBe("proxy");
+    expect(matchRoute(baseConfig, url("/_webmcp/exec/bootstrap.abc.js"), BOOTSTRAP, WIDGET).kind).toBe("proxy");
+  });
+
+  it("applies the stale-asset rule under a custom namespace only", () => {
+    const custom = { ...baseConfig, paths: { namespace: "/_x" } };
+    expect(matchRoute(custom, url("/_x/bootstrap.old.js"), BOOTSTRAP, WIDGET).kind).toBe("asset_not_found");
+    expect(matchRoute(custom, url(`/_x/${BOOTSTRAP}`), BOOTSTRAP, WIDGET).kind).toBe("bootstrap");
+    expect(matchRoute(custom, url("/_webmcp/bootstrap.old.js"), BOOTSTRAP, WIDGET).kind).toBe("proxy");
   });
 
   it("routes valid exec tool names", () => {

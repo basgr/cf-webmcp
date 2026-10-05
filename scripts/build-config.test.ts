@@ -1,8 +1,11 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import os from "node:os";
+import { fileURLToPath } from "node:url";
 import { buildConfig } from "./build-config";
+import { LICENSE_PREAMBLE } from "../src/widget-preamble";
 
 /**
  * Build-config tests work in a sandbox temp dir per test:
@@ -45,6 +48,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   await fs.rm(tmpDir, { recursive: true, force: true });
 });
 
@@ -54,9 +58,12 @@ async function writeToml(name: string, contents: string): Promise<string> {
   return p;
 }
 
-async function runBuild(tomlPath: string): Promise<{ outDir: string; files: Record<string, string> }> {
+async function runBuild(
+  tomlPath: string,
+  opts: { widgetPinPath?: string } = {},
+): Promise<{ outDir: string; files: Record<string, string> }> {
   const outDir = path.join(tmpDir, "out");
-  await buildConfig({ tomlPath, outDir });
+  await buildConfig({ tomlPath, outDir, ...opts });
   const names = await fs.readdir(outDir);
   const files: Record<string, string> = {};
   for (const n of names) {
@@ -576,5 +583,244 @@ describe("ai_catalog generation", () => {
     const collide = `${MINIMAL}\n\n[features]\nai_catalog = true\n\n[ai_catalog]\npath = "/.well-known/api-catalog"\n`;
     const toml = await writeToml("ai-catalog-collide.toml", collide);
     await expect(runBuild(toml)).rejects.toThrow(/path collision/i);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Content-addressed bootstrap and widget (SRI and immutable caching must agree).
+// ---------------------------------------------------------------------------
+
+const sha256 = (data: string | Uint8Array): string => createHash("sha256").update(data).digest("hex");
+
+/** Read `export const NAME ... = <json>;` out of the emitted config.ts / hash.ts. */
+function exportedConst(source: string, name: string): unknown {
+  const m = source.match(new RegExp(`export const ${name}\\b[^=\\n]*=\\s*(.+);\\n`));
+  if (!m) throw new Error(`export const ${name} not found in generated source`);
+  return JSON.parse(m[1]!);
+}
+
+/** A pin for a fake widget, computed straight from node:crypto (not from the code under test). */
+function fakePin(widgetBody: string, overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  const raw = Buffer.from(widgetBody, "utf8");
+  const composed = Buffer.concat([Buffer.from(LICENSE_PREAMBLE, "utf8"), raw]);
+  return {
+    version: "v0.0.1",
+    sha256: sha256(raw),
+    served_sha256: sha256(composed),
+    served_sri: `sha384-${createHash("sha384").update(composed).digest("base64")}`,
+    preamble_sha256: sha256(LICENSE_PREAMBLE),
+    ...overrides,
+  };
+}
+
+async function writePin(name: string, pin: Record<string, unknown>): Promise<string> {
+  const p = path.join(tmpDir, name);
+  await fs.writeFile(p, JSON.stringify(pin, null, 2) + "\n");
+  return p;
+}
+
+const widgetScriptTag = (landing: string): string | undefined => landing.match(/<script[^>]*widget\.[^>]*><\/script>/)?.[0];
+
+describe("content-addressed bootstrap", () => {
+  it("names the bootstrap after the sha256 of its exact bytes (first 16 hex)", async () => {
+    const toml = await writeToml("bs-hash.toml", MINIMAL);
+    const { files } = await runBuild(toml);
+    const expected = `bootstrap.${sha256(files["bootstrap.js"]!).slice(0, 16)}.js`;
+
+    expect(exportedConst(files["config.ts"]!, "BOOTSTRAP_ASSET")).toBe(expected);
+    expect(exportedConst(files["hash.ts"]!, "BOOTSTRAP_ASSET")).toBe(expected);
+    // The string the Worker serves is the one that was hashed.
+    expect(exportedConst(files["assets.ts"]!, "BOOTSTRAP_JS")).toBe(files["bootstrap.js"]);
+  });
+
+  it("advertises the same file name in manifest links.bootstrap", async () => {
+    const toml = await writeToml("bs-manifest.toml", MINIMAL);
+    const { files } = await runBuild(toml);
+    const asset = exportedConst(files["config.ts"]!, "BOOTSTRAP_ASSET") as string;
+    const manifest = JSON.parse(files["manifest.json"]!);
+    expect(manifest.links.bootstrap).toBe(`https://example.com/_webmcp/${asset}`);
+  });
+
+  it("gives the same name for the same bytes and a different name when the bytes change", async () => {
+    const a1 = await runBuild(await writeToml("bs-a.toml", MINIMAL));
+    const a2 = await runBuild(await writeToml("bs-a2.toml", MINIMAL));
+    const b = await runBuild(await writeToml("bs-b.toml", MINIMAL.replace("Search the site.", "Search the whole site.")));
+    const name = (r: { files: Record<string, string> }) => exportedConst(r.files["config.ts"]!, "BOOTSTRAP_ASSET");
+    expect(name(a1)).toBe(name(a2));
+    expect(name(b)).not.toBe(name(a1));
+  });
+
+  it("keeps the URL and the SRI hash tied to the same bytes", async () => {
+    const toml = await writeToml("bs-sri.toml", MINIMAL);
+    const { files } = await runBuild(toml);
+    const sri = exportedConst(files["config.ts"]!, "BOOTSTRAP_SRI") as string;
+    expect(sri).toBe(`sha384-${createHash("sha384").update(files["bootstrap.js"]!, "utf8").digest("base64")}`);
+    expect(exportedConst(files["config.ts"]!, "BOOTSTRAP_ASSET")).toBe(
+      `bootstrap.${sha256(files["bootstrap.js"]!).slice(0, 16)}.js`,
+    );
+  });
+
+  it("leaves CONFIG_HASH as the 8-hex hash of the config alone (preflight recomputes it from TOML)", async () => {
+    const toml = await writeToml("bs-config-hash.toml", MINIMAL);
+    const pinA = await writePin("pin-a.json", fakePin("widget A"));
+    const pinB = await writePin("pin-b.json", fakePin("widget B"));
+    const a = await runBuild(toml, { widgetPinPath: pinA });
+    const b = await runBuild(toml, { widgetPinPath: pinB });
+    const hashA = exportedConst(a.files["config.ts"]!, "CONFIG_HASH");
+    expect(hashA).toMatch(/^[0-9a-f]{8}$/);
+    expect(exportedConst(b.files["config.ts"]!, "CONFIG_HASH")).toBe(hashA);
+    expect(JSON.parse(a.files["manifest.json"]!).config_hash).toBe(hashA);
+  });
+});
+
+describe("content-addressed widget", () => {
+  it("names the widget from the pin: widget.<first 16 hex of served_sha256>.js", async () => {
+    const pin = fakePin("widget A");
+    const pinPath = await writePin("pin.json", pin);
+    const { files } = await runBuild(await writeToml("w-name.toml", MINIMAL), { widgetPinPath: pinPath });
+    const expected = `widget.${(pin["served_sha256"] as string).slice(0, 16)}.js`;
+
+    expect(exportedConst(files["config.ts"]!, "WIDGET_ASSET")).toBe(expected);
+    expect(exportedConst(files["hash.ts"]!, "WIDGET_ASSET")).toBe(expected);
+    expect(widgetScriptTag(files["landing.html"]!)).toContain(`src="/_webmcp/${expected}"`);
+  });
+
+  it("keeps WIDGET_ASSET when only the TOML changes (the pin is unchanged)", async () => {
+    const pinPath = await writePin("pin.json", fakePin("widget A"));
+    const a = await runBuild(await writeToml("w-a.toml", MINIMAL), { widgetPinPath: pinPath });
+    const b = await runBuild(await writeToml("w-b.toml", MINIMAL.replace("Search the site.", "Search the whole site.")), {
+      widgetPinPath: pinPath,
+    });
+    // The TOML edit really changed the config and the bootstrap ...
+    expect(exportedConst(b.files["config.ts"]!, "CONFIG_HASH")).not.toBe(exportedConst(a.files["config.ts"]!, "CONFIG_HASH"));
+    expect(exportedConst(b.files["config.ts"]!, "BOOTSTRAP_ASSET")).not.toBe(
+      exportedConst(a.files["config.ts"]!, "BOOTSTRAP_ASSET"),
+    );
+    // ... but not the widget object, so no R2 re-upload is needed.
+    expect(exportedConst(b.files["config.ts"]!, "WIDGET_ASSET")).toBe(exportedConst(a.files["config.ts"]!, "WIDGET_ASSET"));
+    expect(exportedConst(b.files["config.ts"]!, "WIDGET_SRI")).toBe(exportedConst(a.files["config.ts"]!, "WIDGET_SRI"));
+  });
+
+  it("changes WIDGET_ASSET and WIDGET_SRI when the widget pin changes (same TOML)", async () => {
+    const toml = await writeToml("w-pin-change.toml", MINIMAL);
+    const a = await runBuild(toml, { widgetPinPath: await writePin("pin-a.json", fakePin("widget A")) });
+    const b = await runBuild(toml, { widgetPinPath: await writePin("pin-b.json", fakePin("widget B")) });
+    expect(exportedConst(b.files["config.ts"]!, "WIDGET_ASSET")).not.toBe(exportedConst(a.files["config.ts"]!, "WIDGET_ASSET"));
+    expect(exportedConst(b.files["config.ts"]!, "WIDGET_SRI")).not.toBe(exportedConst(a.files["config.ts"]!, "WIDGET_SRI"));
+  });
+
+  it("exports WIDGET_SRI as the complete sha384 SRI string from the pin", async () => {
+    const pin = fakePin("widget A");
+    const { files } = await runBuild(await writeToml("w-sri.toml", MINIMAL), {
+      widgetPinPath: await writePin("pin.json", pin),
+    });
+    const sri = exportedConst(files["config.ts"]!, "WIDGET_SRI");
+    expect(sri).toMatch(/^sha384-[A-Za-z0-9+/]{64}$/);
+    expect(sri).toBe(pin["served_sri"]);
+  });
+
+  it("puts integrity and crossorigin on the widget script tag when SRI is on", async () => {
+    const pin = fakePin("widget A");
+    const { files } = await runBuild(await writeToml("w-tag.toml", MINIMAL), {
+      widgetPinPath: await writePin("pin.json", pin),
+    });
+    const tag = widgetScriptTag(files["landing.html"]!)!;
+    expect(tag).toContain(`integrity="${pin["served_sri"]}"`);
+    expect(tag).toContain('crossorigin="anonymous"');
+    expect(tag).toContain("defer");
+  });
+
+  it("omits integrity from the widget tag and exports WIDGET_SRI null when subresource_integrity is off", async () => {
+    const off = `${MINIMAL}\n\n[features]\nsubresource_integrity = false\n`;
+    const pin = fakePin("widget A");
+    const { files } = await runBuild(await writeToml("w-sri-off.toml", off), {
+      widgetPinPath: await writePin("pin.json", pin),
+    });
+    expect(exportedConst(files["config.ts"]!, "WIDGET_SRI")).toBeNull();
+    const tag = widgetScriptTag(files["landing.html"]!)!;
+    expect(tag).not.toContain("integrity=");
+    expect(tag).not.toContain("crossorigin");
+    // The widget is still served, content-addressed.
+    expect(exportedConst(files["config.ts"]!, "WIDGET_ASSET")).toBe(`widget.${(pin["served_sha256"] as string).slice(0, 16)}.js`);
+  });
+
+  it("matches the committed vendor/webmcp/current.json when no pin path is given", async () => {
+    const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+    const committed = JSON.parse(await fs.readFile(path.join(repoRoot, "vendor", "webmcp", "current.json"), "utf8"));
+    const { files } = await runBuild(await writeToml("w-default.toml", MINIMAL));
+    expect(exportedConst(files["config.ts"]!, "WIDGET_ASSET")).toBe(`widget.${committed.served_sha256.slice(0, 16)}.js`);
+    expect(exportedConst(files["config.ts"]!, "WIDGET_SRI")).toBe(committed.served_sri);
+  });
+
+  describe("without a usable pin the widget is disabled everywhere, and the build still succeeds", () => {
+    const cases: Array<[string, Record<string, unknown> | null]> = [
+      ["an unpinned pin", { version: "unpinned", sha256: "" }],
+      ["an unpinned pin with no sha256 key", { version: "unpinned" }],
+      ["a legacy pin without the served fields", { version: "v0.1.13", sha256: "0".repeat(64) }],
+      ["a pin whose served_sha256 is malformed", fakePin("widget A", { served_sha256: "NOT-HEX" })],
+      ["a pin whose served_sri is malformed", fakePin("widget A", { served_sri: "sha384-short" })],
+      ["a missing pin file", null],
+    ];
+
+    for (const [label, pin] of cases) {
+      it(`handles ${label}`, async () => {
+        const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+        const pinPath = pin ? await writePin("pin.json", pin) : path.join(tmpDir, "does-not-exist.json");
+
+        const { files } = await runBuild(await writeToml("w-unpinned.toml", MINIMAL), { widgetPinPath: pinPath });
+
+        expect(exportedConst(files["config.ts"]!, "WIDGET_ASSET")).toBeNull();
+        expect(exportedConst(files["config.ts"]!, "WIDGET_SRI")).toBeNull();
+        expect(exportedConst(files["hash.ts"]!, "WIDGET_ASSET")).toBeNull();
+        // Empty {{widget_block}}, {{widget_enabled_js}} = false in both template uses.
+        expect(files["landing.html"]).not.toContain("webmcp-widget-mount");
+        expect(widgetScriptTag(files["landing.html"]!)).toBeUndefined();
+        expect(files["landing.html"]).toContain("var widgetEnabled = false;");
+        expect(files["landing.html"]).toContain("'fallback widget configured': false");
+        // And the operator is told why.
+        const messages = warn.mock.calls.map((c) => String(c[0]));
+        expect(messages.some((m) => /widget/i.test(m) && /update-widget/.test(m))).toBe(true);
+      });
+    }
+
+    it("stays quiet about a missing pin when fallback_widget is off", async () => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const off = `${MINIMAL}\n\n[features]\nfallback_widget = false\n`;
+      const pinPath = await writePin("pin.json", { version: "unpinned", sha256: "" });
+
+      const { files } = await runBuild(await writeToml("w-off.toml", off), { widgetPinPath: pinPath });
+
+      expect(files["landing.html"]).not.toContain("webmcp-widget-mount");
+      expect(files["landing.html"]).toContain("var widgetEnabled = false;");
+      expect(warn.mock.calls.map((c) => String(c[0])).filter((m) => /widget/i.test(m))).toEqual([]);
+    });
+
+    it("fails the build on a pin file that is not valid JSON", async () => {
+      const bad = path.join(tmpDir, "bad-pin.json");
+      await fs.writeFile(bad, "{ not json");
+      await expect(runBuild(await writeToml("w-bad.toml", MINIMAL), { widgetPinPath: bad })).rejects.toThrow(/current\.json|pin/i);
+    });
+  });
+
+  it("warns, but still enables the widget, when the preamble no longer matches the pin", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const pin = fakePin("widget A", { preamble_sha256: sha256("an older preamble") });
+
+    const { files } = await runBuild(await writeToml("w-preamble.toml", MINIMAL), {
+      widgetPinPath: await writePin("pin.json", pin),
+    });
+
+    expect(exportedConst(files["config.ts"]!, "WIDGET_ASSET")).toBe(`widget.${(pin["served_sha256"] as string).slice(0, 16)}.js`);
+    expect(files["landing.html"]).toContain("webmcp-widget-mount");
+    const messages = warn.mock.calls.map((c) => String(c[0]));
+    expect(messages.some((m) => /preamble/i.test(m) && /update-widget/.test(m))).toBe(true);
+  });
+
+  it("does not warn when the preamble matches the pin", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    await runBuild(await writeToml("w-ok.toml", MINIMAL), {
+      widgetPinPath: await writePin("pin.json", fakePin("widget A")),
+    });
+    expect(warn.mock.calls.map((c) => String(c[0])).filter((m) => /widget|preamble/i.test(m))).toEqual([]);
   });
 });

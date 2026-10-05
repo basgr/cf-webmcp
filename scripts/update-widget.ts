@@ -2,22 +2,35 @@
  * Pin a release of jasonjmcghee/WebMCP into vendor/webmcp/<version>/.
  *
  * Usage:
- *   npm run update-widget -- --version=v0.1.5 --sha256=<expected>
+ *   npm run update-widget -- --version=v0.1.5 --sha256=<expected> [--release-url=https://...]
+ *
+ * The default download URL is the upstream release asset webmcp.js. Releases
+ * without that asset (v0.1.13 is one) need --release-url, e.g.
+ * https://raw.githubusercontent.com/jasonjmcghee/WebMCP/v0.1.13/src/webmcp.js
  *
  * Writes:
  *   vendor/webmcp/<version>/webmcp.js
  *   vendor/webmcp/<version>/webmcp.js.sha256
  *   vendor/webmcp/<version>/LICENSE  (a stub, replaced by the real one when available)
+ *   vendor/webmcp/current.json       (the pin, see below)
  *
  * Verifies the downloaded file's sha256 matches the expected value. Fails the
- * pin if it does not. The MIT LICENSE is stored alongside and prepended to the
- * served JS at request time.
+ * pin if it does not.
+ *
+ * current.json records the raw sha256 plus what a browser will actually receive,
+ * which is the MIT preamble (src/widget-preamble.ts) followed by the file bytes:
+ *   served_sha256    hex sha256 of preamble + file bytes (names the R2 object and the URL)
+ *   served_sri       "sha384-" + base64(sha384(preamble + file bytes)) (the <script integrity>)
+ *   preamble_sha256  hex sha256 of the preamble the two values above were computed with
+ * `npm run upload-widget` uploads that composed object; the build reads only this
+ * file. Re-run this script whenever the preamble text changes.
  */
 
-import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { LICENSE_PREAMBLE } from "../src/widget-preamble.js";
+import { makePin, sha256Hex } from "./widget-pin.js";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -57,7 +70,7 @@ async function main(): Promise<void> {
   if (!res.ok) throw new Error(`download failed: ${res.status} ${res.statusText}`);
   const buf = new Uint8Array(await res.arrayBuffer());
 
-  const actual = createHash("sha256").update(buf).digest("hex");
+  const actual = sha256Hex(buf);
   if (actual.toLowerCase() !== args.sha256.toLowerCase()) {
     throw new Error(`sha256 mismatch: expected ${args.sha256}, got ${actual}`);
   }
@@ -78,20 +91,27 @@ See https://github.com/jasonjmcghee/WebMCP/blob/main/LICENSE
     await fs.writeFile(licensePath, licenseStub);
   }
 
-  // Write/update a pointer file at vendor/webmcp/current.json so the build
-  // pipeline knows which version to ship.
-  const pointer = { version: args.version, sha256: actual };
+  // Write/update the pin at vendor/webmcp/current.json: the build names the
+  // asset and the SRI hash from it, upload-widget uploads the object it names.
+  const pin = makePin(args.version, buf, LICENSE_PREAMBLE);
   await fs.writeFile(
     path.join(ROOT, "vendor", "webmcp", "current.json"),
-    JSON.stringify(pointer, null, 2) + "\n",
+    JSON.stringify(pin, null, 2) + "\n",
   );
 
   // eslint-disable-next-line no-console
-  console.log(`[update-widget] OK, pinned ${args.version} (${actual.slice(0, 12)}...)`);
+  console.log(
+    `[update-widget] OK, pinned ${args.version} (${actual.slice(0, 12)}...), served ${pin.served_sha256.slice(0, 16)}. ` +
+      `Next: npm run upload-widget, then deploy.`,
+  );
 }
 
-main().catch((err) => {
-  // eslint-disable-next-line no-console
-  console.error(err instanceof Error ? err.message : String(err));
-  process.exit(1);
-});
+// CLI entry. Guarded so the module can be imported without side effects.
+const thisFile = fileURLToPath(import.meta.url);
+if (process.argv[1] && path.resolve(process.argv[1]) === thisFile) {
+  main().catch((err) => {
+    // eslint-disable-next-line no-console
+    console.error(err instanceof Error ? err.message : String(err));
+    process.exit(1);
+  });
+}

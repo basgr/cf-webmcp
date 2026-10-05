@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { healthResponse } from "./health";
 import type { Config } from "../config-types";
 
@@ -58,7 +58,7 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
 describe("healthResponse", () => {
   it("returns the build-time deployed_at, not an epoch timestamp", async () => {
     const buildTime = "2026-05-13T20:00:00.000Z";
-    const res = healthResponse(new Request("https://example.com/_webmcp/health"), makeConfig(), {
+    const res = await healthResponse(new Request("https://example.com/_webmcp/health"), makeConfig(), {
       configHash: "abc12345",
       schemaVersion: 1,
       deployedAt: buildTime,
@@ -70,7 +70,7 @@ describe("healthResponse", () => {
 
   it("surfaces a preflight result when provided", async () => {
     const ranAt = "2026-05-13T19:55:00.000Z";
-    const res = healthResponse(new Request("https://example.com/_webmcp/health"), makeConfig(), {
+    const res = await healthResponse(new Request("https://example.com/_webmcp/health"), makeConfig(), {
       configHash: "abc12345",
       schemaVersion: 1,
       deployedAt: "2026-05-13T20:00:00.000Z",
@@ -83,7 +83,7 @@ describe("healthResponse", () => {
   });
 
   it("defaults preflight.ran_at to null when no preflight result is provided", async () => {
-    const res = healthResponse(new Request("https://example.com/_webmcp/health"), makeConfig(), {
+    const res = await healthResponse(new Request("https://example.com/_webmcp/health"), makeConfig(), {
       configHash: "abc12345",
       schemaVersion: 1,
       deployedAt: "2026-05-13T20:00:00.000Z",
@@ -92,15 +92,71 @@ describe("healthResponse", () => {
     expect(body.preflight.ran_at).toBeNull();
   });
 
+  describe("widget_asset_present", () => {
+    const opts = { configHash: "abc12345", schemaVersion: 1, deployedAt: "2026-05-13T20:00:00.000Z" };
+    const req = () => new Request("https://example.com/_webmcp/health");
+
+    function headBucket(present: boolean) {
+      const head = vi.fn(async (key: string) => (present ? ({ key } as unknown as R2Object) : null));
+      return { head } satisfies Pick<R2Bucket, "head">;
+    }
+
+    it("is true when the widget object exists in the bucket", async () => {
+      const bucket = headBucket(true);
+      const res = await healthResponse(req(), makeConfig(), { ...opts, widgetAsset: "widget.0123456789abcdef.js", bucket });
+      const body = (await res.json()) as { widget_asset_present: boolean | null };
+      expect(body.widget_asset_present).toBe(true);
+      expect(bucket.head).toHaveBeenCalledWith("widget.0123456789abcdef.js");
+    });
+
+    it("is false when the widget object is missing from the bucket", async () => {
+      const bucket = headBucket(false);
+      const res = await healthResponse(req(), makeConfig(), { ...opts, widgetAsset: "widget.0123456789abcdef.js", bucket });
+      const body = (await res.json()) as { widget_asset_present: boolean | null };
+      expect(body.widget_asset_present).toBe(false);
+    });
+
+    it("is null and never calls head when the build has no widget asset", async () => {
+      const bucket = headBucket(true);
+      const res = await healthResponse(req(), makeConfig(), { ...opts, widgetAsset: null, bucket });
+      const body = (await res.json()) as { widget_asset_present: boolean | null };
+      expect(body.widget_asset_present).toBeNull();
+      expect(bucket.head).not.toHaveBeenCalled();
+    });
+
+    it("is null and never calls head when fallback_widget is off", async () => {
+      const bucket = headBucket(true);
+      const config = makeConfig({ features: { ...makeConfig().features, fallback_widget: false } });
+      const res = await healthResponse(req(), config, { ...opts, widgetAsset: "widget.0123456789abcdef.js", bucket });
+      const body = (await res.json()) as { widget_asset_present: boolean | null };
+      expect(body.widget_asset_present).toBeNull();
+      expect(bucket.head).not.toHaveBeenCalled();
+    });
+
+    it("is null when no bucket binding is available", async () => {
+      const res = await healthResponse(req(), makeConfig(), { ...opts, widgetAsset: "widget.0123456789abcdef.js" });
+      const body = (await res.json()) as { widget_asset_present: boolean | null };
+      expect(body.widget_asset_present).toBeNull();
+    });
+
+    it("is null (unknown) rather than failing the health check when the bucket probe throws", async () => {
+      const bucket = { head: vi.fn(async () => { throw new Error("r2 unavailable"); }) } satisfies Pick<R2Bucket, "head">;
+      const res = await healthResponse(req(), makeConfig(), { ...opts, widgetAsset: "widget.0123456789abcdef.js", bucket });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { widget_asset_present: boolean | null };
+      expect(body.widget_asset_present).toBeNull();
+    });
+  });
+
   it("requires bearer token when health.token is set", async () => {
     const config = makeConfig({ health: { public: true, token: "s3cret" } });
-    const unauth = healthResponse(new Request("https://example.com/_webmcp/health"), config, {
+    const unauth = await healthResponse(new Request("https://example.com/_webmcp/health"), config, {
       configHash: "abc12345",
       schemaVersion: 1,
       deployedAt: "2026-05-13T20:00:00.000Z",
     });
     expect(unauth.status).toBe(401);
-    const authed = healthResponse(
+    const authed = await healthResponse(
       new Request("https://example.com/_webmcp/health", { headers: { authorization: "Bearer s3cret" } }),
       config,
       { configHash: "abc12345", schemaVersion: 1, deployedAt: "2026-05-13T20:00:00.000Z" },

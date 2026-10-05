@@ -23,6 +23,7 @@ import { bootstrapResponse } from "./routes/bootstrap";
 import { execResponse } from "./routes/exec";
 import { healthResponse } from "./routes/health";
 import { widgetResponse } from "./routes/widget";
+import { assetNotFoundResponse } from "./routes/asset-not-found";
 import { llmsTxtResponse } from "./routes/llms-txt";
 import { robotsTxtResponse } from "./routes/robots-txt";
 import { agentsMdResponse, agentsMdRedirect } from "./routes/agents-md";
@@ -47,6 +48,7 @@ const CLASSIFICATION: Record<RouteMatch["kind"], Classification> = {
   landing_redirect: "exempt",                   // /mcp at apex
   bootstrap: "noindex_required",                // /_webmcp/bootstrap.<hash>.js
   widget: "noindex_required",                   // /_webmcp/widget.<hash>.js
+  asset_not_found: "noindex_required",          // /_webmcp/bootstrap.<stale>.js, /_webmcp/widget.<stale>.js (404)
   exec: "noindex_required",                     // /_webmcp/exec/<tool>
   health: "noindex_required",                   // /_webmcp/health
   llms_txt: "exempt",                           // /llms.txt at apex (memory rule)
@@ -71,6 +73,7 @@ function samplePath(kind: RouteMatch["kind"], config: Config): string {
     case "landing_redirect": return config.webmcp_landing.path;
     case "bootstrap": return `${config.paths.namespace}/bootstrap.abc12345.js`;
     case "widget": return `${config.paths.namespace}/widget.abc12345.js`;
+    case "asset_not_found": return `${config.paths.namespace}/bootstrap.stale0000000000.js`;
     case "exec": return `${config.paths.namespace}/exec/${config.tools[0]!.name}`;
     case "health": return `${config.paths.namespace}/health`;
     case "llms_txt": return config.llms_txt.path;
@@ -184,6 +187,8 @@ async function responseFor(kind: RouteMatch["kind"], config: Config): Promise<Re
         fakeBucket("widget content"),
         "widget.abc12345.js",
       );
+    case "asset_not_found":
+      return assetNotFoundResponse();
     case "exec":
       return execResponse(
         new Request("https://example.com/_webmcp/exec/search_pages", { method: "GET" }),

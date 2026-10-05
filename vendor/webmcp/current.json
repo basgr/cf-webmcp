@@ -1,4 +1,7 @@
 {
   "version": "v0.1.13",
-  "sha256": "0ace593f0bb4f785f3f04370194dce65d38da55d309b19f82cd0142c51cf0636"
+  "sha256": "0ace593f0bb4f785f3f04370194dce65d38da55d309b19f82cd0142c51cf0636",
+  "served_sha256": "a832686314ccfa2b8908205ad271e7f5ddbc0ef5eaf8c338ac9a6797e208a58d",
+  "served_sri": "sha384-IKV36q2RhDfzMicJzN14iHEj3UYGsba9laeCCWSjDD2zcSPbaTmQJk3kmG6x8vVJ",
+  "preamble_sha256": "d36dd472a7fd1f4b4f72be0fbb7238a34dfada7552d07d5d997056ac8d61efa5"
 }

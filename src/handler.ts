@@ -15,6 +15,7 @@ import { matchRoute } from "./router";
 import { manifestResponse, manifestRedirect } from "./routes/manifest";
 import { landingRedirect, landingResponse } from "./routes/landing";
 import { bootstrapResponse } from "./routes/bootstrap";
+import { assetNotFoundResponse } from "./routes/asset-not-found";
 import { execResponse } from "./routes/exec";
 import { healthResponse } from "./routes/health";
 import { widgetResponse } from "./routes/widget";
@@ -53,8 +54,13 @@ export interface HandlerPreflight {
 /** Build-time constants exported by src/generated/config.ts, besides `config` itself. */
 export interface HandlerMeta {
   CONFIG_HASH: string;
+  /** Content-addressed bootstrap file name: bootstrap.<sha256(body) first 16 hex>.js. */
   BOOTSTRAP_ASSET: string;
-  WIDGET_ASSET: string;
+  /**
+   * Content-addressed widget R2 key: widget.<served_sha256 first 16 hex>.js, from
+   * vendor/webmcp/current.json. null when the build ships no widget (no usable pin).
+   */
+  WIDGET_ASSET: string | null;
   /**
    * Build-time UTC timestamp. We cannot call `new Date().toISOString()` at
    * module-init because Cloudflare Workers freeze Date.now() to 0 during
@@ -94,7 +100,12 @@ export function createHandler(deps: HandlerDeps): Required<Pick<ExportedHandler<
         case "bootstrap":
           return handleHeadable(request, bootstrapResponse(assets.bootstrapJs, config));
         case "widget":
+          // matchRoute only returns "widget" for a non-null WIDGET_ASSET; the
+          // guard keeps the type honest and fails closed if that ever changes.
+          if (meta.WIDGET_ASSET === null) return handleHeadable(request, assetNotFoundResponse());
           return widgetResponse(request, config, env.CF_WEBMCP_ASSETS, meta.WIDGET_ASSET);
+        case "asset_not_found":
+          return handleHeadable(request, assetNotFoundResponse());
         case "exec":
           return execResponse(
             request,
@@ -109,6 +120,8 @@ export function createHandler(deps: HandlerDeps): Required<Pick<ExportedHandler<
             schemaVersion: config.schema_version,
             deployedAt: meta.BUILD_AT,
             preflight: meta.PREFLIGHT,
+            widgetAsset: meta.WIDGET_ASSET,
+            bucket: env.CF_WEBMCP_ASSETS,
           });
         case "llms_txt":
           return llmsTxtResponse(request, config, (u) => proxyToOrigin(u, env), meta.LLMS_TXT_TOKEN_HINTS);

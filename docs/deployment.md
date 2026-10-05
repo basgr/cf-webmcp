@@ -88,6 +88,16 @@ npm run upload-widget   # after wrangler.toml has the R2 binding configured
 
 The sha256 is verified during download. The MIT LICENSE is preserved alongside.
 
+`update-widget` writes `vendor/webmcp/current.json`: the version, the sha256 of the upstream file, and what visitors will actually receive (`served_sha256`, `served_sri`, `preamble_sha256`). The R2 object is one composed file, the MIT license preamble followed by the pinned `webmcp.js`, stored under `widget.<first 16 hex of served_sha256>.js`. The Worker serves it as-is, and the landing page's `<script>` carries `integrity="<served_sri>"`.
+
+**Run `upload-widget` BEFORE you deploy** whenever the pin changes. The new Worker advertises the new widget URL and answers 503 for it until the object exists; `GET /_webmcp/health` shows `widget_asset_present`. `upload-widget` verifies the vendored file against `current.json` first and aborts on any mismatch. Do not upload `webmcp.js` by hand with `wrangler r2 object put`: it lacks the preamble, so browsers block the script with an SRI mismatch.
+
+The vendored `webmcp.js` is gitignored. On a fresh checkout, or after pulling a release that changes the pin, run `update-widget` with the version and sha256 from `current.json` first; it re-downloads and verifies the file. The default download URL is the upstream release asset `webmcp.js`; a release without that asset (v0.1.13 is one) needs `--release-url`, for v0.1.13 `--release-url=https://raw.githubusercontent.com/jasonjmcghee/WebMCP/v0.1.13/src/webmcp.js`. The build itself reads only `current.json`, so CI builds work without the file. If `current.json` has no usable pin (`"version": "unpinned"` or no `served_*` fields), the build still succeeds but warns and ships with the widget disabled.
+
+Wrangler 4 targets *local* storage when `r2 object put` gets neither `--local` nor `--remote`. `upload-widget` passes `--remote` explicitly so deploy uploads reach the real bucket, and `npm run upload-widget -- --local` writes to the local R2 state that `wrangler dev` reads.
+
+The widget object is keyed by content, not by config hash, so editing your TOML never requires a re-upload. Objects for earlier pins, and any `widget.<8-hex>.js` object named after a config hash by v0.5.x and earlier, are no longer referenced and can be deleted: `wrangler r2 object delete <bucket>/widget.<hash>.js`.
+
 ## Deploy
 
 ```bash
@@ -96,7 +106,7 @@ npm run deploy
 
 This chains `npm run build` (compiles TOML to TypeScript modules) and `wrangler deploy`. The first deploy provisions the Worker and binds the R2 bucket if configured. Subsequent deploys re-upload the bundle and rotate the `CONFIG_HASH`.
 
-After deploy, hit `https://yourdomain.com/_webmcp/health` to confirm the Worker is alive and the config hash matches.
+After deploy, hit `https://yourdomain.com/_webmcp/health` to confirm the Worker is alive and the config hash matches. With `fallback_widget = true`, `widget_asset_present` should be `true`; `false` means the widget object is missing from R2 (run `npm run upload-widget`), and `null` means the widget is not applicable or could not be checked (feature off, no pinned widget in this build, no R2 binding).
 
 ## Origin and allowed_origins safety
 
@@ -108,13 +118,15 @@ After deploy, hit `https://yourdomain.com/_webmcp/health` to confirm the Worker 
 
 ## Subresource Integrity (SRI) on the injected bootstrap
 
-Since v0.3.6 the injected `<script src="/_webmcp/bootstrap.<hash>.js" defer>` tag carries `integrity="sha384-..."` and `crossorigin="anonymous"`. Browsers refuse to execute the bootstrap if its body has been substituted between server and client (compromised CDN node, intermediary cache poisoning). Toggle via `[features].subresource_integrity` (default `true`).
+Since v0.3.6 the injected `<script src="/_webmcp/bootstrap.<hash>.js" defer>` tag carries `integrity="sha384-..."` and `crossorigin="anonymous"`. Browsers refuse to execute the bootstrap if its body has been substituted between server and client (compromised CDN node, intermediary cache poisoning). The fallback widget's `<script>` on the landing page carries the same attributes. Toggle via `[features].subresource_integrity` (default `true`).
+
+The URL and the hash always describe the same bytes: `<hash>` in `bootstrap.<hash>.js` is the first 16 hex of the sha256 of the bootstrap body, so a browser that cached an older bootstrap under its immutable URL can never be handed a newer body (and an SRI failure) at that URL.
 
 If the origin publishes a Content Security Policy with `script-src` restrictions, three cases:
 
 - **`script-src 'self'`** (or anything that lists same-origin) - works without changes; the bootstrap is same-origin so the source-list match covers it. SRI on the tag is independent of CSP and continues to verify the body.
 - **`script-src 'strict-dynamic' ...`** (nonce/hash-propagating policy) - the injected `<script src=...>` tag is parser-inserted, not loaded by an already-trusted script, so `'strict-dynamic'` will NOT auto-trust it. Either pin the bootstrap in `script-src` with its SRI hash (see next bullet), or add `nonce-<value>` to the policy and stamp a matching `nonce` on the tag (cf-webmcp does not emit nonces today, so the hash route is simpler).
-- **`script-src 'sha384-X'`** (explicit hash allowlist) - add the bootstrap hash from `src/generated/config.ts::BOOTSTRAP_SRI` to your CSP's `script-src` list. The CSP hash-source for an external script and the SRI `integrity` value both hash the response body, so the same `sha384-X` string serves both. It rotates whenever the bootstrap rotates (any TOML change that affects the bootstrap output).
+- **`script-src 'sha384-X'`** (explicit hash allowlist) - add the bootstrap hash from `src/generated/config.ts::BOOTSTRAP_SRI` to your CSP's `script-src` list. The CSP hash-source for an external script and the SRI `integrity` value both hash the response body, so the same `sha384-X` string serves both. **The bootstrap URL and its SRI hash rotate whenever the bootstrap bytes change**: any change to the resolved config (the file embeds the config hash, so every such change moves it), and also a cf-webmcp upgrade whose generated bootstrap differs, even with an unchanged TOML. Update `script-src` with each deploy that changes `BOOTSTRAP_SRI`. The widget has its own hash, `WIDGET_SRI` in the same file; it changes only when the widget pin or the license preamble changes, not when you edit the TOML.
 
 Note: `'unsafe-inline'` has no effect on the bootstrap because the tag uses `src=...` rather than an inline body.
 
@@ -155,10 +167,10 @@ Content-use signals themselves (`Content-Signal:`, the `use=` parameter) remain 
 The Worker uses three cache tiers:
 
 - Deploy-time constants (manifest, landing, llms.txt, robots.txt) - `max-age=300, s-maxage=86400, stale-while-revalidate=604800`, plus `ETag: "<config_hash>"`. Deploy bumps the hash; clients revalidate cheaply.
-- Versioned immutable assets (bootstrap.<hash>.js, widget.<hash>.js) - `max-age=31536000, immutable`. New deploys ship at a new URL; old versions age out.
+- Content-addressed immutable assets (bootstrap.<hash>.js, widget.<hash>.js) - `max-age=31536000, immutable`. `<hash>` is derived from the served bytes (bootstrap: sha256 of the script; widget: sha256 of the R2 object, from `vendor/webmcp/current.json`), so the URL changes exactly when the bytes change and each URL is safe to cache forever. A request for any other `bootstrap.<x>.js` or `widget.<x>.js` under the namespace (a URL from a previous deploy) gets `404` with `Cache-Control: no-store` and `X-Robots-Tag: noindex`, and is never proxied to origin.
 - Tool executor responses - per-tool TTL, cache key derived from `tool_name + sha256(body)`.
 
-No manual cache purge is needed between deploys. CF edge caches roll forward automatically as the hash changes.
+No manual cache purge is needed for the Worker's own assets between deploys; CF edge caches roll forward automatically as the hashes change. One exception is HTML that a cache in front of the Worker or an origin page cache keeps: such a page still points at the previous bootstrap URL, which now answers 404, so tools are not registered on that view until the page is refreshed. Purge cached HTML after a deploy that rotates the bootstrap, or keep HTML TTLs short. The same applies briefly to the `/mcp` landing page after a widget pin change: its `stale-while-revalidate` window can serve one view that still references the previous widget URL; the next load is correct.
 
 ## Costs
 

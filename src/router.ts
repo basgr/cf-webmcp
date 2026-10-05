@@ -13,6 +13,7 @@ export interface RouteMatch {
     | "landing_redirect"
     | "bootstrap"
     | "widget"
+    | "asset_not_found"
     | "exec"
     | "health"
     | "llms_txt"
@@ -29,7 +30,26 @@ export interface RouteMatch {
   toolName?: string;
 }
 
-export function matchRoute(config: Config, url: URL, bootstrapAsset: string, widgetAsset: string): RouteMatch {
+/**
+ * Content-addressed asset names under the namespace: `bootstrap.<x>.js` and
+ * `widget.<x>.js`. <x> is a single path segment, so nested paths and the bare
+ * `bootstrap.js` never match.
+ */
+const BOOTSTRAP_ASSET_NAME = /^bootstrap\.[^/]+\.js$/;
+const WIDGET_ASSET_NAME = /^widget\.[^/]+\.js$/;
+
+/**
+ * `widgetAsset` is null when this build ships no widget (feature pin missing).
+ * A request for any other `bootstrap.<x>.js` / `widget.<x>.js` under the
+ * namespace is a stale or unknown asset URL: it gets `asset_not_found` and is
+ * never proxied to origin.
+ */
+export function matchRoute(
+  config: Config,
+  url: URL,
+  bootstrapAsset: string,
+  widgetAsset: string | null,
+): RouteMatch {
   const pathname = url.pathname;
   const ns = config.paths.namespace;
 
@@ -52,14 +72,19 @@ export function matchRoute(config: Config, url: URL, bootstrapAsset: string, wid
     }
   }
 
-  // Bootstrap
-  if (pathname === `${ns}/${bootstrapAsset}`) {
-    return { kind: "bootstrap" };
-  }
-
-  // Widget
-  if (config.features.fallback_widget && pathname === `${ns}/${widgetAsset}`) {
-    return { kind: "widget" };
+  // Content-addressed assets: the current bootstrap and widget serve; any other
+  // name of the same shape is a stale URL (an old page still pointing at a
+  // previous build, a cached HTML shell) and answers 404 rather than reaching origin.
+  const assetPrefix = `${ns}/`;
+  if (pathname.startsWith(assetPrefix)) {
+    const name = pathname.slice(assetPrefix.length);
+    if (name === bootstrapAsset) return { kind: "bootstrap" };
+    if (config.features.fallback_widget && widgetAsset !== null && name === widgetAsset) {
+      return { kind: "widget" };
+    }
+    if (BOOTSTRAP_ASSET_NAME.test(name) || WIDGET_ASSET_NAME.test(name)) {
+      return { kind: "asset_not_found" };
+    }
   }
 
   // Exec

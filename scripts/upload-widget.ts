@@ -1,25 +1,128 @@
 /**
- * Upload the currently-pinned widget to the R2 bucket configured in wrangler.toml.
- * Run once after `npm run update-widget` and before `wrangler deploy`.
+ * Upload the pinned widget to the R2 bucket configured in wrangler.toml.
  *
- * Reads the pin from vendor/webmcp/current.json, reads src/generated/hash.ts
- * for the widget asset name (widget.<config_hash>.js), and uploads.
+ * Usage:
+ *   npm run upload-widget            # remote bucket (deploys)
+ *   npm run upload-widget -- --local # local R2 state, so `wrangler dev` sees it
+ *
+ * Run after `npm run update-widget` (and after any change of the pin) and BEFORE
+ * `wrangler deploy`: the deployed Worker advertises widget.<hash>.js on the
+ * landing page and answers 503 until that object exists.
+ *
+ * Everything comes from vendor/webmcp/current.json, not from generated output:
+ *   - the object is ONE composed file, LICENSE_PREAMBLE + the vendored webmcp.js bytes;
+ *   - its key is widget.<first 16 hex of served_sha256>.js;
+ *   - before uploading, the raw file and the composed bytes are verified against
+ *     the pin (sha256, served_sha256, served_sri). A mismatch aborts the upload.
+ * The Worker serves the object as-is, so the SRI hash on the landing page's
+ * <script> covers exactly what is stored.
+ *
+ * Do not `wrangler r2 object put` the plain webmcp.js by hand: it lacks the
+ * preamble, so browsers block the script with an SRI mismatch.
  */
 
 import { promises as fs } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
+import { LICENSE_PREAMBLE } from "../src/widget-preamble.js";
+import {
+  composeWidget,
+  sha256Hex,
+  sriSha384,
+  widgetAssetName,
+  type WidgetPin,
+} from "./widget-pin.js";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
-interface Pin {
-  version: string;
-  sha256: string;
+/**
+ * Check the vendored bytes against the pin and return the composed object to
+ * upload. Throws unless all of these hold:
+ *   sha256(raw)      == pin.sha256
+ *   sha256(composed) == pin.served_sha256
+ *   sha384(composed) == pin.served_sri
+ * where composed = preamble + raw. Pure: no file or network access.
+ */
+export function verifyComposedWidget(raw: Uint8Array, preamble: string, pin: WidgetPin): Uint8Array {
+  if (!pin.served_sha256 || !pin.served_sri) {
+    throw new Error(
+      "[upload-widget] vendor/webmcp/current.json has no served_sha256/served_sri; run `npm run update-widget` to record them",
+    );
+  }
+  const rawHash = sha256Hex(raw);
+  if (rawHash !== pin.sha256.toLowerCase()) {
+    throw new Error(
+      `[upload-widget] vendored webmcp.js sha256 ${rawHash} does not match the pinned sha256 ${pin.sha256}; run \`npm run update-widget\` to re-pin`,
+    );
+  }
+  const composed = composeWidget(raw, preamble);
+  const composedHash = sha256Hex(composed);
+  if (composedHash !== pin.served_sha256) {
+    throw new Error(
+      `[upload-widget] preamble + widget sha256 ${composedHash} does not match the pinned served_sha256 ${pin.served_sha256} (the license preamble changed since the pin was written); run \`npm run update-widget\``,
+    );
+  }
+  const composedSri = sriSha384(composed);
+  if (composedSri !== pin.served_sri) {
+    throw new Error(
+      `[upload-widget] preamble + widget SRI ${composedSri} does not match the pinned served_sri ${pin.served_sri}; run \`npm run update-widget\``,
+    );
+  }
+  return composed;
+}
+
+/** R2 object key for the pin, derived from the pin alone. */
+export function objectKeyFor(pin: WidgetPin): string {
+  if (!pin.served_sha256) {
+    throw new Error(
+      "[upload-widget] vendor/webmcp/current.json has no served_sha256; run `npm run update-widget` to record it",
+    );
+  }
+  return widgetAssetName(pin.served_sha256);
+}
+
+export async function readVendoredWidget(filePath: string): Promise<Uint8Array> {
+  try {
+    return new Uint8Array(await fs.readFile(filePath));
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+      throw new Error(`[upload-widget] vendored widget missing, run update-widget (expected ${filePath})`);
+    }
+    throw err;
+  }
+}
+
+/**
+ * Arguments for `wrangler r2 object put`. Wrangler 4 defaults `r2 object` to
+ * LOCAL storage when neither flag is given, so the target is always explicit:
+ * a deploy upload must say --remote or it would never reach the real bucket.
+ */
+export function wranglerPutArgs(opts: { bucket: string; key: string; file: string; local: boolean }): string[] {
+  return [
+    "r2",
+    "object",
+    "put",
+    `${opts.bucket}/${opts.key}`,
+    "--file",
+    opts.file,
+    "--content-type",
+    "application/javascript",
+    opts.local ? "--local" : "--remote",
+  ];
+}
+
+/** Quote one argument for the shell spawnSync starts (needed for wrangler.cmd on Windows). */
+export function shellQuote(arg: string): string {
+  if (/^[A-Za-z0-9_@%+=:,./\\-]+$/.test(arg)) return arg;
+  return `"${arg.replace(/"/g, '\\"')}"`;
 }
 
 async function main(): Promise<void> {
-  const pin: Pin = JSON.parse(
+  const local = process.argv.slice(2).includes("--local");
+
+  const pin: WidgetPin = JSON.parse(
     await fs.readFile(path.join(ROOT, "vendor", "webmcp", "current.json"), "utf8"),
   );
   if (pin.version === "unpinned") {
@@ -27,13 +130,9 @@ async function main(): Promise<void> {
   }
 
   const filePath = path.join(ROOT, "vendor", "webmcp", pin.version, "webmcp.js");
-  await fs.access(filePath);
-
-  // Read generated asset name.
-  const hashTs = await fs.readFile(path.join(ROOT, "src", "generated", "hash.ts"), "utf8");
-  const match = hashTs.match(/WIDGET_ASSET\s*=\s*"([^"]+)"/);
-  if (!match || !match[1]) throw new Error("[upload-widget] WIDGET_ASSET not found in generated/hash.ts");
-  const objectKey = match[1];
+  const raw = await readVendoredWidget(filePath);
+  const composed = verifyComposedWidget(raw, LICENSE_PREAMBLE, pin);
+  const objectKey = objectKeyFor(pin);
 
   // Read bucket name from wrangler.toml. Honor CF_WEBMCP_WRANGLER_CONFIG so
   // out-of-tree deploys (the publisher's own repo) can point at their own file.
@@ -47,18 +146,31 @@ async function main(): Promise<void> {
   }
   const bucket = bucketMatch[1];
 
-  // eslint-disable-next-line no-console
-  console.log(`[upload-widget] uploading ${pin.version}/webmcp.js to ${bucket}/${objectKey}`);
-  const result = spawnSync(
-    "wrangler",
-    ["r2", "object", "put", `${bucket}/${objectKey}`, "--file", filePath, "--content-type", "application/javascript"],
-    { stdio: "inherit", shell: true },
-  );
-  if (result.status !== 0) throw new Error("wrangler r2 object put failed");
+  // wrangler uploads from a file, so write the verified composed bytes to a temp one.
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "cf-webmcp-widget-"));
+  try {
+    const tmpFile = path.join(tmpDir, objectKey);
+    await fs.writeFile(tmpFile, composed);
+
+    // eslint-disable-next-line no-console
+    console.log(
+      `[upload-widget] uploading ${pin.version} (license preamble + webmcp.js, ${composed.length} bytes) to ${bucket}/${objectKey} (${local ? "local" : "remote"})`,
+    );
+    const args = wranglerPutArgs({ bucket, key: objectKey, file: tmpFile, local });
+    // One quoted command string: wrangler resolves to wrangler.cmd on Windows, which needs a shell.
+    const result = spawnSync(["wrangler", ...args.map(shellQuote)].join(" "), { stdio: "inherit", shell: true });
+    if (result.status !== 0) throw new Error("wrangler r2 object put failed");
+  } finally {
+    await fs.rm(tmpDir, { recursive: true, force: true });
+  }
 }
 
-main().catch((err) => {
-  // eslint-disable-next-line no-console
-  console.error(err instanceof Error ? err.message : String(err));
-  process.exit(1);
-});
+// CLI entry. Guarded so the tests can import the pure functions above.
+const thisFile = fileURLToPath(import.meta.url);
+if (process.argv[1] && path.resolve(process.argv[1]) === thisFile) {
+  main().catch((err) => {
+    // eslint-disable-next-line no-console
+    console.error(err instanceof Error ? err.message : String(err));
+    process.exit(1);
+  });
+}

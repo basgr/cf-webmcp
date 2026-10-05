@@ -46,7 +46,7 @@ With both processes running:
 - `http://localhost:8787/` - proxied index.html with the bootstrapper injected. View source to see `<link rel="webmcp">` in `<head>` and `<script src="/_webmcp/bootstrap.<hash>.js" defer>` before `</body>`. Response also has a `Link: ...; rel="webmcp"` header.
 - `http://localhost:8787/.well-known/webmcp` - the tool catalogue manifest.
 - `http://localhost:8787/mcp` - the auto-generated pairing/landing page.
-- `http://localhost:8787/_webmcp/bootstrap.<hash>.js` - the registration script that runs in agent-driven browsers. Hash matches `config_hash` in the manifest.
+- `http://localhost:8787/_webmcp/bootstrap.<hash>.js` - the registration script that runs in agent-driven browsers. `<hash>` is derived from the script's own bytes (first 16 hex of its sha256); the full URL is in the manifest's `links.bootstrap`. Any other `bootstrap.<x>.js` path answers 404.
 - `http://localhost:8787/llms.txt` - merged version of the origin's llms.txt with the WebMCP block appended between markers.
 - `http://localhost:8787/robots.txt` - merged version with `Disallow: /_webmcp/exec/` added.
 - `http://localhost:8787/_webmcp/health` - operational health JSON.

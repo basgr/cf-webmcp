@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { widgetResponse } from "./widget";
 import type { Config } from "../config-types";
 
@@ -67,7 +67,7 @@ function fakeBucket(content: string | null): R2Bucket {
 }
 
 describe("widgetResponse", () => {
-  it("returns 503 when object missing", async () => {
+  it("returns 503 with noindex when object missing", async () => {
     const res = await widgetResponse(
       new Request("https://example.com/_webmcp/widget.abc.js"),
       makeConfig(),
@@ -75,9 +75,12 @@ describe("widgetResponse", () => {
       "widget.abc.js",
     );
     expect(res.status).toBe(503);
+    expect(res.headers.get("x-robots-tag")).toContain("noindex");
   });
 
-  it("serves content with MIT preamble", async () => {
+  it("serves the stored object byte-for-byte, with no preamble added at serve time", async () => {
+    // The preamble is part of the uploaded object (scripts/upload-widget.ts), so
+    // the SRI hash in the landing page covers exactly what R2 holds.
     const widgetSource = "(function(){console.log('widget');})();";
     const res = await widgetResponse(
       new Request("https://example.com/_webmcp/widget.abc.js"),
@@ -88,10 +91,19 @@ describe("widgetResponse", () => {
     expect(res.status).toBe(200);
     expect(res.headers.get("content-type")).toContain("application/javascript");
     expect(res.headers.get("cache-control")).toContain("immutable");
-    const text = await res.text();
-    expect(text).toContain("MIT License");
-    expect(text).toContain("jasonjmcghee/WebMCP");
-    expect(text).toContain("console.log('widget')");
+    expect(res.headers.get("x-robots-tag")).toContain("noindex");
+    expect(await res.text()).toBe(widgetSource);
+  });
+
+  it("looks the object up under the asset key it was given", async () => {
+    const get = vi.fn(async (_key: string) => null);
+    await widgetResponse(
+      new Request("https://example.com/_webmcp/widget.0123456789abcdef.js"),
+      makeConfig(),
+      { get } as unknown as R2Bucket,
+      "widget.0123456789abcdef.js",
+    );
+    expect(get).toHaveBeenCalledWith("widget.0123456789abcdef.js");
   });
 
   it("HEAD returns headers, no body", async () => {
@@ -105,5 +117,17 @@ describe("widgetResponse", () => {
     expect(res.headers.get("cache-control")).toContain("immutable");
     const text = await res.text();
     expect(text).toBe("");
+  });
+
+  it("answers non-GET/HEAD methods with 405", async () => {
+    const res = await widgetResponse(
+      new Request("https://example.com/_webmcp/widget.abc.js", { method: "POST" }),
+      makeConfig(),
+      fakeBucket("x"),
+      "widget.abc.js",
+    );
+    expect(res.status).toBe(405);
+    expect(res.headers.get("allow")).toBe("GET, HEAD");
+    expect(res.headers.get("x-robots-tag")).toContain("noindex");
   });
 });

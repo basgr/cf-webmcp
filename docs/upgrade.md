@@ -69,25 +69,34 @@ Recommended workflow:
 Every deploy computes `CONFIG_HASH` (first 8 hex chars of sha256 over the normalised TOML). The hash:
 
 - Stamps the `ETag` on the manifest, landing, llms.txt, and robots.txt responses.
-- Goes into the bootstrap and widget URL paths (`bootstrap.<hash>.js`).
 - Appears in `/_webmcp/health` so the operator can confirm which deploy is live.
 
 Clients revalidate against `ETag`. The cache rolls forward automatically on deploy.
+
+The config hash does **not** name the served scripts. Both are content-addressed, so a URL changes exactly when the bytes behind it change:
+
+- `bootstrap.<hash>.js`: `<hash>` is the first 16 hex chars of the sha256 of the generated bootstrap itself. A change to your TOML moves it, and so does a cf-webmcp upgrade that generates a different bootstrap from the same TOML. The `integrity` hash on the injected `<script>` always matches the file at that URL.
+- `widget.<hash>.js`: `<hash>` is the first 16 hex chars of the sha256 of the object in R2 (license preamble plus the pinned widget), recorded in `vendor/webmcp/current.json`. Editing your TOML does not move it; changing the widget pin does.
 
 ## Updating the fallback widget
 
 ```bash
 npm run update-widget -- --version=vX.Y.Z --sha256=<hex>
-npm run upload-widget
+npm run upload-widget      # BEFORE deploy
+npm run deploy
 ```
 
 The sha256 is verified during download. If the upstream release has been replaced or modified, the pin fails. Always pull the upstream LICENSE file alongside the JS.
+
+`update-widget` also records `served_sha256`, `served_sri` and `preamble_sha256` in `vendor/webmcp/current.json`. Commit that file with the pin change. `upload-widget` re-checks the vendored file against those values before it uploads anything, and the build reads only `current.json`.
+
+Upload before deploy: the new Worker advertises the new widget URL on the landing page and answers 503 for it until the object exists. `/_webmcp/health` reports `widget_asset_present` so you can confirm. The object for the previous pin (and any old `widget.<8-hex>.js` object named after a config hash by v0.5.x and earlier) is no longer referenced and can be deleted from the bucket.
 
 ## Updating the Worker itself
 
 `cf-webmcp` follows semver:
 
-- Patch (`0.1.0` → `0.1.1`): bug fixes, internal changes. Safe to pull and redeploy without TOML changes.
+- Patch (`0.1.0` → `0.1.1`): bug fixes, internal changes. Safe to pull and redeploy without TOML changes. If the release changes the generated bootstrap, the redeploy moves the bootstrap URL and its SRI hash automatically; there is nothing to configure, but a CSP that allowlists the bootstrap by hash needs the new `BOOTSTRAP_SRI` (see [`docs/deployment.md`](deployment.md#subresource-integrity-sri-on-the-injected-bootstrap)). If it changes the widget pin or the license preamble, run `npm run update-widget` and `npm run upload-widget` before deploying.
 - Minor (`0.1.0` → `0.2.0`): new features, new optional TOML fields. May add new executor types. Existing TOMLs continue to work.
 - Major (`0.x` → `1.0`): breaking changes. `schema_version` bumps. Manual TOML migration documented in the release notes.
 

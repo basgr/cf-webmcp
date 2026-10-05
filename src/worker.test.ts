@@ -37,8 +37,25 @@ function htmlResponse(body = HTML): Response {
   return new Response(body, { status: 200, headers: { "content-type": "text/html; charset=utf-8" } });
 }
 
-async function call(handler: ReturnType<typeof createHandler>, url: string, init?: RequestInit): Promise<Response> {
-  return handler.fetch(new Request(url, init) as Request<unknown, IncomingRequestCfProperties>, env, makeCtx());
+async function call(
+  handler: ReturnType<typeof createHandler>,
+  url: string,
+  init?: RequestInit,
+  envOverride: Env = env,
+): Promise<Response> {
+  return handler.fetch(new Request(url, init) as Request<unknown, IncomingRequestCfProperties>, envOverride, makeCtx());
+}
+
+/** An Env whose R2 binding holds exactly the given objects (key -> body). */
+function envWithObjects(objects: Record<string, string>) {
+  const get = vi.fn(async (key: string) => {
+    const body = objects[key];
+    if (body === undefined) return null;
+    return { body: new Response(body).body, httpEtag: '"test"' } as unknown as R2ObjectBody;
+  });
+  const head = vi.fn(async (key: string) => (key in objects ? ({ key } as unknown as R2Object) : null));
+  const env: Env = { CF_WEBMCP_ASSETS: { get, head } as unknown as R2Bucket };
+  return { env, get, head };
 }
 
 beforeEach(() => {
@@ -165,5 +182,155 @@ describe("worker routes served from injected assets", () => {
 
     expect(res.status).toBe(301);
     expect(res.headers.get("location")).toBe("/.well-known/webmcp");
+  });
+});
+
+describe("content-addressed bootstrap", () => {
+  const BOOTSTRAP_ASSET = "bootstrap.0123456789abcdef.js";
+  const SRI = `sha384-${"A".repeat(64)}`;
+
+  it("serves the current bootstrap hash with immutable caching", async () => {
+    stubOrigin({});
+    const handler = createHandler(
+      makeDeps({}, { assets: { bootstrapJs: "/*current*/" }, meta: { BOOTSTRAP_ASSET } }),
+    );
+
+    const res = await call(handler, `https://example.com/_webmcp/${BOOTSTRAP_ASSET}`);
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("cache-control")).toContain("immutable");
+    expect(res.headers.get("cache-control")).toContain("max-age=31536000");
+    expect(await res.text()).toBe("/*current*/");
+  });
+
+  it("answers a stale bootstrap hash with 404 no-store noindex and never asks origin", async () => {
+    const fetchMock = stubOrigin({});
+    const handler = createHandler(makeDeps({}, { meta: { BOOTSTRAP_ASSET } }));
+
+    const res = await call(handler, "https://example.com/_webmcp/bootstrap.ffffffffffffffff.js");
+
+    expect(res.status).toBe(404);
+    expect(res.headers.get("cache-control")).toBe("no-store");
+    expect(res.headers.get("x-robots-tag")).toContain("noindex");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("answers HEAD on a stale hash with the same 404 headers and no body", async () => {
+    const fetchMock = stubOrigin({});
+    const handler = createHandler(makeDeps({}, { meta: { BOOTSTRAP_ASSET } }));
+
+    const res = await call(handler, "https://example.com/_webmcp/bootstrap.ffffffffffffffff.js", { method: "HEAD" });
+
+    expect(res.status).toBe(404);
+    expect(res.headers.get("cache-control")).toBe("no-store");
+    expect(await res.text()).toBe("");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("injects a script whose src ends with the namespaced current asset and carries the SRI hash", async () => {
+    stubOrigin({ "https://example.com/page": () => htmlResponse() });
+    const handler = createHandler(makeDeps({}, { meta: { BOOTSTRAP_ASSET, BOOTSTRAP_SRI: SRI } }));
+
+    const body = await (await call(handler, "https://example.com/page")).text();
+
+    const tag = body.match(/<script[^>]*src="([^"]+)"[^>]*>/);
+    expect(tag).not.toBeNull();
+    expect(tag![1]!.endsWith(`/_webmcp/${BOOTSTRAP_ASSET}`)).toBe(true);
+    expect(tag![0]).toContain(`integrity="${SRI}"`);
+    expect(tag![0]).toContain('crossorigin="anonymous"');
+  });
+
+  it("omits integrity from the injected script when BOOTSTRAP_SRI is null", async () => {
+    stubOrigin({ "https://example.com/page": () => htmlResponse() });
+    const handler = createHandler(makeDeps({}, { meta: { BOOTSTRAP_ASSET, BOOTSTRAP_SRI: null } }));
+
+    const body = await (await call(handler, "https://example.com/page")).text();
+
+    expect(body).toContain(`/_webmcp/${BOOTSTRAP_ASSET}`);
+    expect(body).not.toContain("integrity=");
+  });
+});
+
+describe("content-addressed widget", () => {
+  const WIDGET_ASSET = "widget.fedcba9876543210.js";
+  const WIDGET_BODY = "/*preamble*/\nwidget();";
+
+  it("serves the current widget object from R2 as stored", async () => {
+    const fetchMock = stubOrigin({});
+    const { env: r2Env } = envWithObjects({ [WIDGET_ASSET]: WIDGET_BODY });
+    const handler = createHandler(makeDeps({}, { meta: { WIDGET_ASSET } }));
+
+    const res = await call(handler, `https://example.com/_webmcp/${WIDGET_ASSET}`, undefined, r2Env);
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("cache-control")).toContain("immutable");
+    expect(await res.text()).toBe(WIDGET_BODY);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("answers a stale widget hash with 404 no-store noindex without touching R2 or origin", async () => {
+    const fetchMock = stubOrigin({});
+    const { env: r2Env, get } = envWithObjects({ [WIDGET_ASSET]: WIDGET_BODY });
+    const handler = createHandler(makeDeps({}, { meta: { WIDGET_ASSET } }));
+
+    const res = await call(handler, "https://example.com/_webmcp/widget.0000000000000000.js", undefined, r2Env);
+
+    expect(res.status).toBe(404);
+    expect(res.headers.get("cache-control")).toBe("no-store");
+    expect(res.headers.get("x-robots-tag")).toContain("noindex");
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(get).not.toHaveBeenCalled();
+  });
+
+  it("answers any widget path with 404 noindex when the build has no widget asset", async () => {
+    const fetchMock = stubOrigin({});
+    const { env: r2Env, get, head } = envWithObjects({});
+    const handler = createHandler(makeDeps({}, { meta: { WIDGET_ASSET: null } }));
+
+    const res = await call(handler, "https://example.com/_webmcp/widget.anything.js", undefined, r2Env);
+
+    expect(res.status).toBe(404);
+    expect(res.headers.get("cache-control")).toBe("no-store");
+    expect(res.headers.get("x-robots-tag")).toContain("noindex");
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(get).not.toHaveBeenCalled();
+    expect(head).not.toHaveBeenCalled();
+  });
+
+  it("answers a widget path with 404 noindex when the feature is off", async () => {
+    const fetchMock = stubOrigin({});
+    const handler = createHandler(makeDeps({ features: { fallback_widget: false } }, { meta: { WIDGET_ASSET } }));
+
+    const res = await call(handler, `https://example.com/_webmcp/${WIDGET_ASSET}`);
+
+    expect(res.status).toBe(404);
+    expect(res.headers.get("x-robots-tag")).toContain("noindex");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("health reports widget_asset_present null and never probes R2 when the build has no widget", async () => {
+    stubOrigin({});
+    const { env: r2Env, head } = envWithObjects({});
+    const handler = createHandler(makeDeps({}, { meta: { WIDGET_ASSET: null } }));
+
+    const res = await call(handler, "https://example.com/_webmcp/health", undefined, r2Env);
+
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { widget_asset_present: unknown }).widget_asset_present).toBeNull();
+    expect(head).not.toHaveBeenCalled();
+  });
+
+  it("health reports whether the expected widget object is in R2", async () => {
+    stubOrigin({});
+    const present = envWithObjects({ [WIDGET_ASSET]: WIDGET_BODY });
+    const absent = envWithObjects({});
+    const handler = createHandler(makeDeps({}, { meta: { WIDGET_ASSET } }));
+
+    const a = await call(handler, "https://example.com/_webmcp/health", undefined, present.env);
+    const b = await call(handler, "https://example.com/_webmcp/health", undefined, absent.env);
+
+    expect(((await a.json()) as { widget_asset_present: unknown }).widget_asset_present).toBe(true);
+    expect(((await b.json()) as { widget_asset_present: unknown }).widget_asset_present).toBe(false);
+    expect(present.head).toHaveBeenCalledWith(WIDGET_ASSET);
   });
 });

@@ -4,9 +4,17 @@
  * Outputs (all under src/generated/, gitignored):
  *   - config.ts        Typed Config object.
  *   - manifest.json    Body for /.well-known/webmcp.json.
- *   - bootstrap.js     The script served at /<namespace>/bootstrap.<hash>.js.
+ *   - bootstrap.js     The script served at /<namespace>/bootstrap.<hash>.js, where
+ *                      <hash> is the first 16 hex of the sha256 of these exact bytes.
  *   - landing.html     Body for /<webmcp_landing.path>.
  *   - hash.ts          Exports CONFIG_HASH so other modules can stamp ETags.
+ *
+ * Both served assets are content-addressed so immutable caching and the SRI
+ * `integrity` attribute always describe the same bytes:
+ *   - bootstrap.<sha256(bootstrap) 16 hex>.js, computed from the generated body;
+ *   - widget.<served_sha256 16 hex>.js, read from vendor/webmcp/current.json
+ *     (the build never looks at the vendored widget file itself).
+ * CONFIG_HASH stays a hash of the config alone: preflight recomputes it from the TOML.
  *
  * Build refuses to emit if any check fails.
  */
@@ -19,13 +27,18 @@ import TOML from "@iarna/toml";
 import { ConfigSchema, type Config, type ToolConfig, type ExecutorConfig } from "../src/config-types.js";
 import { compileTemplate } from "../src/mini-language.js";
 import { buildFrontmatter, buildSkillBody } from "../src/routes/agent-skills.js";
+import { LICENSE_PREAMBLE } from "../src/widget-preamble.js";
+import { sha256Hex, widgetAssetName } from "./widget-pin.js";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const OUT_DIR = path.join(ROOT, "src", "generated");
+const DEFAULT_WIDGET_PIN_PATH = path.join(ROOT, "vendor", "webmcp", "current.json");
 
 interface BuildOptions {
   tomlPath: string;
   outDir: string;
+  /** Widget pin to read (default vendor/webmcp/current.json). Overridable for tests. */
+  widgetPinPath?: string;
 }
 
 async function readToml(filePath: string): Promise<Record<string, unknown>> {
@@ -360,6 +373,16 @@ function escapeHtml(s: string): string {
 }
 
 /**
+ * The widget mount plus its <script>. With SRI the tag carries `integrity` and
+ * `crossorigin="anonymous"`: the integrity value is the hash of the composed R2
+ * object (preamble + widget), which the Worker serves unmodified.
+ */
+function buildWidgetBlock(widgetUrl: string, sri: string | null): string {
+  const sriAttrs = sri ? ` integrity="${escapeHtml(sri)}" crossorigin="anonymous"` : "";
+  return `<div id="webmcp-widget-mount"></div><script src="${escapeHtml(widgetUrl)}" defer${sriAttrs}></script>`;
+}
+
+/**
  * The landing page served at /<webmcp_landing.path>.
  *
  * Loads an HTML template (default: `templates/landing.default.html`) and
@@ -373,7 +396,8 @@ function escapeHtml(s: string): string {
  *   {{site_description}}  - config.site.description (HTML-escaped)
  *   {{config_hash}}       - build-time hash
  *   {{tool_list}}         - pre-rendered <li>...</li> sequence
- *   {{widget_block}}      - the widget mount + script tag (empty if disabled)
+ *   {{widget_block}}      - the widget mount + script tag (empty if disabled, which
+ *                           includes a missing or unpinned vendor/webmcp/current.json)
  *   {{widget_enabled_js}} - literal "true" or "false" for inline JS
  *
  * The runtime state-branching JS in the template is what selects which
@@ -383,21 +407,20 @@ function escapeHtml(s: string): string {
 async function buildLanding(
   config: Config,
   configHash: string,
-  widgetName: string,
+  widget: WidgetBuild,
   tomlPath: string,
 ): Promise<string> {
   const ns = config.paths.namespace;
-  const widgetUrl = `${ns}/${widgetName}`;
   const toolList = config.tools
     .map(
       (t) =>
         `<li><code>${escapeHtml(t.name)}</code> - ${escapeHtml(t.description)}</li>`,
     )
     .join("");
-  const showWidget = config.features.fallback_widget;
-  const widgetBlock = showWidget
-    ? `<div id="webmcp-widget-mount"></div><script src="${escapeHtml(widgetUrl)}" defer></script>`
-    : "";
+  // The widget is shown only when the feature is on AND this build has a usable
+  // pin; otherwise block, enabled flag and the Worker's widget route all agree on "off".
+  const showWidget = config.features.fallback_widget && widget.asset !== null;
+  const widgetBlock = showWidget ? buildWidgetBlock(`${ns}/${widget.asset}`, widget.sri) : "";
 
   const templatePath = config.webmcp_landing.template
     ? path.resolve(path.dirname(tomlPath), config.webmcp_landing.template)
@@ -441,7 +464,7 @@ function buildConfigTs(
   config: Config,
   configHash: string,
   bootstrapName: string,
-  widgetName: string,
+  widget: WidgetBuild,
   buildAt: string,
   preflight: PreflightResult,
   agentSkillsDigest: string | null,
@@ -455,8 +478,19 @@ function buildConfigTs(
 import type { Config } from "../config-types";
 
 export const CONFIG_HASH = ${JSON.stringify(configHash)};
+/** Content-addressed: bootstrap.<sha256(bootstrap body) first 16 hex>.js. */
 export const BOOTSTRAP_ASSET = ${JSON.stringify(bootstrapName)};
-export const WIDGET_ASSET = ${JSON.stringify(widgetName)};
+/**
+ * Content-addressed R2 key of the widget: widget.<served_sha256 first 16 hex>.js,
+ * from vendor/webmcp/current.json. null when the build ships no widget (no usable pin).
+ */
+export const WIDGET_ASSET: string | null = ${JSON.stringify(widget.asset)};
+/**
+ * Subresource Integrity hash for the widget object, "sha384-<base64>" over the
+ * composed bytes (license preamble + widget) the Worker serves from R2. null when
+ * there is no widget or [features].subresource_integrity = false.
+ */
+export const WIDGET_SRI: string | null = ${JSON.stringify(widget.sri)};
 /**
  * Build-time UTC timestamp. Used by /_webmcp/health for deployed_at.
  * cf-webmcp emits this at build time because Cloudflare Workers freeze
@@ -745,6 +779,85 @@ export function buildAiCatalog(config: Config): AiCatalogDoc {
   return { specVersion: "1.0", host, entries };
 }
 
+/** What this build ships for the widget. Both null when the widget is disabled for lack of a pin. */
+interface WidgetBuild {
+  /** R2 key / URL file name, widget.<served_sha256 16 hex>.js. */
+  asset: string | null;
+  /** served_sri from the pin, or null when subresource_integrity is off or there is no widget. */
+  sri: string | null;
+}
+
+const SERVED_SHA256_RE = /^[0-9a-f]{64}$/;
+const SERVED_SRI_RE = /^sha384-[A-Za-z0-9+/]{64}$/;
+
+/**
+ * Resolve the widget from vendor/webmcp/current.json, and only from there: the
+ * vendored webmcp.js is gitignored and absent in CI, so the build never reads it.
+ *
+ * A pin that is missing, "unpinned", or lacks valid served_sha256 / served_sri
+ * disables the widget consistently (no asset, no landing block, widget_enabled_js
+ * false) with a warning when fallback_widget is on. The build still succeeds, so
+ * a fresh checkout or CI smoke build works without a pinned widget.
+ */
+async function resolveWidget(config: Config, pinPath: string): Promise<WidgetBuild> {
+  const wanted = config.features.fallback_widget;
+  const rel = path.relative(ROOT, pinPath) || pinPath;
+  const disable = (reason: string): WidgetBuild => {
+    if (wanted) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[build-config] [features].fallback_widget is on but ${reason}, so the widget is disabled in this build ` +
+          `(no widget route, no landing script, widget_enabled_js = false). ` +
+          `Pin one with \`npm run update-widget -- --version=vX.Y.Z --sha256=<hex>\`, then \`npm run upload-widget\`.`,
+      );
+    }
+    return { asset: null, sri: null };
+  };
+
+  let text: string;
+  try {
+    text = await fs.readFile(pinPath, "utf8");
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return disable(`the widget pin ${rel} does not exist`);
+    throw e;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch (e) {
+    throw new Error(`[build-config] widget pin ${rel} is not valid JSON: ${(e as Error).message}`);
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new Error(`[build-config] widget pin ${rel} must be a JSON object`);
+  }
+  const pin = parsed as Record<string, unknown>;
+
+  if (pin["version"] === "unpinned") return disable(`no widget is pinned (${rel} says "unpinned")`);
+  const servedSha256 = pin["served_sha256"];
+  const servedSri = pin["served_sri"];
+  if (
+    typeof servedSha256 !== "string" ||
+    !SERVED_SHA256_RE.test(servedSha256) ||
+    typeof servedSri !== "string" ||
+    !SERVED_SRI_RE.test(servedSri)
+  ) {
+    return disable(`${rel} has no valid served_sha256 / served_sri (written by an older update-widget?)`);
+  }
+
+  if (wanted && pin["preamble_sha256"] !== sha256Hex(LICENSE_PREAMBLE)) {
+    // eslint-disable-next-line no-console
+    console.warn(
+      `[build-config] widget preamble mismatch: src/widget-preamble.ts no longer hashes to the preamble_sha256 recorded in ${rel}. ` +
+        `upload-widget will refuse to upload until the pin is regenerated; run \`npm run update-widget\` for the current pin.`,
+    );
+  }
+
+  return {
+    asset: widgetAssetName(servedSha256),
+    sri: config.features.subresource_integrity ? servedSri : null,
+  };
+}
+
 export async function buildConfig(opts: BuildOptions): Promise<void> {
   const baseDir = path.dirname(opts.tomlPath);
   const rawIn = await readToml(opts.tomlPath);
@@ -775,15 +888,21 @@ export async function buildConfig(opts: BuildOptions): Promise<void> {
   checkToolNameCollisions(config);
 
   const canonical = JSON.stringify(config); // deterministic enough
+  // CONFIG_HASH covers the config alone (preflight recomputes it from the TOML)
+  // and stamps ETags. It does NOT name the served assets.
   const configHash = computeHash(canonical);
-  const bootstrapName = `bootstrap.${configHash}.js`;
-  // Widget file name is fixed at update-widget time and recorded later.
-  // For now, expose the hash-based slot the worker will read from R2.
-  const widgetName = `widget.${configHash}.js`;
+
+  // Content-addressed assets. The bootstrap is named after its own bytes, so a
+  // generator change with an unchanged TOML still moves the URL, together with
+  // the SRI hash computed below over the same string.
+  const bootstrap = buildBootstrap(config, configHash);
+  const bootstrapName = `bootstrap.${sha256Hex(bootstrap).slice(0, 16)}.js`;
+  // The widget is named after the composed object recorded in the pin, so a TOML
+  // edit never moves it and a pin change always does.
+  const widget = await resolveWidget(config, opts.widgetPinPath ?? DEFAULT_WIDGET_PIN_PATH);
 
   const manifest = buildManifest(config, configHash, bootstrapName);
-  const bootstrap = buildBootstrap(config, configHash);
-  const landing = await buildLanding(config, configHash, widgetName, opts.tomlPath);
+  const landing = await buildLanding(config, configHash, widget, opts.tomlPath);
   const aiCatalog = config.features.ai_catalog ? buildAiCatalog(config) : null;
   const aiCatalogStr = aiCatalog ? stringifyCanonical(aiCatalog) : "";
   const buildAt = new Date().toISOString();
@@ -797,7 +916,7 @@ export async function buildConfig(opts: BuildOptions): Promise<void> {
     manifest: estimateTokens(manifestStr),
     landing: estimateTokens(landing),
   };
-  const configTs = buildConfigTs(config, configHash, bootstrapName, widgetName, buildAt, preflight, agentSkillsDigest, bootstrapSri, llmsTxtTokenHints);
+  const configTs = buildConfigTs(config, configHash, bootstrapName, widget, buildAt, preflight, agentSkillsDigest, bootstrapSri, llmsTxtTokenHints);
 
   const assetsTs = `// Auto-generated by scripts/build-config.ts. Do not edit.
 /* eslint-disable */
@@ -817,7 +936,7 @@ export const AI_CATALOG_JSON: string = ${JSON.stringify(aiCatalogStr)};
     fs.writeFile(path.join(opts.outDir, "assets.ts"), assetsTs),
     fs.writeFile(
       path.join(opts.outDir, "hash.ts"),
-      `export const CONFIG_HASH = ${JSON.stringify(configHash)};\nexport const BOOTSTRAP_ASSET = ${JSON.stringify(bootstrapName)};\nexport const WIDGET_ASSET = ${JSON.stringify(widgetName)};\n`,
+      `export const CONFIG_HASH = ${JSON.stringify(configHash)};\nexport const BOOTSTRAP_ASSET = ${JSON.stringify(bootstrapName)};\nexport const WIDGET_ASSET: string | null = ${JSON.stringify(widget.asset)};\n`,
     ),
     ...(aiCatalog ? [fs.writeFile(path.join(opts.outDir, "ai-catalog.json"), aiCatalogStr)] : []),
   ]);
