@@ -2,10 +2,15 @@ import type { Config } from "../config-types";
 import { buildCacheControl } from "../cache";
 import { appendOriginTrialHeaders } from "../origin-trial";
 
+/**
+ * The landing page generated at build time, with its strong ETag: the build-time hash of
+ * these exact bytes (LANDING_ETAG). The page names the content-addressed bootstrap and
+ * widget and their SRI hashes, so a change to any of them moves the tag.
+ */
 export function landingResponse(
   landingHtml: string,
   config: Config,
-  configHash: string,
+  etag: string,
 ): Response {
   const response = new Response(landingHtml, {
     status: 200,
@@ -17,7 +22,7 @@ export function landingResponse(
         swr: config.cache.landing_swr,
         sie: config.cache.landing_sie,
       }),
-      etag: `"${configHash}"`,
+      etag,
       // The router answers this path from Accept (text/event-stream goes to origin), so a
       // cache must key on it: a browser that cached this page must not answer a later
       // fetch with Accept: text/event-stream from it.

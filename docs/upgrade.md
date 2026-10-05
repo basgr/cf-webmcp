@@ -19,6 +19,10 @@
   - `[agent_skills].name` must be lowercase letters and digits in groups joined by single hyphens, at most 64 characters, even with `agent_skills` off. `name = "My Shop"` now fails validation; write `name = "my-shop"`.
   - A `[site].name` with nothing left after slugify (a name only in a non-Latin script, say) now fails the build when a SKILL.md, the skills index or the ARD entry uses the name, instead of falling back to `site`. Set `[agent_skills].name`.
   - A derived name is cut to 64 characters, and letters such as `ß`, `æ` and `ø` are now written as `ss`, `ae` and `o` instead of becoming hyphens (`Grüße Welt` was `gru-e-welt`, now `grusse-welt`). The SKILL.md frontmatter, the skills index and its digest change for such names.
+- **Rewritten HTML gets suffixed ETags and no `Last-Modified`.** A page the Worker injects into carries origin's `ETag` with `-<INJECTION_HASH>` inside the quotes, so a deploy that changes the injected output reaches pages a browser revalidates. The first request after deploying v0.6.0 refetches each cached HTML page once, in full. The manifest, landing page and ARD manifest now send the hash of their own body as `ETag` instead of `CONFIG_HASH`. See [Caching](deployment.md#caching-and-the-deploycache-bust-cycle).
+- **`[site].public_url` and `[origin].base_url` are validated, which may reject a config that built before.** `public_url` must be an http or https origin: scheme, host (letters, digits, dots, hyphens) and an optional port, with no path (not even a trailing `/`), query, fragment or credentials. The build fails when the origin of `base_url` is not in `allowed_origins`. The error names the field.
+- **The rate limiter keys IPv6 clients by /64 and ignores `X-Forwarded-For`.** Addresses in one /64 share a bucket; only `CF-Connecting-IP` is read, and requests without it share one bucket. A full bucket table evicts its least recently used entry instead of refusing new clients.
+- **Exec CORS is worked out per request.** The exec cache is keyed on `CONFIG_HASH` and stores no CORS headers, so a cache hit no longer replays the first caller's `Access-Control-Allow-Origin`. Error answers (405, 404, 400, 413, 429, 5xx) now carry CORS for a listed origin too, and every exec answer sends `Vary: Origin` while `[cors].allowed_origins` is set.
 
 ## v0.5.1: landing runtime fix, docs overhaul, hardening
 
@@ -88,10 +92,10 @@ Recommended workflow:
 
 Every deploy computes `CONFIG_HASH` (first 8 hex chars of sha256 over the normalised TOML). The hash:
 
-- Stamps the `ETag` on the manifest, landing, llms.txt, and robots.txt responses.
-- Appears in `/_webmcp/health` so the operator can confirm which deploy is live.
+- Appears in `/_webmcp/health` and in the manifest's `config_hash`, so the operator can confirm which config is live.
+- Keys the exec cache, so a config change never answers from results of the previous config.
 
-Clients revalidate against `ETag`. The cache rolls forward automatically on deploy.
+It is not an `ETag`. The manifest, the landing page and the ARD manifest carry the sha256 of their own body as `ETag`, which also moves when a cf-webmcp upgrade or a widget pin change alters the body while the TOML stays the same. llms.txt and robots.txt carry no `ETag`.
 
 The config hash does **not** name the served scripts. Both are content-addressed, so a URL changes exactly when the bytes behind it change:
 

@@ -48,7 +48,10 @@ type SiteHostFields = { domain: string; public_url?: string | undefined };
 
 /**
  * Parse a [site] value as an http(s) URL with a host, or throw an error that
- * names the field and the value (the build reports it as is).
+ * names the field and the value (the build reports it as is). A config that
+ * passed ConfigSchema has a public_url that always parses (the schema accepts
+ * http(s) origins only), so through the build only a [site].domain with a port
+ * out of range fails here; the public_url message is for other callers.
  */
 function parseSiteUrl(url: string, field: "domain" | "public_url", value: string): URL {
   let parsed: URL | null;

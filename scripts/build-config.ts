@@ -7,7 +7,7 @@
  *   - bootstrap.js     The script served at /<namespace>/bootstrap.<hash>.js, where
  *                      <hash> is the first 16 hex of the sha256 of these exact bytes.
  *   - landing.html     Body for /<webmcp_landing.path>.
- *   - hash.ts          Exports CONFIG_HASH so other modules can stamp ETags.
+ *   - hash.ts          Exports CONFIG_HASH and the asset names.
  *
  * Both served assets are content-addressed so immutable caching and the SRI
  * `integrity` attribute always describe the same bytes:
@@ -15,6 +15,8 @@
  *   - widget.<served_sha256 16 hex>.js, read from vendor/webmcp/current.json
  *     (the build never looks at the vendored widget file itself).
  * CONFIG_HASH stays a hash of the config alone: preflight recomputes it from the TOML.
+ * The ETags of the generated documents (MANIFEST_ETAG, LANDING_ETAG, ARD_ETAG) are hashes
+ * of their own bytes, and INJECTION_HASH covers what shapes the injected HTML.
  *
  * Build refuses to emit if any check fails.
  */
@@ -38,6 +40,7 @@ import {
   urnAir,
 } from "../src/ard.js";
 import { LICENSE_PREAMBLE } from "../src/widget-preamble.js";
+import { configLinkOptions } from "../src/injection/html-rewriter.js";
 import { bridgeNpmVersion, sha256Hex, widgetAssetName } from "./widget-pin.js";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -160,8 +163,91 @@ function checkAllowList(config: Config): void {
   }
 }
 
+/**
+ * Refuse a [origin].base_url whose origin is not in [origin].allowed_origins. The Worker
+ * requests only listed origins for the merge routes and never sends the deploy token
+ * anywhere else, so with base_url off the list every merge route (llms.txt, robots.txt,
+ * agents.md, the catalogs, SKILL.md in merge mode) would answer 502. Compared by origin,
+ * so a path, a trailing slash, letter case or a default port make no difference.
+ */
+function checkBaseUrlAllowed(config: Config): void {
+  const base = new URL(config.origin.base_url).origin;
+  const allowed = config.origin.allowed_origins.map((u) => new URL(u).origin);
+  if (allowed.includes(base)) return;
+  throw new Error(
+    `[build-config] [origin].base_url ${JSON.stringify(config.origin.base_url)} (origin ${base}) is not in ` +
+      `[origin].allowed_origins ${JSON.stringify(config.origin.allowed_origins)}. The Worker only requests listed origins ` +
+      `for the merge routes and only sends the deploy token there, so they would all answer 502. Add ${base} to allowed_origins.`,
+  );
+}
+
 function computeHash(input: string): string {
   return createHash("sha256").update(input).digest("hex").slice(0, 8);
+}
+
+/**
+ * The strong ETag of a body the Worker serves from this build: the first 16 hex of the
+ * sha256 of its exact (UTF-8) bytes, in quotes. Any change to the bytes moves it, whether
+ * it came from the TOML, the widget pin or a cf-webmcp upgrade; nothing else does.
+ */
+function bodyEtag(body: string): string {
+  return `"${sha256Hex(body).slice(0, 16)}"`;
+}
+
+/** What INJECTION_HASH covers besides the config: values the build derives or reads elsewhere. */
+export interface InjectionHashInputs {
+  /** cf-webmcp's version from package.json: a release may change how pages are rewritten. */
+  version: string;
+  /** The script src (bootstrap.<sha16>.js). */
+  bootstrapAsset: string;
+  /** The script's integrity attribute, null when [features].subresource_integrity is off. */
+  bootstrapSri: string | null;
+  /** The widget (widget.<sha16>.js). Only the landing names it, but it costs nothing to include. */
+  widgetAsset: string | null;
+}
+
+/**
+ * INJECTION_HASH: the first 16 hex of the sha256 over everything that shapes what the
+ * Worker does to a proxied page, so the ETag suffix of rewritten pages moves exactly
+ * when the rewritten output can:
+ *   - the inputs above (version, script src and integrity, widget);
+ *   - [features].inject_html and [injection].exclude_paths: whether a page is rewritten;
+ *   - [paths].namespace: the script src path;
+ *   - the <link> tags as configLinkOptions builds them for the handler: [features].link_tag,
+ *     and for the manifest, API catalog, ARD manifest, SKILL.md and llms.txt the feature
+ *     flag, mode and path, all on the site URL ([site].public_url, else [site].domain);
+ *   - [[forms]], whole: names, descriptions, selectors, params, paths and autosubmit;
+ *   - [origin_trial].tokens, which go out on rewritten pages as Origin-Trial headers.
+ * No other config field: one the injected page does not show (cache TTLs, rate limits,
+ * CORS, health, the site's name and description, the other routes' settings) must not by
+ * itself make every visitor refetch every page. [[tools]] reach the page through the
+ * bootstrap file name. Today that file name still moves with every config change, because
+ * the bootstrap's first line names CONFIG_HASH, and the old name then answers 404, so the
+ * refetch is needed; the list above keeps the hash right if the bootstrap ever stops
+ * naming the config hash.
+ */
+export function injectionHashOf(config: Config, inputs: InjectionHashInputs): string {
+  return sha256Hex(
+    JSON.stringify({
+      version: inputs.version,
+      bootstrap_asset: inputs.bootstrapAsset,
+      bootstrap_sri: inputs.bootstrapSri,
+      widget_asset: inputs.widgetAsset,
+      inject_html: config.features.inject_html,
+      exclude_paths: config.injection.exclude_paths,
+      namespace: config.paths.namespace,
+      links: configLinkOptions(config),
+      forms: config.forms,
+      origin_trial_tokens: config.origin_trial.tokens,
+    }),
+  ).slice(0, 16);
+}
+
+/** cf-webmcp's own version, from package.json. */
+async function packageVersion(): Promise<string> {
+  const pkg = JSON.parse(await fs.readFile(path.join(ROOT, "package.json"), "utf8")) as { version?: unknown };
+  if (typeof pkg.version !== "string") throw new Error("[build-config] package.json has no version");
+  return pkg.version;
 }
 
 /**
@@ -951,6 +1037,7 @@ function buildConfigTs(
   agentSkillsDigest: string | null,
   bootstrapSri: string | null,
   llmsTxtTokenHints: { manifest: number; landing: number },
+  http: { manifestEtag: string; landingEtag: string; ardEtag: string; injectionHash: string },
 ): string {
   // Plain JSON dump plus the derived hash and asset names.
   const json = JSON.stringify(config, null, 2);
@@ -958,7 +1045,26 @@ function buildConfigTs(
 /* eslint-disable */
 import type { Config } from "../config-types";
 
+/**
+ * Hash of the config alone (preflight recomputes it from the TOML). Shown on
+ * /_webmcp/health and part of the exec cache key. Not an ETag: the bodies below
+ * also change with the widget pin and the generator.
+ */
 export const CONFIG_HASH = ${JSON.stringify(configHash)};
+/**
+ * Strong ETags of the bodies served from this build: "<first 16 hex of the sha256 of
+ * the exact bytes>", quotes included. ARD_ETAG is of the synthesized ARD manifest.
+ */
+export const MANIFEST_ETAG = ${JSON.stringify(http.manifestEtag)};
+export const LANDING_ETAG = ${JSON.stringify(http.landingEtag)};
+export const ARD_ETAG = ${JSON.stringify(http.ardEtag)};
+/**
+ * 16 hex over everything that shapes the injected HTML (injectionHashOf in
+ * scripts/build-config.ts). Appended inside the quotes of origin's ETag on every
+ * rewritten page, so a deploy that changes the injection fails every revalidation
+ * of a page rewritten by an earlier build.
+ */
+export const INJECTION_HASH = ${JSON.stringify(http.injectionHash)};
 /** Content-addressed: bootstrap.<sha256(bootstrap body) first 16 hex>.js. */
 export const BOOTSTRAP_ASSET = ${JSON.stringify(bootstrapName)};
 /**
@@ -1262,8 +1368,9 @@ export interface AiCatalogEntry {
 
 /**
  * The did:web host and the urn:air publisher of the ARD manifest, or a build
- * error naming the [site] field that cannot be used (a public_url without a
- * scheme, a port out of range).
+ * error naming the [site] field that cannot be used: a [site].domain whose port
+ * is out of range. [site].public_url never fails here, because the schema only
+ * accepts an http(s) origin.
  */
 function ardHosts(config: Config): { host: string; publisher: string } {
   try {
@@ -1631,6 +1738,7 @@ export async function buildConfig(opts: BuildOptions): Promise<void> {
       compileTemplate(tool.executor.url_template); // throws on bad template
     }
   }
+  checkBaseUrlAllowed(config);
   checkAllowList(config);
   checkPathCollisions(config);
   checkSkillName(config);
@@ -1639,8 +1747,8 @@ export async function buildConfig(opts: BuildOptions): Promise<void> {
   checkOriginTrial(config, opts.now ?? new Date());
 
   // CONFIG_HASH covers the config alone (preflight recomputes it from the TOML,
-  // through the same resolveInherits and configHashOf) and stamps ETags. It does
-  // NOT name the served assets.
+  // through the same resolveInherits and configHashOf). It names no served asset and
+  // is no ETag: those are hashed from the bodies themselves below.
   const configHash = configHashOf(config);
 
   // Content-addressed assets. The bootstrap is named after its own bytes, so a
@@ -1679,7 +1787,30 @@ export async function buildConfig(opts: BuildOptions): Promise<void> {
     manifest: estimateTokens(manifestStr),
     landing: estimateTokens(landing),
   };
-  const configTs = buildConfigTs(config, configHash, bootstrapName, widget, buildAt, preflight, agentSkillsDigest, bootstrapSri, llmsTxtTokenHints);
+  // Over the exact strings embedded in assets.ts below.
+  const http = {
+    manifestEtag: bodyEtag(manifestStr),
+    landingEtag: bodyEtag(landing),
+    ardEtag: bodyEtag(aiCatalogStr),
+    injectionHash: injectionHashOf(config, {
+      version: await packageVersion(),
+      bootstrapAsset: bootstrapName,
+      bootstrapSri,
+      widgetAsset: widget.asset,
+    }),
+  };
+  const configTs = buildConfigTs(
+    config,
+    configHash,
+    bootstrapName,
+    widget,
+    buildAt,
+    preflight,
+    agentSkillsDigest,
+    bootstrapSri,
+    llmsTxtTokenHints,
+    http,
+  );
 
   const assetsTs = `// Auto-generated by scripts/build-config.ts. Do not edit.
 /* eslint-disable */

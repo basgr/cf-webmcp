@@ -74,6 +74,10 @@ export function makeDeps(
     },
     meta: {
       CONFIG_HASH: "testhash",
+      MANIFEST_ETAG: '"manifesttesttag0"',
+      LANDING_ETAG: '"landingtesttag00"',
+      ARD_ETAG: '"ardtesttag000000"',
+      INJECTION_HASH: "a1b2c3d4e5f60718",
       BOOTSTRAP_ASSET: "bootstrap.test.js",
       WIDGET_ASSET: "widget.test.js",
       BUILD_AT: "2026-01-01T00:00:00.000Z",

@@ -1,7 +1,9 @@
 /**
  * Thin wrapper around the Cloudflare Cache API. The default cache works on GET
  * URLs. For POST executor calls we build a synthetic GET cache key derived from
- * `tool_name + sha256(body)` so semantically-identical calls share cache.
+ * `config_hash + tool_name + sha256(body)` so semantically-identical calls share
+ * cache, and a deploy that changes the config (a tool's executor, its URL template,
+ * its projection) never answers from a result the previous config produced.
  */
 
 export interface CacheKey {
@@ -9,9 +11,9 @@ export interface CacheKey {
   bodyText: string;
 }
 
-export async function makeCacheKey(domain: string, key: CacheKey): Promise<Request> {
+export async function makeCacheKey(domain: string, configHash: string, key: CacheKey): Promise<Request> {
   const hash = await sha256Hex(key.bodyText);
-  const url = `https://${domain}/__webmcp-cache/${encodeURIComponent(key.toolName)}/${hash}`;
+  const url = `https://${domain}/__webmcp-cache/${encodeURIComponent(configHash)}/${encodeURIComponent(key.toolName)}/${hash}`;
   return new Request(url, { method: "GET" });
 }
 

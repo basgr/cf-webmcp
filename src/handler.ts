@@ -29,7 +29,7 @@ import { agentSkillsResponse, agentSkillsRedirect } from "./routes/agent-skills"
 import { agentSkillsIndexResponse } from "./routes/agent-skills-index";
 import { buildLinkHeader, mergeLinkHeader } from "./link-header";
 import { appendOriginTrialHeaders } from "./origin-trial";
-import { formsForPath, safeInject, shouldInject } from "./injection/html-rewriter";
+import { configLinkOptions, formsForPath, isExcludedPath, safeInject, shouldInject } from "./injection/html-rewriter";
 import { fetchWithManualRedirects, isAbortError, logRedirectFailure, type RedirectFailure } from "./safe-fetch";
 
 /**
@@ -63,7 +63,19 @@ export interface HandlerPreflight {
 
 /** Build-time constants exported by src/generated/config.ts, besides `config` itself. */
 export interface HandlerMeta {
+  /** Hash of the config alone: /_webmcp/health, the preflight staleness check and the exec cache key. Not an ETag. */
   CONFIG_HASH: string;
+  /** Strong ETags of the bodies served from this build: "<sha256(body) first 16 hex>", quotes included. */
+  MANIFEST_ETAG: string;
+  LANDING_ETAG: string;
+  /** Of the synthesized ARD manifest (AI_CATALOG_JSON). A merged one is hashed per request. */
+  ARD_ETAG: string;
+  /**
+   * 16 hex over everything that shapes the injected HTML (scripts/build-config.ts
+   * injectionHashOf). Appended to origin's ETag on every rewritten page, so a deploy
+   * that changes the injection makes every cached rewritten page fail revalidation.
+   */
+  INJECTION_HASH: string;
   /** Content-addressed bootstrap file name: bootstrap.<sha256(body) first 16 hex>.js. */
   BOOTSTRAP_ASSET: string;
   /**
@@ -99,11 +111,11 @@ export function createHandler(deps: HandlerDeps): Required<Pick<ExportedHandler<
 
       switch (match.kind) {
         case "manifest":
-          return handleHeadable(request, manifestResponse(assets.manifestJson, config, meta.CONFIG_HASH));
+          return handleHeadable(request, manifestResponse(assets.manifestJson, config, meta.MANIFEST_ETAG));
         case "manifest_redirect":
           return manifestRedirect(config);
         case "landing":
-          return handleHeadable(request, landingResponse(assets.landingHtml, config, meta.CONFIG_HASH));
+          return handleHeadable(request, landingResponse(assets.landingHtml, config, meta.LANDING_ETAG));
         case "landing_redirect":
           return landingRedirect(config.webmcp_landing.path);
         case "bootstrap":
@@ -122,7 +134,7 @@ export function createHandler(deps: HandlerDeps): Required<Pick<ExportedHandler<
             request,
             config,
             match.toolName!,
-            { domain: config.site.domain, deployToken: env.CF_WEBMCP_DEPLOY_TOKEN ?? "" },
+            { domain: config.site.domain, deployToken: env.CF_WEBMCP_DEPLOY_TOKEN ?? "", configHash: meta.CONFIG_HASH },
             (p) => ctx.waitUntil(p),
           );
         case "health":
@@ -146,7 +158,7 @@ export function createHandler(deps: HandlerDeps): Required<Pick<ExportedHandler<
         case "api_catalog":
           return apiCatalogResponse(request, config, (u) => proxyToOrigin(u, env));
         case "ards_catalog":
-          return aiCatalogResponse(request, config, assets.aiCatalogJson, (u) => proxyToOrigin(u, env));
+          return aiCatalogResponse(request, config, assets.aiCatalogJson, (u) => proxyToOrigin(u, env), meta.ARD_ETAG);
         case "ards_catalog_redirect":
           return ardRedirect(config);
         case "agent_skills":
@@ -263,13 +275,33 @@ export function createHandler(deps: HandlerDeps): Required<Pick<ExportedHandler<
   async function proxyAndMaybeInject(request: Request, env: Env): Promise<Response> {
     const reqUrl = new URL(request.url);
     const target = new URL(reqUrl.pathname + reqUrl.search, config.origin.base_url);
+    const suffix = `-${meta.INJECTION_HASH}`;
+
+    // A rewritten page carries origin's ETag with `suffix` inside the quotes (see
+    // rewrittenValidators). Origin knows only its own tag, so the suffix comes off before
+    // the request goes there (rule a, any request). A request that asks for HTML on a path
+    // the rewriter runs on must not be answered 304 for a copy rewritten by another build:
+    // origin's page may be unchanged while the injection changed, and the old copy points
+    // at a bootstrap URL that now answers 404. So such a request keeps If-None-Match only
+    // when every entry carries the current suffix, and never sends If-Modified-Since
+    // (rule b). Everything else (images, CSS, scripts, JSON) keeps its validators.
+    //
+    // Rule b is decided before the response exists, so it also applies to an HTML request
+    // whose answer will not be rewritten after all (a non-UTF-8 page, a non-200, a
+    // non-HTML answer). That is safe: those requests lose only their 304, and origin sends
+    // the full page instead. The cost is bandwidth on such pages, never a stale page.
+    const rewritable = config.features.inject_html && !isExcludedPath(config, reqUrl.pathname);
+    const validators = forwardedValidators(request, suffix, rewritable && acceptsHtml(request));
 
     // redirect:"manual" - pass any 3xx response back to the visitor's browser
     // unchanged instead of auto-following. Auto-following would mean the worker
     // injects the bootstrapper into the FINAL response, even if origin redirected
     // off-host. The visitor's browser handles redirect chains natively; we just
     // relay them.
-    const upstream = await fetch(target.toString(), new Request(request, { redirect: "manual" }));
+    const forwarded = validators.headers
+      ? new Request(request, { redirect: "manual", headers: validators.headers })
+      : new Request(request, { redirect: "manual" });
+    const upstream = await fetch(target.toString(), forwarded);
 
     // Origin-Trial tokens go on the top-level HTML document, so they follow the status and
     // content type of what origin sent, not whether this response is injected below:
@@ -283,11 +315,16 @@ export function createHandler(deps: HandlerDeps): Required<Pick<ExportedHandler<
     // The Link header is discovery data, independent of body injection: it goes
     // on every proxied response, including when inject_html is off.
     if (!config.features.inject_html || !shouldInject(request, upstream, config)) {
-      return withProxyHeaders(upstream, trial);
+      // A 304 that revalidates a copy this build rewrote (its tag was one rule a
+      // stripped) gets the suffix back, so the browser keeps the suffixed validator.
+      // Any other response keeps origin's validators untouched.
+      const resuffix =
+        upstream.status === 304 && validators.stripped.size > 0
+          ? (headers: Headers) => resuffixNotModified(headers, validators.stripped, suffix)
+          : undefined;
+      return withProxyHeaders(upstream, trial, resuffix);
     }
 
-    const base = config.site.public_url ?? `https://${config.site.domain}`;
-    const manifestUrl = `${base}${config.manifest.path}`;
     // On the origin of this request, unlike the discovery URLs around it, which name the
     // configured site URL. The script must load from whichever host the visitor used (www,
     // workers.dev, preview and staging hosts): an absolute URL to the canonical host is
@@ -295,23 +332,11 @@ export function createHandler(deps: HandlerDeps): Required<Pick<ExportedHandler<
     // route does not send. A root-relative URL would follow a <base href> in the page to
     // another host; naming the host does not. Discovery documents are read from outside the
     // page and stay absolute.
+    //
+    // Every config and build value read here, and in shouldInject above, is an input of
+    // INJECTION_HASH (injectionHashOf in scripts/build-config.ts): one that is not would
+    // change the page without moving its ETag.
     const bootstrapUrl = `${reqUrl.origin}${config.paths.namespace}/${meta.BOOTSTRAP_ASSET}`;
-    const apiCatalogUrl =
-      config.features.api_catalog && config.api_catalog.mode !== "passthrough"
-        ? `${base}${config.api_catalog.path}`
-        : undefined;
-    const aiCatalogUrl =
-      config.features.ai_catalog && config.ai_catalog.mode !== "passthrough"
-        ? `${base}${config.ai_catalog.path}`
-        : undefined;
-    const agentSkillsUrl =
-      config.features.agent_skills && config.agent_skills.mode !== "passthrough"
-        ? `${base}${config.agent_skills.path}`
-        : undefined;
-    const llmsTxtUrl =
-      config.features.llms_txt && config.llms_txt.mode !== "passthrough"
-        ? `${base}${config.llms_txt.path}`
-        : undefined;
     const bootstrapIntegrity = meta.BOOTSTRAP_SRI ?? undefined;
     const forms = formsForPath(config.forms, reqUrl.pathname);
     // safeInject fails open on synchronous rewriter errors. No
@@ -319,28 +344,27 @@ export function createHandler(deps: HandlerDeps): Required<Pick<ExportedHandler<
     // origin, not [origin].base_url, and is a no-op on Custom Domains and
     // workers.dev.
     const injected = safeInject(upstream, {
-      manifestUrl,
+      ...configLinkOptions(config),
       bootstrapUrl,
-      emitLinkTag: config.features.link_tag,
-      apiCatalogUrl,
-      aiCatalogUrl,
-      agentSkillsUrl,
-      llmsTxtUrl,
       bootstrapIntegrity,
       forms,
     });
-    return withProxyHeaders(injected, trial);
+    // When safeInject failed open it handed back origin's response itself: those bytes
+    // are origin's, so they keep origin's validators.
+    const rewritten = injected === upstream ? undefined : (headers: Headers) => rewrittenValidators(headers, suffix);
+    return withProxyHeaders(injected, trial, rewritten);
   }
 
   /**
    * The headers cf-webmcp adds to a proxied response: the Link header (unless
-   * [features].link_header is off) and, when `trial` is set, one Origin-Trial header
-   * per [origin_trial].tokens entry.
+   * [features].link_header is off), when `trial` is set one Origin-Trial header per
+   * [origin_trial].tokens entry, and whatever `editValidators` does to ETag and
+   * Last-Modified. The three touch different headers, so their order does not matter.
    */
-  function withProxyHeaders(response: Response, trial: boolean): Response {
+  function withProxyHeaders(response: Response, trial: boolean, editValidators?: (headers: Headers) => void): Response {
     const addLink = config.features.link_header;
     const addTrial = trial && config.origin_trial.tokens.length > 0;
-    if (!addLink && !addTrial) return response;
+    if (!addLink && !addTrial && !editValidators) return response;
     // A WebSocket upgrade must be returned as the very object origin gave us:
     // its `webSocket` cannot be carried into a new Response, and rewrapping a 101
     // throws ("Responses may only be constructed with status codes in the range
@@ -349,8 +373,137 @@ export function createHandler(deps: HandlerDeps): Required<Pick<ExportedHandler<
     const headers = new Headers(response.headers);
     if (addLink) headers.set("link", mergeLinkHeader(headers.get("link"), buildLinkHeader(config)));
     if (addTrial) appendOriginTrialHeaders(headers, config.origin_trial.tokens);
+    editValidators?.(headers);
     return new Response(response.body, { status: response.status, headers });
   }
+}
+
+/** An entity tag (RFC 9110 section 8.8.3): weak or strong, and the opaque tag without its quotes. */
+interface EntityTag {
+  weak: boolean;
+  opaque: string;
+}
+
+/** One entity tag as sent: W/ when weak, the opaque tag in double quotes. */
+function formatEntityTag(tag: EntityTag): string {
+  return `${tag.weak ? "W/" : ""}"${tag.opaque}"`;
+}
+
+/** etagc: any visible character but the double quote, and obs-text. Sticky, for the list parser. */
+const ENTITY_TAG_RE = /(W\/)?"([\x21\x23-\x7E\x80-\xFF]*)"/y;
+const SINGLE_ENTITY_TAG_RE = /^(W\/)?"([\x21\x23-\x7E\x80-\xFF]*)"$/;
+
+/** A single entity tag (an ETag header value), or null when it is not one. */
+function parseEntityTag(value: string): EntityTag | null {
+  const m = SINGLE_ENTITY_TAG_RE.exec(value.trim());
+  return m ? { weak: m[1] !== undefined, opaque: m[2]! } : null;
+}
+
+/** A comma-separated list of entity tags (an If-None-Match value other than *), or null when it does not parse. */
+function parseEntityTagList(value: string): EntityTag[] | null {
+  const tags: EntityTag[] = [];
+  let i = 0;
+  for (;;) {
+    // Whitespace and empty list elements.
+    while (i < value.length && (value[i] === " " || value[i] === "\t" || value[i] === ",")) i++;
+    if (i >= value.length) break;
+    ENTITY_TAG_RE.lastIndex = i;
+    const m = ENTITY_TAG_RE.exec(value);
+    if (!m) return null;
+    tags.push({ weak: m[1] !== undefined, opaque: m[2]! });
+    i = ENTITY_TAG_RE.lastIndex;
+    while (i < value.length && (value[i] === " " || value[i] === "\t")) i++;
+    if (i < value.length && value[i] !== ",") return null;
+  }
+  return tags.length > 0 ? tags : null;
+}
+
+interface ForwardedValidators {
+  /** The request headers to send to origin instead of the visitor's, or null to send them unchanged. */
+  headers: Headers | null;
+  /**
+   * Origin's opaque tags of the If-None-Match entries that carried the current suffix
+   * and went to origin without it. A 304 for one of them revalidates a copy this build
+   * rewrote.
+   */
+  stripped: Set<string>;
+}
+
+/**
+ * The conditional headers to send to origin (rules a and b in proxyAndMaybeInject).
+ * `htmlRequest` turns on rule b: the request asks for HTML on a path the rewriter runs on.
+ * If-Range and If-Match are left alone: a suffixed tag there never matches origin's, so
+ * origin answers in full, which is right for a copy whose bytes origin never sent.
+ */
+function forwardedValidators(request: Request, suffix: string, htmlRequest: boolean): ForwardedValidators {
+  const ifNoneMatch = request.headers.get("if-none-match");
+  const dropDate = htmlRequest && request.headers.has("if-modified-since");
+  if (ifNoneMatch === null && !dropDate) return { headers: null, stripped: new Set() };
+
+  const headers = new Headers(request.headers);
+  // Rule b: the copy may predate the current injection, so origin must not judge it by date.
+  if (dropDate) headers.delete("if-modified-since");
+  if (ifNoneMatch === null) return { headers, stripped: new Set() };
+
+  // "*" matches any copy, also one from an older build. Unparseable: nothing can be stripped.
+  const tags = ifNoneMatch.trim() === "*" ? null : parseEntityTagList(ifNoneMatch);
+  if (tags === null) {
+    if (htmlRequest) headers.delete("if-none-match");
+    return { headers, stripped: new Set() };
+  }
+  const stripped = new Set<string>();
+  let unsuffixed = 0;
+  const sent = tags.map((tag) => {
+    if (!tag.opaque.endsWith(suffix)) {
+      unsuffixed++;
+      return tag;
+    }
+    const own = { weak: tag.weak, opaque: tag.opaque.slice(0, -suffix.length) };
+    stripped.add(own.opaque);
+    return own;
+  });
+  if (htmlRequest && unsuffixed > 0) {
+    // Rule b: an entry without the current suffix is a copy this build did not rewrite.
+    // Nothing goes to origin, so no 304 can answer for a stripped entry either.
+    headers.delete("if-none-match");
+    return { headers, stripped: new Set() };
+  }
+  if (stripped.size > 0) headers.set("if-none-match", sent.map(formatEntityTag).join(", "));
+  return { headers, stripped };
+}
+
+/**
+ * The validators of a rewritten 200: origin's ETag with `suffix` added inside the quotes,
+ * weak or strong as origin sent it, and no Last-Modified (a date cannot say which build
+ * rewrote the copy). No ETag from origin means none here. An ETag that is not a valid
+ * entity tag is dropped rather than suffixed: there is no way to know what origin meant.
+ */
+function rewrittenValidators(headers: Headers, suffix: string): void {
+  headers.delete("last-modified");
+  const etag = headers.get("etag");
+  if (etag === null) return;
+  const tag = parseEntityTag(etag);
+  if (tag === null) headers.delete("etag");
+  else headers.set("etag", formatEntityTag({ weak: tag.weak, opaque: tag.opaque + suffix }));
+}
+
+/**
+ * A 304 whose ETag is one of the tags rule a stripped revalidated a copy this build
+ * rewrote: its ETag gets the suffix back and it loses Last-Modified, as the 200 did.
+ * Any other 304 is left as origin sent it.
+ */
+function resuffixNotModified(headers: Headers, stripped: Set<string>, suffix: string): void {
+  const etag = headers.get("etag");
+  const tag = etag === null ? null : parseEntityTag(etag);
+  if (tag === null || !stripped.has(tag.opaque)) return;
+  headers.set("etag", formatEntityTag({ weak: tag.weak, opaque: tag.opaque + suffix }));
+  headers.delete("last-modified");
+}
+
+/** A GET or HEAD whose Accept names text/html: a page load, as opposed to a subresource or an API fetch. */
+function acceptsHtml(request: Request): boolean {
+  if (request.method !== "GET" && request.method !== "HEAD") return false;
+  return /text\/html/i.test(request.headers.get("accept") ?? "");
 }
 
 /**

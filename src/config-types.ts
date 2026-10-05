@@ -58,6 +58,44 @@ const HttpsUrl = z
   .url()
   .refine((s) => s.startsWith("https://") || s.startsWith("http://"), { message: "must be http(s) URL" });
 
+// [site].public_url: an http(s) origin and nothing else. Every URL built from it is
+// `${public_url}${path}`, so a path or even a trailing slash would end up in every
+// discovery URL, and the raw string goes into the Link header, robots.txt, llms.txt and
+// <link href>. The host takes the [site].domain charset (letters, digits, dots, hyphens),
+// so no CR/LF, quote or whitespace can get in. The regex alone rules out a path, query,
+// fragment and credentials; the URL parse adds the port range.
+const PUBLIC_URL_RE = /^https?:\/\/[a-z0-9.-]+(:\d+)?$/i;
+
+function parsesAsHttpOrigin(value: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return false;
+  }
+  return (
+    (url.protocol === "http:" || url.protocol === "https:") &&
+    url.hostname !== "" &&
+    url.username === "" &&
+    url.password === "" &&
+    url.pathname === "/" &&
+    url.search === "" &&
+    url.hash === "" &&
+    url.port !== "0"
+  );
+}
+
+const PublicUrl = z
+  .string()
+  .regex(
+    PUBLIC_URL_RE,
+    'public_url must be an http or https origin such as "https://www.example.com" or "http://localhost:8787": a scheme, a bare hostname (letters, digits, dots, hyphens) and an optional port, with no path (not even a trailing /), query, fragment or credentials',
+  )
+  // Only judged once the regex passed, so a value gets one message, not two.
+  .refine((s) => !PUBLIC_URL_RE.test(s) || parsesAsHttpOrigin(s), {
+    message: "public_url does not parse as an http or https origin: the port must be from 1 to 65535",
+  });
+
 // JSON Schema subset we accept inside [tools.input_schema].
 // Limited on purpose: easier to validate at runtime, easier for agents to reason about.
 const InputSchemaProperty: z.ZodType<unknown> = z.lazy(() =>
@@ -220,8 +258,9 @@ const Site = z.object({
    * Public base URL used in manifest links and landing page absolute URLs.
    * Defaults to `https://<domain>` when omitted. Override for local dev
    * (e.g. `http://localhost:8787`) so links work in a dev environment.
+   * An origin only: scheme, host and optional port (see PublicUrl).
    */
-  public_url: z.string().optional(),
+  public_url: PublicUrl.optional(),
 });
 
 const Origin = z.object({

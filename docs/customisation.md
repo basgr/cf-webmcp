@@ -29,7 +29,7 @@ The build script does a literal `{{name}}` substitution. No conditionals, no loo
 | `{{lang}}` | `site.locale` | HTML-escaped. Goes in `<html lang="...">`. |
 | `{{site_name}}` | `site.name` | HTML-escaped. |
 | `{{site_description}}` | `site.description` | HTML-escaped. |
-| `{{config_hash}}` | Build-time hash of the TOML | 8 hex chars. Same value as in `<ETag>` and `/_webmcp/health`. |
+| `{{config_hash}}` | Build-time hash of the TOML | 8 hex chars. Same value as in `/_webmcp/health` and the manifest's `config_hash`. Not the page's `ETag`, which is the hash of the page itself. |
 | `{{tool_list}}` | Pre-rendered `<li>` items | One per tool. Each is `<li><code>name</code> - description</li>`. **Not** HTML-escaped (it is already safe HTML). |
 | `{{widget_block}}` | The pairing instructions, the widget `<script>` tag and the inline script that starts the widget | A "Pairing required" heading, the pairing steps with every bridge command pinned to the vendored widget's version (`npx -y @jason.today/webmcp@<version> --foreground`, the MCP client entry, `--new`), a troubleshooting line, the widget's `<script>` (with `integrity` while `[features].subresource_integrity` is on), and an inline script that starts the widget on page load and registers this site's tools with it. The step that points at the widget stays hidden until the widget is on the page; if it cannot be loaded, a status line says so. Empty string if the widget is off: `[features].fallback_widget` is not `true` (it defaults to `false`), or there is no usable pin in `vendor/webmcp/current.json`. **Not** HTML-escaped (it is already safe HTML). |
 | `{{widget_enabled_js}}` | Literal `"true"` or `"false"` | For inlining into a JS expression. |

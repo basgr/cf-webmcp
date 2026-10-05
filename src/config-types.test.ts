@@ -49,6 +49,48 @@ describe("site.domain validation", () => {
   });
 });
 
+describe("site.public_url validation", () => {
+  const withPublicUrl = (public_url: string) => ({ ...minimal, site: { domain: "example.com", name: "x", public_url } });
+  const issues = (public_url: string) => {
+    const result = ConfigSchema.safeParse(withPublicUrl(public_url));
+    return result.success ? [] : result.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`);
+  };
+
+  it.each(["https://www.example.com", "http://localhost:8787", "https://example.com:8443", "HTTPS://Example.COM"])(
+    "accepts the origin %j",
+    (publicUrl) => {
+      expect(ConfigSchema.parse(withPublicUrl(publicUrl)).site.public_url).toBe(publicUrl);
+    },
+  );
+
+  it.each([
+    ["no scheme", "localhost:8787"],
+    ["a bare host", "example.com"],
+    ["a scheme other than http(s)", "ftp://example.com"],
+    ["a trailing slash (every URL is public_url + path)", "https://example.com/"],
+    ["a path", "https://example.com/blog"],
+    ["a query", "https://example.com?x=1"],
+    ["a fragment", "https://example.com#top"],
+    ["credentials", "https://user:pw@example.com"],
+    ["CR/LF (Link header injection)", "https://example.com\r\nSet-Cookie: x=1"],
+    ["a tab, which the URL parser would silently drop", "https://exa\tmple.com"],
+    ["a space", "https://exa mple.com"],
+    ["a double quote", 'https://example.com"'],
+    ["a non-ASCII host", "https://exämple.com"],
+    ["an IPv6 literal (the [site].domain charset has no brackets)", "http://[::1]:8787"],
+    ["a port out of range", "https://example.com:99999"],
+    ["port 0", "http://localhost:0"],
+  ])("rejects %s: %j", (_label, publicUrl) => {
+    const found = issues(publicUrl);
+    expect(found).toHaveLength(1);
+    expect(found[0]).toMatch(/^site\.public_url: /);
+  });
+
+  it("still accepts a config without public_url", () => {
+    expect(ConfigSchema.parse(minimal).site.public_url).toBeUndefined();
+  });
+});
+
 describe("[tools.annotations]", () => {
   const withAnnotations = (annotations: unknown) => ({
     ...minimal,

@@ -3,12 +3,13 @@ import { buildCacheControl } from "../cache";
 
 /**
  * Return the static manifest body generated at build time. The body is passed
- * in by the Worker (read from src/generated/manifest.json).
+ * in by the Worker (read from src/generated/manifest.json), and so is its strong
+ * ETag, the build-time hash of these exact bytes (MANIFEST_ETAG).
  */
 export function manifestResponse(
   manifestJson: string,
   config: Config,
-  configHash: string,
+  etag: string,
 ): Response {
   return new Response(manifestJson, {
     status: 200,
@@ -20,7 +21,7 @@ export function manifestResponse(
         swr: config.cache.manifest_swr,
         sie: config.cache.manifest_sie,
       }),
-      etag: `"${configHash}"`,
+      etag,
       // Discovery for agents, not indexing for humans.
       "x-robots-tag": "noindex",
       "x-content-type-options": "nosniff",

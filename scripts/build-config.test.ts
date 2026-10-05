@@ -5,7 +5,7 @@ import path from "node:path";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
 import TOML from "@iarna/toml";
-import { buildConfig, CLOUDFLARE_WEBMCP_LABS_TOOL_NAMES, defaultAnnotationsFor } from "./build-config";
+import { buildConfig, CLOUDFLARE_WEBMCP_LABS_TOOL_NAMES, defaultAnnotationsFor, injectionHashOf } from "./build-config";
 import { ConfigSchema } from "../src/config-types";
 import { buildFrontmatter } from "../src/routes/agent-skills";
 import { agentSkillsIndexResponse } from "../src/routes/agent-skills-index";
@@ -111,6 +111,31 @@ describe("buildConfig", () => {
   it("rejects a TOML missing required fields", async () => {
     const toml = await writeToml("bad.toml", `schema_version = 1\n[site]\nname="x"\n`);
     await expect(runBuild(toml)).rejects.toThrow(/validation failed/i);
+  });
+
+  it("rejects a [origin].base_url whose origin is not in [origin].allowed_origins, naming both", async () => {
+    const toml = await writeToml(
+      "base-off-list.toml",
+      MINIMAL.replace('base_url        = "https://example.com"', 'base_url        = "https://origin.example.net/app"'),
+    );
+    const err = await runBuild(toml).catch((e: Error) => e);
+    expect(err).toBeInstanceOf(Error);
+    const message = (err as Error).message;
+    expect(message).toMatch(/^\[build-config\] \[origin\]\.base_url/);
+    expect(message).toContain('"https://origin.example.net/app"');
+    expect(message).toContain("https://origin.example.net");
+    expect(message).toContain('["https://example.com"]');
+  });
+
+  it("compares base_url with allowed_origins by origin, so a path, a trailing slash or a default port does not matter", async () => {
+    const toml = await writeToml(
+      "base-on-list.toml",
+      MINIMAL.replace('base_url        = "https://example.com"', 'base_url        = "https://EXAMPLE.com:443/blog/"').replace(
+        'allowed_origins = ["https://example.com"]',
+        'allowed_origins = ["https://other.example", "https://example.com/"]',
+      ),
+    );
+    await expect(runBuild(toml)).resolves.toBeDefined();
   });
 
   it("rejects a path with characters unsafe in HTTP headers", async () => {
@@ -660,12 +685,13 @@ describe("ai_catalog generation (ARD v0.91 ard.json)", () => {
   });
 
   describe("a [site] value no identifier can be made from is a build error naming the field", () => {
-    it.each([
-      ['public_url = "localhost:8787"', /\[build-config\] \[site\]\.public_url "localhost:8787"/],
-      ['public_url = "example.com"', /\[build-config\] \[site\]\.public_url "example\.com"/],
-    ])("%s", async (line, message) => {
+    // The schema rejects such a public_url before the ARD build sees it, with one message.
+    it.each(['public_url = "localhost:8787"', 'public_url = "example.com"'])("%s", async (line) => {
       const toml = await writeToml("ard-bad-url.toml", ardToml([line]));
-      await expect(runBuild(toml)).rejects.toThrow(message);
+      const err = await runBuild(toml).catch((e: Error) => e);
+      expect(err).toBeInstanceOf(Error);
+      expect((err as Error).message).toMatch(/config validation failed:\n {2}- site\.public_url: public_url must be an http or https origin/);
+      expect((err as Error).message.split("\n").filter((l) => l.startsWith("  - "))).toHaveLength(1);
     });
 
     it('domain = "example.com:99999"', async () => {
@@ -891,6 +917,135 @@ describe("content-addressed bootstrap", () => {
     expect(hashA).toMatch(/^[0-9a-f]{8}$/);
     expect(exportedConst(b.files["config.ts"]!, "CONFIG_HASH")).toBe(hashA);
     expect(JSON.parse(a.files["manifest.json"]!).config_hash).toBe(hashA);
+  });
+});
+
+describe("body ETags", () => {
+  const tagOf = (body: string) => `"${sha256(body).slice(0, 16)}"`;
+
+  it("tags the manifest, the landing and the ARD manifest with the sha256 of the exact bytes served", async () => {
+    const toml = await writeToml("etags.toml", `${MINIMAL}\n[features]\nai_catalog = true\n`);
+    const { files } = await runBuild(toml);
+    const config = files["config.ts"]!;
+    const assets = files["assets.ts"]!;
+
+    expect(exportedConst(config, "MANIFEST_ETAG")).toBe(tagOf(exportedConst(assets, "MANIFEST_JSON") as string));
+    expect(exportedConst(config, "LANDING_ETAG")).toBe(tagOf(exportedConst(assets, "LANDING_HTML") as string));
+    expect(exportedConst(config, "ARD_ETAG")).toBe(tagOf(exportedConst(assets, "AI_CATALOG_JSON") as string));
+    // The files on disk are the same bytes.
+    expect(exportedConst(config, "MANIFEST_ETAG")).toBe(tagOf(files["manifest.json"]!));
+    expect(exportedConst(config, "LANDING_ETAG")).toBe(tagOf(files["landing.html"]!));
+    expect(exportedConst(config, "ARD_ETAG")).toBe(tagOf(files["ard.json"]!));
+    expect(exportedConst(config, "MANIFEST_ETAG")).toMatch(/^"[0-9a-f]{16}"$/);
+  });
+
+  it("moves the landing ETag when only the widget pin changes (the config hash does not move)", async () => {
+    const toml = await writeToml("etag-landing.toml", widgetOn(MINIMAL));
+    const a = await runBuild(toml, { widgetPinPath: await writePin("pin-a.json", fakePin("widget A")) });
+    const b = await runBuild(toml, { widgetPinPath: await writePin("pin-b.json", fakePin("widget B")) });
+
+    expect(exportedConst(b.files["config.ts"]!, "CONFIG_HASH")).toBe(exportedConst(a.files["config.ts"]!, "CONFIG_HASH"));
+    expect(exportedConst(b.files["config.ts"]!, "LANDING_ETAG")).not.toBe(exportedConst(a.files["config.ts"]!, "LANDING_ETAG"));
+  });
+});
+
+describe("INJECTION_HASH", () => {
+  const injectionHash = (files: Record<string, string>) => exportedConst(files["config.ts"]!, "INJECTION_HASH") as string;
+  const site = (line: string) => MINIMAL.replace('name   = "Example Co."', `name   = "Example Co."\n${line}`);
+  /** The build inputs held fixed, so a test sees only what the config itself contributes. */
+  const FIXED = { version: "0.6.0", bootstrapAsset: "bootstrap.0123456789abcdef.js", bootstrapSri: null, widgetAsset: null };
+  const hashFor = (toml: string) => injectionHashOf(ConfigSchema.parse(TOML.parse(toml)), FIXED);
+
+  it("is 16 hex and stable for the same input", async () => {
+    const a = await runBuild(await writeToml("ih-a.toml", MINIMAL));
+    const b = await runBuild(await writeToml("ih-b.toml", MINIMAL));
+    expect(injectionHash(a.files)).toMatch(/^[0-9a-f]{16}$/);
+    expect(injectionHash(b.files)).toBe(injectionHash(a.files));
+  });
+
+  it("is injectionHashOf over this build's config, bootstrap, integrity, widget and package version", async () => {
+    const pinPath = await writePin("pin.json", fakePin("widget A"));
+    const { files } = await runBuild(await writeToml("ih-inputs.toml", MINIMAL), { widgetPinPath: pinPath });
+    const pkg = JSON.parse(await fs.readFile(path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "package.json"), "utf8"));
+    const config = files["config.ts"]!;
+
+    expect(injectionHash(files)).toBe(
+      injectionHashOf(ConfigSchema.parse(TOML.parse(MINIMAL)), {
+        version: pkg.version,
+        bootstrapAsset: exportedConst(config, "BOOTSTRAP_ASSET") as string,
+        bootstrapSri: exportedConst(config, "BOOTSTRAP_SRI") as string | null,
+        widgetAsset: exportedConst(config, "WIDGET_ASSET") as string | null,
+      }),
+    );
+  });
+
+  it("moves with any config change in a build, because the bootstrap names the config hash and so its file name moves", async () => {
+    const base = await runBuild(await writeToml("ih-base.toml", MINIMAL));
+    const before = { injection: injectionHash(base.files), asset: exportedConst(base.files["config.ts"]!, "BOOTSTRAP_ASSET") };
+    await fs.rm(base.outDir, { recursive: true });
+    const other = (await runBuild(await writeToml("ih-cache.toml", `${MINIMAL}\n[cache]\nmanifest_max_age = 10\n`))).files;
+
+    // The injected script src changes, so a page rewritten before must not be revalidated.
+    expect(exportedConst(other["config.ts"]!, "BOOTSTRAP_ASSET")).not.toBe(before.asset);
+    expect(injectionHash(other)).not.toBe(before.injection);
+  });
+
+  it.each([
+    ["the version", { version: "0.6.1" }],
+    ["the bootstrap file name", { bootstrapAsset: "bootstrap.fedcba9876543210.js" }],
+    ["the bootstrap integrity", { bootstrapSri: `sha384-${"A".repeat(64)}` }],
+    ["the widget file name", { widgetAsset: "widget.0123456789abcdef.js" }],
+  ])("changes with %s", (_label, change) => {
+    const config = ConfigSchema.parse(TOML.parse(MINIMAL));
+    expect(injectionHashOf(config, { ...FIXED, ...change })).not.toBe(injectionHashOf(config, FIXED));
+  });
+
+  it.each([
+    ["[features].inject_html", `${MINIMAL}\n[features]\ninject_html = false\n`],
+    ["[features].link_tag", `${MINIMAL}\n[features]\nlink_tag = false\n`],
+    ["[features].llms_txt (a <link> tag)", `${MINIMAL}\n[features]\nllms_txt = false\n`],
+    ["[features].ai_catalog (a <link> tag)", `${MINIMAL}\n[features]\nai_catalog = true\n`],
+    ["[llms_txt].path", `${MINIMAL}\n[llms_txt]\npath = "/llms-full.txt"\n`],
+    ["[manifest].path", `${MINIMAL}\n[manifest]\npath = "/.well-known/webmcp-tools"\n`],
+    ["[site].public_url (the absolute <link> URLs)", site('public_url = "https://www.example.com"')],
+    ["[paths].namespace (the script src)", `${MINIMAL}\n[paths]\nnamespace = "/_agents"\n`],
+    ["[injection].exclude_paths", `${MINIMAL}\n[injection]\nexclude_paths = ["/admin/*"]\n`],
+    ["a [[forms]] entry", `${MINIMAL}\n[[forms]]\nname = "contact"\ndescription = "Send a message."\nselector = "form#contact"\n`],
+    ["[origin_trial].tokens", `${MINIMAL}\n[origin_trial]\ntokens = ${JSON.stringify([makeOriginTrialToken({ expiry: expiryInDays(200) })])}\n`],
+  ])("reads %s", (_label, changed) => {
+    expect(hashFor(changed)).not.toBe(hashFor(MINIMAL));
+  });
+
+  it("reads every part of a [[forms]] entry: its params, description and paths too", () => {
+    const form = (extra: string, description = "Send a message.") =>
+      `${MINIMAL}\n[[forms]]\nname = "contact"\ndescription = "${description}"\nselector = "form#contact"\n${extra}`;
+    const plain = hashFor(form(""));
+    expect(hashFor(form('\n  [[forms.params]]\n  selector = "input[name=email]"\n  description = "Your email address."\n'))).not.toBe(plain);
+    expect(hashFor(form("", "Write to us."))).not.toBe(plain);
+    expect(hashFor(form('paths = ["/contact"]\n'))).not.toBe(plain);
+  });
+
+  it.each([
+    ["[site].description", site('description = "Something else."')],
+    ["[site].name", MINIMAL.replace('name   = "Example Co."', 'name   = "Other Co."')],
+    ["[[tools]] (they reach the page through the bootstrap file name)", MINIMAL.replace("Search the site.", "Search the whole site.")],
+    ["[cache]", `${MINIMAL}\n[cache]\nmanifest_max_age = 10\n`],
+    ["[rate_limit]", `${MINIMAL}\n[rate_limit]\nrequests_per_minute_per_ip = 5\n`],
+    ["[cors]", `${MINIMAL}\n[cors]\nallowed_origins = ["https://app.example"]\n`],
+    ["[health]", `${MINIMAL}\n[health]\npublic = false\n`],
+    ["[agent_skills].description", `${MINIMAL}\n[agent_skills]\ndescription = "Other."\n`],
+    ["[robots_txt].mode", `${MINIMAL}\n[robots_txt]\nmode = "passthrough"\n`],
+    ["[features].link_header (a header, not the page)", `${MINIMAL}\n[features]\nlink_header = false\n`],
+    ["[features].fallback_widget", `${MINIMAL}\n[features]\nfallback_widget = true\n`],
+  ])("does not read %s, which the injected page does not show", (_label, changed) => {
+    expect(hashFor(changed)).toBe(hashFor(MINIMAL));
+  });
+
+  it("changes with the widget pin", async () => {
+    const toml = await writeToml("ih-widget.toml", MINIMAL);
+    const a = await runBuild(toml, { widgetPinPath: await writePin("pin-a.json", fakePin("widget A")) });
+    const b = await runBuild(toml, { widgetPinPath: await writePin("pin-b.json", fakePin("widget B")) });
+    expect(injectionHash(b.files)).not.toBe(injectionHash(a.files));
   });
 });
 
@@ -1718,9 +1873,9 @@ describe("buildConfig: [origin_trial]", () => {
     await expect(runBuild(await writeToml("ot-badurl.toml", otToml([tokenFor()], "not a url")))).rejects.toThrow(/public_url/);
   });
 
-  it("leaves a malformed [site].public_url alone when there are no tokens", async () => {
+  it("rejects a malformed [site].public_url without tokens too (the schema checks it)", async () => {
     const toml = MINIMAL.replace('name   = "Example Co."', 'name   = "Example Co."\npublic_url = "not a url"');
-    await expect(runBuild(await writeToml("ot-badurl-none.toml", toml))).resolves.toBeDefined();
+    await expect(runBuild(await writeToml("ot-badurl-none.toml", toml))).rejects.toThrow(/site\.public_url/);
   });
 
   it("never prints a token in a warning", async () => {

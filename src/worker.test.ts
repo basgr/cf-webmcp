@@ -1986,3 +1986,287 @@ describe("Origin-Trial headers", () => {
     });
   });
 });
+
+/** The strong ETag of a body: its sha256, first 16 hex, quoted. */
+async function bodyTag(text: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+  const hex = Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("");
+  return `"${hex.slice(0, 16)}"`;
+}
+
+describe("body ETags on the documents the Worker generates", () => {
+  const meta = {
+    CONFIG_HASH: "cafe0123",
+    MANIFEST_ETAG: '"1111111111111111"',
+    LANDING_ETAG: '"2222222222222222"',
+    ARD_ETAG: '"3333333333333333"',
+  };
+  const ARD = "https://example.com/.well-known/ard.json";
+  const GENERATED = JSON.stringify({ host: { displayName: "Example", identifier: "did:web:example.com" }, entries: [] });
+  const handlerFor = (override: ConfigOverrides = {}) =>
+    createHandler(makeDeps(override, { assets: { aiCatalogJson: GENERATED }, meta }));
+
+  it.each(["GET", "HEAD"])("tags the manifest with the hash of its body, not the config hash (%s)", async (method) => {
+    stubOrigin({});
+    const res = await call(handlerFor(), "https://example.com/.well-known/webmcp", { method });
+
+    expect(res.headers.get("etag")).toBe(meta.MANIFEST_ETAG);
+    expect(res.headers.get("etag")).not.toContain(meta.CONFIG_HASH);
+  });
+
+  it.each(["GET", "HEAD"])("tags the landing with the hash of its body, not the config hash (%s)", async (method) => {
+    stubOrigin({});
+    const res = await call(handlerFor(), "https://example.com/mcp", { method });
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("etag")).toBe(meta.LANDING_ETAG);
+  });
+
+  it("tags the synthesized ARD manifest with the hash of the generated body", async () => {
+    stubOrigin({});
+    const res = await call(handlerFor({ features: { ai_catalog: true } }), ARD);
+
+    expect(await res.text()).toBe(GENERATED);
+    expect(res.headers.get("etag")).toBe(meta.ARD_ETAG);
+  });
+
+  it("tags the generated ARD manifest that stands in for origin in merge mode", async () => {
+    stubOrigin({ [ARD]: () => new Response("no", { status: 404 }), "https://example.com/.well-known/ai-catalog.json": () => new Response("no", { status: 404 }) });
+    const res = await call(handlerFor({ features: { ai_catalog: true }, ai_catalog: { mode: "merge" } }), ARD);
+
+    expect(await res.text()).toBe(GENERATED);
+    expect(res.headers.get("etag")).toBe(meta.ARD_ETAG);
+  });
+
+  it("tags a merged ARD manifest with the hash of the merged body, computed per request", async () => {
+    const other = { identifier: "urn:air:example.com:agent:other", displayName: "Other", type: "application/a2a-agent-card+json", url: "https://example.com/a.json" };
+    stubOrigin({
+      [ARD]: () =>
+        new Response(JSON.stringify({ entries: [other] }), {
+          status: 200,
+          headers: { "content-type": "application/json", etag: '"origin-tag"', "last-modified": "Mon, 05 Oct 2026 08:00:00 GMT" },
+        }),
+    });
+    const res = await call(handlerFor({ features: { ai_catalog: true }, ai_catalog: { mode: "merge" } }), ARD);
+
+    const body = await res.text();
+    expect(JSON.parse(body).entries).toEqual([other]);
+    expect(res.headers.get("etag")).toBe(await bodyTag(body));
+    expect(res.headers.has("last-modified")).toBe(false);
+  });
+
+  it("relays origin's own ETag with an origin ARD document it does not merge", async () => {
+    const invalid = JSON.stringify({ entries: [{ displayName: "no identifier" }] });
+    stubOrigin({ [ARD]: () => new Response(invalid, { status: 200, headers: { "content-type": "application/json", etag: '"origin-tag"' } }) });
+    const res = await call(handlerFor({ features: { ai_catalog: true }, ai_catalog: { mode: "merge" } }), ARD);
+
+    expect(await res.text()).toBe(invalid);
+    expect(res.headers.get("etag")).toBe('"origin-tag"');
+  });
+});
+
+describe("validators on rewritten HTML (a deploy that changes the injection must reach cached pages)", () => {
+  const H = "0123456789abcdef";
+  const OLD = "fedcba9876543210";
+  const page = "https://example.com/page";
+  const NAV = { accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", "sec-fetch-dest": "document" };
+  const IMAGE = { accept: "image/avif,image/webp,image/*,*/*;q=0.8", "sec-fetch-dest": "image" };
+  const LAST_MODIFIED = "Mon, 05 Oct 2026 08:00:00 GMT";
+  const handlerWith = (extra: ConfigOverrides = {}) => createHandler(makeDeps(extra, { meta: { INJECTION_HASH: H } }));
+
+  /** Stub origin with one answer and record the requests it was sent. */
+  function origin(answer: () => Response): Request[] {
+    const seen: Request[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        seen.push(init as Request);
+        return answer();
+      }),
+    );
+    return seen;
+  }
+
+  const html = (headers: Record<string, string> = {}, contentType = "text/html; charset=utf-8") => () =>
+    new Response(HTML, { status: 200, headers: { "content-type": contentType, ...headers } });
+  const notModified = (headers: Record<string, string> = {}) => () => new Response(null, { status: 304, headers });
+
+  describe("a rewritten 200", () => {
+    it("carries origin's strong ETag with the injection hash inside the quotes, and no Last-Modified", async () => {
+      origin(html({ etag: '"abc"', "last-modified": LAST_MODIFIED }));
+      const res = await call(handlerWith(), page, { headers: NAV });
+
+      expect(await res.text()).toContain("/_webmcp/bootstrap.test.js");
+      expect(res.headers.get("etag")).toBe(`"abc-${H}"`);
+      expect(res.headers.has("last-modified")).toBe(false);
+    });
+
+    it("keeps a weak ETag weak", async () => {
+      origin(html({ etag: 'W/"abc"' }));
+      const res = await call(handlerWith(), page, { headers: NAV });
+
+      expect(res.headers.get("etag")).toBe(`W/"abc-${H}"`);
+    });
+
+    it("adds no ETag when origin sent none", async () => {
+      origin(html({ "last-modified": LAST_MODIFIED }));
+      const res = await call(handlerWith(), page, { headers: NAV });
+
+      expect(res.headers.has("etag")).toBe(false);
+      expect(res.headers.has("last-modified")).toBe(false);
+    });
+
+    it.each(["abc", '"abc', 'W/abc', '"a"b"', '"abc", "def"'])("drops a malformed origin ETag %j instead of making one up", async (etag) => {
+      origin(html({ etag }));
+      const res = await call(handlerWith(), page, { headers: NAV });
+
+      expect(res.headers.has("etag")).toBe(false);
+    });
+
+    it("is suffixed for any request, a fetch that does not ask for HTML included", async () => {
+      origin(html({ etag: '"abc"' }));
+      const res = await call(handlerWith(), page, { headers: { accept: "*/*" } });
+
+      expect(res.headers.get("etag")).toBe(`"abc-${H}"`);
+    });
+
+    it.each<[string, ConfigOverrides, () => Response]>([
+      ["inject_html is off", { features: { inject_html: false } }, html({ etag: '"abc"', "last-modified": LAST_MODIFIED })],
+      ["the path is excluded", { injection: { exclude_paths: ["/page"] } }, html({ etag: '"abc"', "last-modified": LAST_MODIFIED })],
+      ["the page is not UTF-8", {}, html({ etag: '"abc"', "last-modified": LAST_MODIFIED }, "text/html; charset=iso-8859-1")],
+      ["the answer is not HTML", {}, html({ etag: '"abc"', "last-modified": LAST_MODIFIED }, "application/json")],
+    ])("keeps origin's validators when the page is not rewritten: %s", async (_label, config, answer) => {
+      origin(answer);
+      const res = await call(handlerWith(config), page, { headers: NAV });
+
+      expect(res.headers.get("etag")).toBe('"abc"');
+      expect(res.headers.get("last-modified")).toBe(LAST_MODIFIED);
+    });
+  });
+
+  describe("the request sent to origin", () => {
+    it("strips the current suffix from If-None-Match on an HTML navigation, and drops If-Modified-Since", async () => {
+      const seen = origin(html());
+      await call(handlerWith(), page, { headers: { ...NAV, "if-none-match": `"abc-${H}"`, "if-modified-since": LAST_MODIFIED } });
+
+      expect(seen[0]!.headers.get("if-none-match")).toBe('"abc"');
+      expect(seen[0]!.headers.has("if-modified-since")).toBe(false);
+    });
+
+    it("strips the suffix from every entry and keeps each entry weak or strong", async () => {
+      const seen = origin(html());
+      await call(handlerWith(), page, { headers: { ...NAV, "if-none-match": `"a-${H}", W/"b-${H}"` } });
+
+      expect(seen[0]!.headers.get("if-none-match")).toBe('"a", W/"b"');
+    });
+
+    it.each([
+      ["an image", IMAGE],
+      ["a fetch with Accept */*", { accept: "*/*" }],
+    ])("strips the current suffix on %s request too", async (_label, headers) => {
+      const seen = origin(html());
+      await call(handlerWith(), page, { headers: { ...headers, "if-none-match": `"abc-${H}", "raw"` } });
+
+      expect(seen[0]!.headers.get("if-none-match")).toBe('"abc", "raw"');
+    });
+
+    it.each([
+      ["a tag from an older injection", `"abc-${OLD}"`],
+      ["a tag without a suffix (a page cached before the upgrade)", '"abc"'],
+      ["*", "*"],
+      ["a list in which one entry lacks the current suffix", `"a-${H}", "b-${OLD}"`],
+      ["an unparseable value", `"abc-${H}" junk`],
+    ])("drops If-None-Match on an HTML navigation for %s", async (_label, ifNoneMatch) => {
+      const seen = origin(html());
+      await call(handlerWith(), page, { headers: { ...NAV, "if-none-match": ifNoneMatch } });
+
+      expect(seen[0]!.headers.has("if-none-match")).toBe(false);
+    });
+
+    it("drops If-Modified-Since on an HTML navigation that sends no ETag", async () => {
+      const seen = origin(html());
+      await call(handlerWith(), page, { headers: { ...NAV, "if-modified-since": LAST_MODIFIED } });
+
+      expect(seen[0]!.headers.has("if-modified-since")).toBe(false);
+    });
+
+    it("forwards an image request's validators unchanged and relays origin's 304 untouched", async () => {
+      const seen = origin(notModified({ etag: '"img1"', "last-modified": LAST_MODIFIED }));
+      const res = await call(handlerWith(), "https://example.com/logo.png", {
+        headers: { ...IMAGE, "if-none-match": '"img1"', "if-modified-since": LAST_MODIFIED },
+      });
+
+      expect(seen[0]!.headers.get("if-none-match")).toBe('"img1"');
+      expect(seen[0]!.headers.get("if-modified-since")).toBe(LAST_MODIFIED);
+      expect(res.status).toBe(304);
+      expect(res.headers.get("etag")).toBe('"img1"');
+      expect(res.headers.get("last-modified")).toBe(LAST_MODIFIED);
+    });
+
+    it("leaves * alone on a request that does not ask for HTML", async () => {
+      const seen = origin(html());
+      await call(handlerWith(), page, { headers: { ...IMAGE, "if-none-match": "*" } });
+
+      expect(seen[0]!.headers.get("if-none-match")).toBe("*");
+    });
+
+    it.each<[string, ConfigOverrides]>([
+      ["inject_html is off", { features: { inject_html: false } }],
+      ["the path is excluded", { injection: { exclude_paths: ["/page"] } }],
+    ])("forwards an HTML navigation's raw validators unchanged when %s", async (_label, config) => {
+      const seen = origin(html());
+      await call(handlerWith(config), page, { headers: { ...NAV, "if-none-match": '"abc"', "if-modified-since": LAST_MODIFIED } });
+
+      expect(seen[0]!.headers.get("if-none-match")).toBe('"abc"');
+      expect(seen[0]!.headers.get("if-modified-since")).toBe(LAST_MODIFIED);
+    });
+
+    it("forwards a request without validators exactly as before", async () => {
+      const seen = origin(html());
+      await call(handlerWith(), page, { headers: NAV });
+
+      expect(seen[0]!.headers.has("if-none-match")).toBe(false);
+      expect(seen[0]!.headers.get("accept")).toBe(NAV.accept);
+      expect(seen[0]!.redirect).toBe("manual");
+    });
+  });
+
+  describe("a relayed 304", () => {
+    const T1 = makeOriginTrialToken({ feature: "WebMCP" });
+
+    it("gets the suffix back on its ETag, loses Last-Modified, and still carries the Origin-Trial header", async () => {
+      origin(notModified({ etag: '"abc"', "last-modified": LAST_MODIFIED }));
+      const res = await call(handlerWith({ origin_trial: { tokens: [T1] } }), page, {
+        headers: { ...NAV, "if-none-match": `"abc-${H}"` },
+      });
+
+      expect(res.status).toBe(304);
+      expect(res.headers.get("etag")).toBe(`"abc-${H}"`);
+      expect(res.headers.has("last-modified")).toBe(false);
+      expect(res.headers.get("origin-trial")).toBe(T1);
+      expect(res.headers.get("link")).toContain('rel="webmcp"');
+    });
+
+    it("keeps a weak ETag weak", async () => {
+      origin(notModified({ etag: 'W/"abc"' }));
+      const res = await call(handlerWith(), page, { headers: { ...NAV, "if-none-match": `W/"abc-${H}"` } });
+
+      expect(res.headers.get("etag")).toBe(`W/"abc-${H}"`);
+    });
+
+    it("gets the suffix back for a fetch that revalidated a rewritten copy", async () => {
+      origin(notModified({ etag: '"abc"' }));
+      const res = await call(handlerWith(), page, { headers: { accept: "*/*", "if-none-match": `"abc-${H}"` } });
+
+      expect(res.headers.get("etag")).toBe(`"abc-${H}"`);
+    });
+
+    it("is left alone when it answers a tag that carried no suffix", async () => {
+      origin(notModified({ etag: '"raw"', "last-modified": LAST_MODIFIED }));
+      const res = await call(handlerWith(), page, { headers: { accept: "*/*", "if-none-match": `"abc-${H}", "raw"` } });
+
+      expect(res.headers.get("etag")).toBe('"raw"');
+      expect(res.headers.get("last-modified")).toBe(LAST_MODIFIED);
+    });
+  });
+});

@@ -29,7 +29,8 @@
               "default": "en"
             },
             "public_url": {
-              "type": "string"
+              "type": "string",
+              "pattern": "^https?:\\/\\/[a-z0-9.-]+(:\\d+)?$"
             }
           },
           "required": [

@@ -9,6 +9,10 @@
 import {
   config,
   CONFIG_HASH,
+  MANIFEST_ETAG,
+  LANDING_ETAG,
+  ARD_ETAG,
+  INJECTION_HASH,
   BOOTSTRAP_ASSET,
   WIDGET_ASSET,
   BUILD_AT,
@@ -35,6 +39,10 @@ export default createHandler({
   },
   meta: {
     CONFIG_HASH,
+    MANIFEST_ETAG,
+    LANDING_ETAG,
+    ARD_ETAG,
+    INJECTION_HASH,
     BOOTSTRAP_ASSET,
     WIDGET_ASSET,
     BUILD_AT,

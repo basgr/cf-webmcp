@@ -29,7 +29,7 @@
  */
 
 import type { Config } from "../config-types";
-import { buildCacheControl } from "../cache";
+import { buildCacheControl, sha256Hex } from "../cache";
 import { ARD_PREDECESSOR_PATH, isArdContentType, isArdDocument, type ArdEntryLike } from "../ard";
 
 /** Origin documents over this many bytes are relayed, not merged. */
@@ -41,20 +41,37 @@ export const ARD_MERGE_MAX_BYTES = 1024 * 1024;
  */
 export const ARD_FAILURE_CACHE_CONTROL = "public, max-age=60, s-maxage=60";
 
+/**
+ * `synthesizedEtag` is the strong ETag of `synthesizedBody`, computed at build time
+ * (ARD_ETAG). A merged document exists only at request time, so its ETag is hashed
+ * then, over the merged bytes: the merge reads origin's whole document anyway, and the
+ * tag then changes exactly when the merged bytes do, origin edits included. A relayed
+ * origin document keeps origin's own headers, its ETag among them.
+ */
 export async function aiCatalogResponse(
   _request: Request,
   config: Config,
   synthesizedBody: string,
   proxyToOrigin: (url: URL) => Promise<Response>,
+  synthesizedEtag?: string,
 ): Promise<Response> {
   if (config.ai_catalog.mode === "merge") {
     const merged = await mergeWithOrigin(config, synthesizedBody, proxyToOrigin);
     if (merged.kind === "relay") return withNoindex(merged.upstream);
-    if (merged.kind === "body") return ardResponse(merged.text, ardCacheControl(config));
-    return ardResponse(synthesizedBody, merged.originFailed ? ARD_FAILURE_CACHE_CONTROL : ardCacheControl(config));
+    if (merged.kind === "body") return ardResponse(merged.text, ardCacheControl(config), await bodyEtag(merged.text));
+    return ardResponse(
+      synthesizedBody,
+      merged.originFailed ? ARD_FAILURE_CACHE_CONTROL : ardCacheControl(config),
+      synthesizedEtag,
+    );
   }
   // synthesize (or any other mode).
-  return ardResponse(synthesizedBody, ardCacheControl(config));
+  return ardResponse(synthesizedBody, ardCacheControl(config), synthesizedEtag);
+}
+
+/** The strong ETag of a body, as the build computes it: the first 16 hex of its sha256, quoted. */
+async function bodyEtag(body: string): Promise<string> {
+  return `"${(await sha256Hex(body)).slice(0, 16)}"`;
 }
 
 /**
@@ -77,7 +94,7 @@ export function ardRedirect(config: Config): Response {
   });
 }
 
-function ardResponse(body: string, cacheControl: string): Response {
+function ardResponse(body: string, cacheControl: string, etag: string | undefined): Response {
   return new Response(body, {
     status: 200,
     headers: {
@@ -89,6 +106,7 @@ function ardResponse(body: string, cacheControl: string): Response {
       // Agent-discovery surface served under /.well-known/, not search-engine
       // content. See docs/scope.md and the x-robots coverage test.
       "x-robots-tag": "noindex",
+      ...(etag !== undefined ? { etag } : {}),
     },
   });
 }

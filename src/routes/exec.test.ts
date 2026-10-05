@@ -6,10 +6,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { execResponse, type ExecOptions } from "./exec";
 import { _resetForTests } from "../rate-limit";
+import { makeCacheKey } from "../cache";
 import { makeConfig, type ConfigOverrides } from "../test-support/config";
 
 const SITEMAP_URL = "https://example.com/sitemap.xml";
 const ENC = new TextEncoder();
+const CONFIG_HASH = "c0ffee00";
 
 function post(body: BodyInit | null, init: RequestInit = {}): Request {
   return new Request("https://example.com/_webmcp/exec/search_pages", {
@@ -30,7 +32,7 @@ async function run(
     request,
     makeConfig(overrides),
     toolName,
-    { domain: "example.com", deployToken: "", ...opts },
+    { domain: "example.com", deployToken: "", configHash: CONFIG_HASH, ...opts },
     () => {},
   );
 }
@@ -98,7 +100,7 @@ describe("exec: executor exceptions", () => {
       post("{}"),
       makeConfig(),
       "search_pages",
-      { domain: "example.com", deployToken: "" },
+      { domain: "example.com", deployToken: "", configHash: CONFIG_HASH },
       waitUntil,
     );
 
@@ -277,5 +279,154 @@ describe("exec: the origin timeout covers body reads", () => {
     expect(((await res.json()) as { ok: boolean }).ok).toBe(true);
     // Let any (incorrectly) leaked timer fire; a leaked deadline must not change anything observable.
     await new Promise((r) => setTimeout(r, 250));
+  });
+});
+
+const APP_A = "https://app-a.example";
+const APP_B = "https://app-b.example";
+const CORS: ConfigOverrides = { cors: { allowed_origins: [APP_A, APP_B] } };
+
+function sitemapOk(): Response {
+  return new Response("<urlset><url><loc>https://example.com/a</loc></url></urlset>", {
+    status: 200,
+    headers: { "content-type": "application/xml" },
+  });
+}
+
+function fromOrigin(origin: string | null, body: BodyInit | null = "{}"): Request {
+  const headers: Record<string, string> = { "content-type": "application/json" };
+  if (origin !== null) headers["origin"] = origin;
+  return post(body, { headers });
+}
+
+const varyTokens = (res: Response) =>
+  (res.headers.get("vary") ?? "")
+    .split(",")
+    .map((v) => v.trim().toLowerCase())
+    .filter((v) => v !== "");
+
+let cacheRun = 0;
+/** A config hash no other test uses, so each test starts with an empty exec cache. */
+const freshConfigHash = () => `t${Date.now().toString(16)}${(cacheRun++).toString(16)}`;
+
+/** One exec call that also waits for the cache write it scheduled. */
+async function runAndSettle(request: Request, configHash: string, overrides: ConfigOverrides = CORS): Promise<Response> {
+  const pending: Promise<unknown>[] = [];
+  const res = await execResponse(
+    request,
+    makeConfig(overrides),
+    "search_pages",
+    { domain: "example.com", deployToken: "", configHash },
+    (p) => pending.push(p),
+  );
+  await Promise.all(pending);
+  return res;
+}
+
+describe("exec: the cache replays results, never another caller's CORS headers", () => {
+  it("answers a cache hit with the CORS headers of the caller asking now", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => sitemapOk()));
+    const configHash = freshConfigHash();
+
+    const first = await runAndSettle(fromOrigin(APP_A), configHash);
+    expect(first.headers.get("x-webmcp-cache")).toBe("MISS");
+    expect(first.headers.get("access-control-allow-origin")).toBe(APP_A);
+
+    const second = await runAndSettle(fromOrigin(APP_B), configHash);
+    expect(second.headers.get("x-webmcp-cache")).toBe("HIT");
+    expect(second.headers.get("access-control-allow-origin")).toBe(APP_B);
+    expect(varyTokens(second)).toEqual(["origin"]);
+
+    const noOrigin = await runAndSettle(fromOrigin(null), configHash);
+    expect(noOrigin.headers.get("x-webmcp-cache")).toBe("HIT");
+    expect(noOrigin.headers.has("access-control-allow-origin")).toBe(false);
+
+    const unlisted = await runAndSettle(fromOrigin("https://evil.example"), configHash);
+    expect(unlisted.headers.get("x-webmcp-cache")).toBe("HIT");
+    expect(unlisted.headers.has("access-control-allow-origin")).toBe(false);
+  });
+
+  it("stores the result without access-control headers and without Vary: Origin", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => sitemapOk()));
+    const configHash = freshConfigHash();
+
+    await runAndSettle(fromOrigin(APP_A), configHash);
+
+    const stored = await caches.default.match(
+      await makeCacheKey("example.com", configHash, { toolName: "search_pages", bodyText: "{}" }),
+    );
+    expect(stored).toBeDefined();
+    const names = [...stored!.headers.keys()];
+    expect(names.filter((n) => n.startsWith("access-control-"))).toEqual([]);
+    expect(varyTokens(stored!)).not.toContain("origin");
+  });
+
+  it("keys the cache on the config hash: the same call under another config is a miss", async () => {
+    const fetchMock = vi.fn(async () => sitemapOk());
+    vi.stubGlobal("fetch", fetchMock);
+    const before = freshConfigHash();
+    const after = freshConfigHash();
+
+    expect((await runAndSettle(fromOrigin(null), before)).headers.get("x-webmcp-cache")).toBe("MISS");
+    expect((await runAndSettle(fromOrigin(null), before)).headers.get("x-webmcp-cache")).toBe("HIT");
+    expect((await runAndSettle(fromOrigin(null), after)).headers.get("x-webmcp-cache")).toBe("MISS");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("puts the config hash into the cache key URL", async () => {
+    const a = await makeCacheKey("example.com", "aaaa1111", { toolName: "search_pages", bodyText: "{}" });
+    const b = await makeCacheKey("example.com", "bbbb2222", { toolName: "search_pages", bodyText: "{}" });
+    expect(a.url).toContain("/aaaa1111/");
+    expect(a.url).not.toBe(b.url);
+  });
+});
+
+describe("exec: every answer carries CORS for a listed origin", () => {
+  const cases: Array<[string, () => Promise<Response>]> = [
+    ["405 for a GET", () => run(new Request("https://example.com/_webmcp/exec/search_pages", { headers: { origin: APP_A } }), CORS)],
+    ["404 for an unknown tool", () => run(fromOrigin(APP_A), CORS, {}, "no_such_tool")],
+    ["400 for a body that is not JSON", () => run(fromOrigin(APP_A, "{"), CORS)],
+    ["413 for a body over the cap", () => run(fromOrigin(APP_A, "x".repeat(64 * 1024 + 1)), CORS)],
+    [
+      "429 when rate limited",
+      async () => {
+        vi.stubGlobal("fetch", vi.fn(async () => sitemapOk()));
+        const limited: ConfigOverrides = { ...CORS, rate_limit: { requests_per_minute_per_ip: 1 } };
+        await run(fromOrigin(APP_A), limited, { configHash: freshConfigHash() });
+        return run(fromOrigin(APP_A), limited, { configHash: freshConfigHash() });
+      },
+    ],
+    [
+      "502 for an executor that fails",
+      () => {
+        vi.spyOn(console, "error").mockImplementation(() => {});
+        vi.stubGlobal("fetch", vi.fn(async () => new Response("<not xml", { status: 500 })));
+        return run(fromOrigin(APP_A), CORS, { configHash: freshConfigHash() });
+      },
+    ],
+  ];
+
+  it.each(cases)("%s", async (_label, make) => {
+    const res = await make();
+    expect(res.status).toBeGreaterThanOrEqual(400);
+    expect(res.headers.get("access-control-allow-origin")).toBe(APP_A);
+    expect(varyTokens(res)).toContain("origin");
+    expect(res.headers.get("x-robots-tag")).toContain("noindex");
+  });
+
+  it("sends no CORS header to an origin that is not listed, or to a request without Origin", async () => {
+    for (const origin of ["https://evil.example", null]) {
+      const res = await run(fromOrigin(origin), CORS, {}, "no_such_tool");
+      expect(res.status).toBe(404);
+      expect(res.headers.has("access-control-allow-origin")).toBe(false);
+      // The answer still depends on Origin, so a cache must key on it.
+      expect(varyTokens(res)).toContain("origin");
+    }
+  });
+
+  it("sends neither CORS nor Vary when no origin is allowed at all", async () => {
+    const res = await run(fromOrigin(APP_A), {}, {}, "no_such_tool");
+    expect(res.headers.has("access-control-allow-origin")).toBe(false);
+    expect(res.headers.has("vary")).toBe(false);
   });
 });

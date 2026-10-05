@@ -60,11 +60,39 @@ export function shouldInject(request: Request, response: Response, config: Confi
   const ct = response.headers.get("content-type") ?? "";
   if (!/^text\/html\b/i.test(ct)) return false;
   if (/charset=/i.test(ct) && !/charset=("?)utf-8/i.test(ct)) return false;
-  const pathname = new URL(request.url).pathname;
-  for (const pattern of config.injection.exclude_paths) {
-    if (matchGlob(pattern, pathname)) return false;
-  }
-  return true;
+  return !isExcludedPath(config, new URL(request.url).pathname);
+}
+
+/** Whether [injection].exclude_paths keeps the injection off this path. */
+export function isExcludedPath(config: Config, pathname: string): boolean {
+  return config.injection.exclude_paths.some((pattern) => matchGlob(pattern, pathname));
+}
+
+/** The InjectOptions that follow from the config alone: the discovery <link> tags. */
+export type ConfigLinkOptions = Pick<
+  InjectOptions,
+  "manifestUrl" | "emitLinkTag" | "apiCatalogUrl" | "aiCatalogUrl" | "agentSkillsUrl" | "llmsTxtUrl"
+>;
+
+/**
+ * Whether the <link> tags go in and where they point: absolute URLs on the site URL
+ * ([site].public_url, else https://<[site].domain>), one per discovery document that is
+ * served (feature on, not passthrough). The handler uses these for every injected page,
+ * and the build hashes them into INJECTION_HASH (scripts/build-config.ts), so the ETag
+ * suffix of rewritten pages moves whenever the tags change.
+ */
+export function configLinkOptions(config: Config): ConfigLinkOptions {
+  const base = config.site.public_url ?? `https://${config.site.domain}`;
+  const served = (on: boolean, block: { mode: string; path: string }): string | undefined =>
+    on && block.mode !== "passthrough" ? `${base}${block.path}` : undefined;
+  return {
+    manifestUrl: `${base}${config.manifest.path}`,
+    emitLinkTag: config.features.link_tag,
+    apiCatalogUrl: served(config.features.api_catalog, config.api_catalog),
+    aiCatalogUrl: served(config.features.ai_catalog, config.ai_catalog),
+    agentSkillsUrl: served(config.features.agent_skills, config.agent_skills),
+    llmsTxtUrl: served(config.features.llms_txt, config.llms_txt),
+  };
 }
 
 export function matchGlob(pattern: string, input: string): boolean {

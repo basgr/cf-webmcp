@@ -1,7 +1,11 @@
 /**
  * POST /<namespace>/exec/:tool_name
  * Validates input, dispatches to the executor, wraps in the response envelope,
- * sets cache headers. Cache lookup is keyed on tool_name + sha256(body).
+ * sets cache headers. Cache lookup is keyed on config_hash + tool_name + sha256(body).
+ *
+ * CORS is computed per request, for every answer: a cache hit, a miss, and every
+ * error (405, 404, 400, 413, 429, 5xx). The cache stores results without any CORS
+ * header, so a hit never replays the headers of the caller that filled it.
  */
 
 import type { Config, ToolConfig } from "../config-types";
@@ -15,6 +19,8 @@ import { checkGlobalRateLimit, checkPerToolRateLimit, clientIp } from "../rate-l
 export interface ExecOptions {
   domain: string;
   deployToken: string;
+  /** CONFIG_HASH of this build. Part of the cache key, so a config change starts a fresh cache. */
+  configHash: string;
   /** Deadline for one executor run, origin fetch and body reads together. Defaults to 8s. */
   timeoutMs?: number;
 }
@@ -31,10 +37,20 @@ export async function execResponse(
   opts: ExecOptions,
   waitUntil: (p: Promise<unknown>) => void,
 ): Promise<Response> {
+  // The preflight carries its own CORS answer (allowed methods, headers, max-age).
+  if (request.method === "OPTIONS") return preflightCors(request, config);
+  return withCors(await execAnswer(request, config, toolName, opts, waitUntil), request, config);
+}
+
+/** The answer to an exec request before CORS is applied: no access-control-* header on any path. */
+async function execAnswer(
+  request: Request,
+  config: Config,
+  toolName: string,
+  opts: ExecOptions,
+  waitUntil: (p: Promise<unknown>) => void,
+): Promise<Response> {
   if (request.method !== "POST") {
-    if (request.method === "OPTIONS") {
-      return preflightCors(request, config);
-    }
     return new Response("method not allowed", {
       status: 405,
       headers: { allow: "POST, OPTIONS", "x-robots-tag": "noindex" },
@@ -94,7 +110,7 @@ export async function execResponse(
   }
 
   // Cache check.
-  const cacheKey = await makeCacheKey(opts.domain, { toolName, bodyText });
+  const cacheKey = await makeCacheKey(opts.domain, opts.configHash, { toolName, bodyText });
   const cache = caches.default;
   const cached = await cache.match(cacheKey);
   if (cached) {
@@ -122,13 +138,13 @@ export async function execResponse(
     headers: {
       "cache-control": cc,
       "x-webmcp-cache": "MISS",
-      ...corsHeaders(request, config),
     },
   });
 
-  // Only cache successful envelopes.
+  // Only cache successful envelopes. Stored without CORS: those headers belong to
+  // one caller, and execResponse adds them for each request, hits included.
   if (envelope.ok) {
-    waitUntil(cache.put(cacheKey, response.clone()));
+    waitUntil(cache.put(cacheKey, withoutCors(response.clone())));
   }
 
   return response;
@@ -213,14 +229,50 @@ function preflightCors(request: Request, config: Config): Response {
   return new Response(null, { status: 204, headers });
 }
 
-function corsHeaders(request: Request, config: Config): Record<string, string> {
-  const reqOrigin = request.headers.get("origin");
-  if (!reqOrigin) return {};
-  if (config.cors.allowed_origins.includes(reqOrigin)) {
-    return {
-      "access-control-allow-origin": reqOrigin,
-      vary: "origin",
-    };
+/**
+ * The response with the CORS headers of `request`: Access-Control-Allow-Origin echoes
+ * the request's Origin when [cors].allowed_origins lists it, as the preflight does.
+ * Whatever access-control-* headers the response carried are dropped first, so a
+ * cached response can never answer with another caller's. Whenever any origin is
+ * allowed, the answer depends on Origin (an echo or no header at all), so it carries
+ * Vary: Origin, also when this request gets no CORS header.
+ */
+function withCors(response: Response, request: Request, config: Config): Response {
+  const headers = stripCors(new Headers(response.headers));
+  const allowed = config.cors.allowed_origins;
+  if (allowed.length > 0) {
+    headers.set("vary", addVaryToken(headers.get("vary"), "origin"));
+    const reqOrigin = request.headers.get("origin");
+    if (reqOrigin !== null && allowed.includes(reqOrigin)) {
+      headers.set("access-control-allow-origin", reqOrigin);
+    }
   }
-  return {};
+  return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
+}
+
+/** The response as the exec cache stores it: no access-control-* header, no Origin in Vary. */
+function withoutCors(response: Response): Response {
+  const headers = stripCors(new Headers(response.headers));
+  return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
+}
+
+function stripCors(headers: Headers): Headers {
+  const names = [...headers.keys()].filter((name) => name.startsWith("access-control-"));
+  for (const name of names) headers.delete(name);
+  const vary = (headers.get("vary") ?? "")
+    .split(",")
+    .map((v) => v.trim())
+    .filter((v) => v !== "" && v.toLowerCase() !== "origin");
+  if (vary.length > 0) headers.set("vary", vary.join(", "));
+  else headers.delete("vary");
+  return headers;
+}
+
+function addVaryToken(vary: string | null, token: string): string {
+  const tokens = (vary ?? "")
+    .split(",")
+    .map((v) => v.trim())
+    .filter((v) => v !== "");
+  if (!tokens.some((v) => v.toLowerCase() === token)) tokens.push(token);
+  return tokens.join(", ");
 }
