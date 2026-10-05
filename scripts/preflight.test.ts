@@ -1100,17 +1100,38 @@ describe("preflight: --origin overrides where the probes go, and nothing else", 
     expect(calls.every((c) => c.init.redirect === "manual")).toBe(true);
   });
 
-  it("sends the deploy token headers to the override host only", async () => {
+  const LISTED = MINIMAL.replace('allowed_origins = ["https://example.com"]', `allowed_origins = ["https://example.com", "${OVERRIDE}"]`);
+
+  it("sends the deploy token headers to the override host only, when allowed_origins lists it", async () => {
     const { calls } = stubOrigin();
 
-    await run(MINIMAL, { origin: OVERRIDE, deployToken: "tok-123" });
+    await run(LISTED, { origin: OVERRIDE, deployToken: "tok-123" });
 
+    expect(calls.length).toBeGreaterThan(10);
     for (const { url, init } of calls) {
       expect(new URL(url).host, url).toBe("origin.internal.example");
       const headers = init.headers as Record<string, string>;
       expect(headers["cf-webmcp-deploy-token"], url).toBe("tok-123");
       expect(headers["cf-webmcp-bypass"], url).toBe("1");
     }
+  });
+
+  it("withholds the token from an override host that allowed_origins does not list, probes it all the same, and says why", async () => {
+    const { calls } = stubOrigin();
+
+    const { code, lines } = await run(MINIMAL, { origin: OVERRIDE, deployToken: "tok-123" });
+
+    expect(code).toBe(0);
+    expect(calls.length).toBeGreaterThan(10);
+    for (const { url, init } of calls) {
+      expect(new URL(url).host, url).toBe("origin.internal.example");
+      const names = Object.keys(init.headers as Record<string, string>);
+      expect(names.filter((n) => n.startsWith("cf-webmcp")), url).toEqual([]);
+    }
+    const text = lines.join("\n");
+    expect(text).toContain("token: withheld");
+    expect(text).toContain(`${OVERRIDE} is not in [origin].allowed_origins`);
+    expect(text).not.toContain("tok-123");
   });
 
   it("stamps the hash of the unmodified config: it equals the build's CONFIG_HASH", async () => {
@@ -1254,6 +1275,61 @@ describe("preflight: command-line arguments", () => {
       expect(result.stderr).toMatch(/--config=<path>/);
     }
   }, 120_000);
+});
+
+describe("preflight: the deploy token only goes where the Worker may send it", () => {
+  it("refuses a base_url outside allowed_origins with the build's own error, before any request", async () => {
+    const { calls } = stubOrigin();
+    const offList = MINIMAL.replace('base_url        = "https://example.com"', 'base_url        = "https://origin.example.net"');
+
+    const err = await run(offList, { deployToken: "tok-123" }).catch((e: Error) => e);
+
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toMatch(/^\[build-config\] \[origin\]\.base_url "https:\/\/origin\.example\.net"/);
+    expect((err as Error).message).toContain("is not in [origin].allowed_origins");
+    expect(calls).toEqual([]);
+  });
+
+  it("refuses it with no token set too: the build would refuse the config", async () => {
+    const { calls } = stubOrigin();
+    const offList = MINIMAL.replace('base_url        = "https://example.com"', 'base_url        = "https://origin.example.net"');
+
+    await expect(run(offList)).rejects.toThrow(/allowed_origins/);
+    expect(calls).toEqual([]);
+  });
+
+  it.each([
+    ["http://origin.example.com", true],
+    ["http://localhost:8081", false],
+    ["http://127.0.0.1:8081", false],
+    ["http://[::1]:8081", false],
+    ["http://app.localhost:8081", false],
+    ["https://origin.example.com", false],
+  ])("base_url %s: a warning about the token in clear text: %s", async (base, warned) => {
+    stubOrigin();
+    const toml = MINIMAL.replace('base_url        = "https://example.com"', `base_url        = "${base}"`).replace(
+      'allowed_origins = ["https://example.com"]',
+      `allowed_origins = ["https://example.com", "${base}"]`,
+    );
+
+    const { lines } = await run(toml, { deployToken: "tok-123" });
+
+    const warning = lines.filter((l) => l.includes("over plain http"));
+    expect(warning.length).toBe(warned ? 1 : 0);
+    if (warned) expect(warning[0]).toContain(new URL(base).host);
+  });
+
+  it("does not warn about http when no token is sent", async () => {
+    stubOrigin();
+    const toml = MINIMAL.replace('base_url        = "https://example.com"', 'base_url        = "http://origin.example.com"').replace(
+      'allowed_origins = ["https://example.com"]',
+      'allowed_origins = ["http://origin.example.com"]',
+    );
+
+    const { lines } = await run(toml);
+
+    expect(lines.filter((l) => l.includes("over plain http"))).toEqual([]);
+  });
 });
 
 describe("probeUrl: a probe never leaves the host it was aimed at", () => {

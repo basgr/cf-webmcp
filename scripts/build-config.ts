@@ -265,8 +265,9 @@ function checkAllowList(config: Config): void {
  * anywhere else, so with base_url off the list every merge route (llms.txt, robots.txt,
  * agents.md, the catalogs, SKILL.md in merge mode) would answer 502. Compared by origin,
  * so a path, a trailing slash, letter case or a default port make no difference.
+ * Preflight runs the same check before it sends anything (scripts/preflight.ts).
  */
-function checkBaseUrlAllowed(config: Config): void {
+export function checkBaseUrlAllowed(config: Config): void {
   const base = new URL(config.origin.base_url).origin;
   const allowed = config.origin.allowed_origins.map((u) => new URL(u).origin);
   if (allowed.includes(base)) return;

@@ -30,14 +30,19 @@
  *   Overrides only the base URL the probes go to (an http(s) origin, no path, query,
  *   fragment or userinfo). The config, and so the config hash stored in the result,
  *   stays exactly what the build sees, so the result is not flagged stale. The deploy
- *   token headers go to that host and nowhere else; redirects are never followed.
+ *   token headers go to that host and nowhere else, and only when [origin].allowed_origins
+ *   lists it; redirects are never followed.
  *
  * Token headers:
  *   If CF_WEBMCP_DEPLOY_TOKEN is set, preflight sends `cf-webmcp-bypass: 1` and
  *   `cf-webmcp-deploy-token`, the same headers the Worker puts on its own origin
  *   fetches, so the publisher's origin WAF rule that allows the Worker also lets
  *   preflight through. The Worker does not read these headers: it has no bypass
- *   mode and forwards nothing to origin because of them.
+ *   mode and forwards nothing to origin because of them. Like the Worker, preflight
+ *   sends them only to an origin in [origin].allowed_origins: a base_url outside the list
+ *   fails with the build's own error before any request, and an --origin host outside it
+ *   is probed without them. It warns when they would go over plain http to a host that is
+ *   not localhost.
  */
 
 import { promises as fs } from "node:fs";
@@ -54,7 +59,7 @@ import { isMarkdownish as isSkillContentType } from "../src/routes/agent-skills.
 import { isLinksetContentType, parseLinkset } from "../src/routes/api-catalog.js";
 import { apiCatalogServed, skillsIndexServed } from "../src/served.js";
 import { preflightUserAgent } from "../src/user-agent.js";
-import { configHashOf, resolveInherits } from "./build-config.js";
+import { checkBaseUrlAllowed, configHashOf, resolveInherits } from "./build-config.js";
 
 interface Args {
   configPath: string;
@@ -203,6 +208,17 @@ export function probeUrl(base: URL, pathname: string): URL {
     throw new Error(`probe path ${JSON.stringify(pathname)} resolves to ${url.origin}, not ${base.origin}`);
   }
   return url;
+}
+
+/** localhost, a name under .localhost, or a loopback address: where plain http does not cross a network. */
+function isLoopbackHost(hostname: string): boolean {
+  const host = hostname.toLowerCase();
+  return (
+    host === "localhost" ||
+    host.endsWith(".localhost") ||
+    host === "[::1]" ||
+    /^127(?:\.\d{1,3}){3}$/.test(host)
+  );
 }
 
 async function loadConfig(p: string): Promise<Config> {
@@ -568,17 +584,37 @@ export async function runPreflight(configPath: string, force: boolean, opts: Pre
   // Validate the override first: nothing is read or requested for a bad value.
   const override = opts.origin === undefined ? undefined : parseOriginOverride(opts.origin);
   const config = await loadConfig(absPath);
+  // The build refuses a base_url outside allowed_origins, and so does preflight, with the same
+  // error and before any request: the Worker would never send the token there.
+  checkBaseUrlAllowed(config);
   // Where the probes go. The config itself is never changed, so its hash is the build's.
   const base = override ?? new URL(config.origin.base_url);
   const checks = pathsToCheck(config, base);
-  const deployToken = opts.deployToken ?? process.env["CF_WEBMCP_DEPLOY_TOKEN"];
+  const configuredToken = opts.deployToken ?? process.env["CF_WEBMCP_DEPLOY_TOKEN"];
+  // The token goes only to an origin the Worker may send it to: an --origin host that
+  // allowed_origins does not list is probed without it.
+  const listed = config.origin.allowed_origins.some((u) => new URL(u).origin === base.origin);
+  const deployToken = configuredToken && listed ? configuredToken : undefined;
   // eslint-disable-next-line no-console
   const log = opts.log ?? ((line: string) => console.log(line));
 
   const version = await packageVersion();
-  log(`preflight  ${base.host}  (token: ${deployToken ? "present" : "absent"})`);
+  const tokenState = deployToken ? "present" : configuredToken ? "withheld" : "absent";
+  log(`preflight  ${base.host}  (token: ${tokenState})`);
   if (override) {
     log(`  --origin: probing ${override.origin} instead of [origin].base_url (${new URL(config.origin.base_url).origin}); the config hash is unchanged`);
+  }
+  if (tokenState === "withheld") {
+    log(
+      `  token: withheld, because ${base.origin} is not in [origin].allowed_origins; the probes go without the deploy-token ` +
+        `headers. List the origin there if it should get them.`,
+    );
+  }
+  if (deployToken && base.protocol === "http:" && !isLoopbackHost(base.hostname)) {
+    log(
+      `  WARNING: the deploy token goes to ${base.host} over plain http, readable on the way. Use https, ` +
+        `or run preflight against localhost.`,
+    );
   }
 
   let hardCollisions = 0;
