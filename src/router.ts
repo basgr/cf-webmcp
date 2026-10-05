@@ -41,22 +41,25 @@ const WIDGET_ASSET_NAME = /^widget\.[^/]+\.js$/;
 
 /**
  * Whether a request is for the landing page rather than for something that merely
- * shares its URL. The landing is a page for people: only GET and HEAD, and only
- * when Accept names neither `application/json` nor `text/event-stream`.
+ * shares its URL. The rule, in one sentence:
  *
- * Anything else is MCP traffic or an API call and must reach origin. Cloudflare
- * WebMCP Labs injects a bridge with `data-mcp-url="/mcp"` and POSTs JSON-RPC there,
- * and an origin MCP server may sit at the same path; a streamable HTTP client sends
- * `Accept: application/json, text/event-stream`. A missing Accept header or a
- * wildcard one is a browser or a plain fetch and gets the landing.
+ *   GET and HEAD requests get the landing page unless their Accept header asks for text/event-stream; every other method goes to origin.
  *
- * The match is a case-insensitive substring test, and any occurrence counts, a
- * `q=0` refusal included: a client that names either type is not asking for a page.
+ * Why: Cloudflare WebMCP Labs injects a bridge with `data-mcp-url="/mcp"` and POSTs
+ * JSON-RPC there, and an origin MCP server may sit at the same path. The MCP
+ * streamable HTTP transport requires `text/event-stream` in the Accept header of its
+ * GET, so that is the one GET left to origin. `application/json` alone is not: axios
+ * sends `application/json, text/plain` plus a wildcard by default, and an agent that
+ * follows the landing link advertised in llms.txt and the manifest must get the page,
+ * not origin's 404.
+ *
+ * The match is a case-insensitive substring test, and any occurrence counts, a `q=0`
+ * refusal included: a client that names the stream type is not asking for a page.
  */
 function isLandingRequest(request: Request): boolean {
   if (request.method !== "GET" && request.method !== "HEAD") return false;
   const accept = (request.headers.get("accept") ?? "").toLowerCase();
-  return !accept.includes("application/json") && !accept.includes("text/event-stream");
+  return !accept.includes("text/event-stream");
 }
 
 /**
@@ -85,9 +88,10 @@ export function matchRoute(
     }
   }
 
-  // Landing with directory semantics: redirect "/foo" → "/foo/". Both the page and
-  // the redirect belong to people with a browser: a request that is not an HTML GET
-  // or HEAD falls through to origin (see isLandingRequest).
+  // Landing with directory semantics: redirect "/foo" → "/foo/". The page and the
+  // redirect follow one rule: GET and HEAD requests get the landing page unless their
+  // Accept header asks for text/event-stream; every other method goes to origin
+  // (see isLandingRequest).
   const landingPath = config.webmcp_landing.path;
   if (config.features.webmcp_landing && isLandingRequest(request)) {
     if (pathname === landingPath) return { kind: "landing" };

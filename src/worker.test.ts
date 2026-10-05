@@ -1028,6 +1028,8 @@ describe("llms.txt and robots.txt never carry X-Robots-Tag", () => {
 
 describe("the landing path is shared with MCP traffic", () => {
   // Cloudflare WebMCP Labs POSTs MCP JSON-RPC to data-mcp-url="/mcp"; an origin MCP server may live there too.
+  // The rule: GET and HEAD requests get the landing page unless their Accept header asks for
+  // text/event-stream; every other method goes to origin.
   const rpcBody = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} });
   const rpcAnswer = () =>
     new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result: {} }), {
@@ -1061,8 +1063,8 @@ describe("the landing path is shared with MCP traffic", () => {
     expect((fetchMock.mock.calls[0]![1] as Request).method).toBe("DELETE");
   });
 
-  it.each(["application/json", "application/json, text/event-stream", "text/event-stream"])(
-    "proxies a GET to /mcp with Accept: %s to origin",
+  it.each(["application/json, text/event-stream", "text/event-stream"])(
+    "proxies a GET to /mcp with Accept: %s to origin (the MCP streamable HTTP GET)",
     async (accept) => {
       const fetchMock = stubOrigin({ "https://example.com/mcp": rpcAnswer });
       const res = await call(createHandler(makeDeps()), "https://example.com/mcp", { headers: { accept } });
@@ -1072,15 +1074,18 @@ describe("the landing path is shared with MCP traffic", () => {
     },
   );
 
-  it("serves the landing for a GET with Accept: text/html, without asking origin", async () => {
-    const fetchMock = stubOrigin({});
-    const res = await call(createHandler(makeDeps()), "https://example.com/mcp", { headers: { accept: "text/html" } });
+  it.each(["text/html", "application/json", "application/json, text/plain, */*"])(
+    "serves the landing for a GET with Accept: %s, without asking origin",
+    async (accept) => {
+      const fetchMock = stubOrigin({});
+      const res = await call(createHandler(makeDeps()), "https://example.com/mcp", { headers: { accept } });
 
-    expect(res.status).toBe(200);
-    expect(res.headers.get("content-type")).toContain("text/html");
-    expect(await res.text()).toContain("landing");
-    expect(fetchMock).not.toHaveBeenCalled();
-  });
+      expect(res.status).toBe(200);
+      expect(res.headers.get("content-type")).toContain("text/html");
+      expect(await res.text()).toContain("landing");
+      expect(fetchMock).not.toHaveBeenCalled();
+    },
+  );
 
   it("serves the landing for a GET with no Accept header and for HEAD", async () => {
     const fetchMock = stubOrigin({});
@@ -1094,6 +1099,39 @@ describe("the landing path is shared with MCP traffic", () => {
     expect(head.headers.get("content-type")).toContain("text/html");
     expect(await head.text()).toBe("");
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  describe("caches: the answer depends on Accept, so the landing and its redirect say so", () => {
+    // A browser that cached the landing (max-age=300) must not answer a later
+    // fetch("/mcp", { headers: { accept: "text/event-stream" } }) from that entry, and a
+    // cached 308 must not send every later GET /mcp to /mcp/.
+    const varyTokens = (res: Response) =>
+      (res.headers.get("vary") ?? "").split(",").map((t) => t.trim().toLowerCase());
+
+    it("sends Vary: Accept on the landing, GET and HEAD alike", async () => {
+      stubOrigin({});
+      const handler = createHandler(makeDeps());
+
+      const get = await call(handler, "https://example.com/mcp", { headers: { accept: "text/html" } });
+      const head = await call(handler, "https://example.com/mcp", { method: "HEAD" });
+
+      expect(varyTokens(get)).toContain("accept");
+      expect(varyTokens(head)).toContain("accept");
+      expect(head.headers.get("cache-control")).toBe(get.headers.get("cache-control"));
+    });
+
+    it("sends Vary: Accept and Cache-Control: no-store on the 308 from /mcp to /mcp/, GET and HEAD alike", async () => {
+      stubOrigin({});
+      const handler = createHandler(makeDeps({ webmcp_landing: { path: "/mcp/" } }));
+
+      for (const method of ["GET", "HEAD"]) {
+        const res = await call(handler, "https://example.com/mcp", { method, headers: { accept: "text/html" } });
+        expect(res.status).toBe(308);
+        expect(res.headers.get("location")).toBe("/mcp/");
+        expect(varyTokens(res), `${method} /mcp`).toContain("accept");
+        expect(res.headers.get("cache-control"), `${method} /mcp`).toBe("no-store");
+      }
+    });
   });
 
   describe("directory-form landing path", () => {
@@ -1110,6 +1148,16 @@ describe("the landing path is shared with MCP traffic", () => {
       expect(fetchMock).not.toHaveBeenCalled();
     });
 
+    it("redirects a JSON GET on /mcp to /mcp/ as well (axios-style Accept)", async () => {
+      const fetchMock = stubOrigin({});
+      const res = await call(createHandler(makeDeps(dirForm)), "https://example.com/mcp", {
+        headers: { accept: "application/json, text/plain, */*" },
+      });
+
+      expect(res.status).toBe(308);
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
     it("sends a POST on /mcp (no trailing slash) to origin, not to a redirect", async () => {
       const fetchMock = stubOrigin({ "https://example.com/mcp": rpcAnswer });
       const res = await call(createHandler(makeDeps(dirForm)), "https://example.com/mcp", {
@@ -1123,10 +1171,10 @@ describe("the landing path is shared with MCP traffic", () => {
       expect((fetchMock.mock.calls[0]![1] as Request).method).toBe("POST");
     });
 
-    it("sends a JSON GET on /mcp to origin, not to a redirect", async () => {
+    it("sends a text/event-stream GET on /mcp to origin, not to a redirect", async () => {
       stubOrigin({ "https://example.com/mcp": rpcAnswer });
       const res = await call(createHandler(makeDeps(dirForm)), "https://example.com/mcp", {
-        headers: { accept: "application/json" },
+        headers: { accept: "application/json, text/event-stream" },
       });
 
       expect(res.status).toBe(200);
@@ -1222,5 +1270,191 @@ describe("the health token", () => {
 
     expect((await call(handler, healthUrl)).status).toBe(404);
     expect((await call(handler, healthUrl, undefined, envWithSecret(""))).status).toBe(404);
+  });
+});
+
+describe("llms.txt and robots.txt configured under a protected prefix", () => {
+  // The apex exception is for the files at the apex. Under the namespace or /.well-known/ the prefix
+  // rule wins: the merged answer, a relayed redirect, a 502 and an origin 5xx all carry noindex.
+  const tokenEnv: Env = { ...env, CF_WEBMCP_DEPLOY_TOKEN: "deploy-token-x" };
+  const cases: Array<{ name: string; path: string; override: ConfigOverrides }> = [
+    { name: "llms.txt under the namespace", path: "/_webmcp/llms.txt", override: { llms_txt: { path: "/_webmcp/llms.txt" } } },
+    { name: "robots.txt under the namespace", path: "/_webmcp/robots.txt", override: { robots_txt: { path: "/_webmcp/robots.txt" } } },
+    { name: "llms.txt under /.well-known/", path: "/.well-known/llms.txt", override: { llms_txt: { path: "/.well-known/llms.txt" } } },
+    { name: "robots.txt under /.well-known/", path: "/.well-known/robots.txt", override: { robots_txt: { path: "/.well-known/robots.txt" } } },
+    {
+      name: "llms.txt under a custom namespace",
+      path: "/_x/llms.txt",
+      override: { paths: { namespace: "/_x" }, llms_txt: { path: "/_x/llms.txt" } },
+    },
+  ];
+
+  beforeEach(() => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+
+  describe.each(cases)("$name", ({ path, override }) => {
+    const origin = `https://example.com${path}`;
+
+    it("merged answer carries noindex", async () => {
+      stubOrigin({ [origin]: () => new Response("# origin\n", { status: 200, headers: { "content-type": "text/plain" } }) });
+      const res = await call(createHandler(makeDeps(override)), origin, undefined, tokenEnv);
+
+      expect(res.status).toBe(200);
+      expect(await res.text()).toContain("cf-webmcp:begin");
+      expect(res.headers.get("x-robots-tag")).toBe("noindex");
+    });
+
+    it("relayed redirect carries noindex", async () => {
+      stubOrigin({ [origin]: () => new Response(null, { status: 301, headers: { location: `https://www.example.com${path}` } }) });
+      const res = await call(createHandler(makeDeps(override)), origin, undefined, tokenEnv);
+
+      expect(res.status).toBe(301);
+      expect(res.headers.get("x-robots-tag")).toBe("noindex");
+    });
+
+    it("502 carries noindex", async () => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => {
+          throw new TypeError("Network connection lost.");
+        }),
+      );
+      const res = await call(createHandler(makeDeps(override)), origin, undefined, tokenEnv);
+
+      expect(res.status).toBe(502);
+      expect(res.headers.get("x-robots-tag")).toBe("noindex");
+    });
+
+    it("an origin 5xx without any X-Robots-Tag of its own gets noindex", async () => {
+      stubOrigin({ [origin]: () => new Response("boom", { status: 503, headers: { "content-type": "text/plain" } }) });
+      const res = await call(createHandler(makeDeps(override)), origin, undefined, tokenEnv);
+
+      expect(res.status).toBe(503);
+      expect(res.headers.get("x-robots-tag")).toBe("noindex");
+    });
+  });
+});
+
+describe("the /.well-known/ merge routes keep noindex on every relay and failure", () => {
+  // proxyToOrigin's own relays and failures carry noindex, and each of these routes passes an answer it
+  // cannot merge on. The ai-catalog never relays a redirect or an error: it answers with its generated document.
+  const tokenEnv: Env = { ...env, CF_WEBMCP_DEPLOY_TOKEN: "deploy-token-x" };
+  const GENERATED = '{"generated":true}';
+  const routes: Array<{ name: string; path: string; override: ConfigOverrides; generated: boolean }> = [
+    { name: "api-catalog", path: "/.well-known/api-catalog", override: {}, generated: false },
+    {
+      name: "agent-skills (merge)",
+      path: "/.well-known/agent-skills/site/SKILL.md",
+      override: { agent_skills: { mode: "merge" } },
+      generated: false,
+    },
+    {
+      name: "ai-catalog (merge)",
+      path: "/.well-known/ai-catalog.json",
+      override: { features: { ai_catalog: true }, ai_catalog: { mode: "merge" } },
+      generated: true,
+    },
+  ];
+  const handlerFor = (override: ConfigOverrides) => createHandler(makeDeps(override, { assets: { aiCatalogJson: GENERATED } }));
+
+  beforeEach(() => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /** What each route answers: its own status for a relayed or failed answer, the generated document for the ai-catalog. */
+  async function expectAnswer(res: Response, route: { generated: boolean }, status: number) {
+    expect(res.headers.get("x-robots-tag")).toBe("noindex");
+    if (route.generated) {
+      expect(res.status).toBe(200);
+      expect(res.headers.get("content-type")).toBe("application/ai-catalog+json");
+      expect(await res.text()).toBe(GENERATED);
+    } else {
+      expect(res.status).toBe(status);
+    }
+  }
+
+  describe.each(routes)("$name", (route) => {
+    const origin = `https://example.com${route.path}`;
+
+    it("relayed redirect that left allowed_origins", async () => {
+      stubOrigin({
+        [origin]: () => new Response(null, { status: 301, headers: { location: `https://www.example.com${route.path}` } }),
+      });
+      const res = await call(handlerFor(route.override), origin, undefined, tokenEnv);
+
+      await expectAnswer(res, route, 301);
+      if (!route.generated) expect(res.headers.get("location")).toBe(`https://www.example.com${route.path}`);
+    });
+
+    it("502 when the origin fetch fails", async () => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => {
+          throw new TypeError("Network connection lost.");
+        }),
+      );
+      const res = await call(handlerFor(route.override), origin, undefined, tokenEnv);
+
+      await expectAnswer(res, route, 502);
+    });
+
+    it("504 when the origin does not answer in time", async () => {
+      vi.useFakeTimers();
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(
+          (_url: string, init?: RequestInit) =>
+            new Promise<Response>((_, reject) => {
+              init!.signal!.addEventListener("abort", () =>
+                reject(Object.assign(new Error("aborted"), { name: "AbortError" })),
+              );
+            }),
+        ),
+      );
+      const pending = call(handlerFor(route.override), origin, undefined, tokenEnv);
+      await vi.advanceTimersByTimeAsync(PROXY_ORIGIN_TIMEOUT_MS);
+      const res = await pending;
+
+      await expectAnswer(res, route, 504);
+    });
+
+    it("an origin 5xx", async () => {
+      stubOrigin({ [origin]: () => new Response("boom", { status: 503, headers: { "content-type": "text/plain" } }) });
+      const res = await call(handlerFor(route.override), origin, undefined, tokenEnv);
+
+      await expectAnswer(res, route, 503);
+      if (!route.generated) expect(await res.text()).toBe("boom");
+    });
+
+    it("an origin 5xx that sends a different X-Robots-Tag is still marked noindex", async () => {
+      stubOrigin({
+        [origin]: () =>
+          new Response("boom", { status: 503, headers: { "content-type": "text/plain", "x-robots-tag": "all" } }),
+      });
+      const res = await call(handlerFor(route.override), origin, undefined, tokenEnv);
+
+      await expectAnswer(res, route, 503);
+    });
+  });
+
+  it("ai-catalog (merge) relays a 200 that is not JSON, with noindex", async () => {
+    const origin = "https://example.com/.well-known/ai-catalog.json";
+    stubOrigin({ [origin]: () => new Response("<html></html>", { status: 200, headers: { "content-type": "text/html" } }) });
+    const res = await call(
+      handlerFor({ features: { ai_catalog: true }, ai_catalog: { mode: "merge" } }),
+      origin,
+      undefined,
+      tokenEnv,
+    );
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toBe("text/html");
+    expect(await res.text()).toBe("<html></html>");
+    expect(res.headers.get("x-robots-tag")).toBe("noindex");
   });
 });

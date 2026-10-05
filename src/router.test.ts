@@ -255,9 +255,13 @@ describe("matchRoute", () => {
   });
 });
 
-describe("matchRoute: the landing page answers HTML GET and HEAD only", () => {
+describe("matchRoute: GET and HEAD get the landing page unless Accept asks for text/event-stream", () => {
   // Cloudflare WebMCP Labs injects a bridge with data-mcp-url="/mcp" (no trailing slash) and POSTs
   // MCP JSON-RPC there; an origin MCP server may live at the same path. Neither may get the landing.
+  // The rule: GET and HEAD requests get the landing page unless their Accept header asks for
+  // text/event-stream; every other method goes to origin. (A streamable HTTP MCP client must send
+  // text/event-stream on its GET. axios and many agents send application/json by default and still
+  // need the page we advertise in llms.txt and the manifest.)
   const dirForm = { ...baseConfig, webmcp_landing: { path: "/mcp/" } };
   const kindOf = (config: typeof baseConfig, path: string, init?: RequestInit) =>
     matchRoute(config, req(path, init), BOOTSTRAP, WIDGET).kind;
@@ -275,8 +279,17 @@ describe("matchRoute: the landing page answers HTML GET and HEAD only", () => {
     "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "*/*",
     "text/plain",
+    "application/json",
+    "Application/JSON;q=0.9",
+    // axios default
+    "application/json, text/plain, */*",
+    "text/html, application/json",
   ])("serves the landing for a GET with Accept: %s", (accept) => {
     expect(kindOf(baseConfig, "/mcp", { headers: { accept } })).toBe("landing");
+  });
+
+  it("serves the landing for a HEAD that asks for JSON", () => {
+    expect(kindOf(baseConfig, "/mcp", { method: "HEAD", headers: { accept: "application/json" } })).toBe("landing");
   });
 
   it.each(["POST", "PUT", "PATCH", "DELETE", "OPTIONS"])("%s to the landing path goes to origin", (method) => {
@@ -284,27 +297,29 @@ describe("matchRoute: the landing page answers HTML GET and HEAD only", () => {
   });
 
   it.each([
-    "application/json",
-    "Application/JSON;q=0.9",
-    "application/json, text/event-stream",
     "text/event-stream",
     "TEXT/EVENT-STREAM",
-    "text/html, application/json",
-    // Any occurrence counts, even a q=0 refusal: a client that names a streaming or JSON type is not a browser.
-    "text/html, application/json;q=0",
+    // What a streamable HTTP MCP client sends.
+    "application/json, text/event-stream",
+    "text/html, text/event-stream",
+    // Any occurrence counts, even a q=0 refusal: a client that names the stream type is not asking for a page.
+    "text/html, text/event-stream;q=0",
   ])("a GET with Accept: %s goes to origin", (accept) => {
     expect(kindOf(baseConfig, "/mcp", { headers: { accept } })).toBe("proxy");
   });
 
-  it("a HEAD that asks for JSON goes to origin too", () => {
-    expect(kindOf(baseConfig, "/mcp", { method: "HEAD", headers: { accept: "application/json" } })).toBe("proxy");
+  it("a HEAD that asks for text/event-stream goes to origin too", () => {
+    expect(kindOf(baseConfig, "/mcp", { method: "HEAD", headers: { accept: "text/event-stream" } })).toBe("proxy");
   });
 
   describe("directory-form landing path (/mcp/ serves, /mcp redirects)", () => {
-    it("redirects a plain GET or HEAD on /mcp", () => {
+    it("redirects a GET or HEAD on /mcp, whatever it accepts except text/event-stream", () => {
       expect(kindOf(dirForm, "/mcp")).toBe("landing_redirect");
       expect(kindOf(dirForm, "/mcp", { method: "HEAD" })).toBe("landing_redirect");
       expect(kindOf(dirForm, "/mcp", { headers: { accept: "text/html" } })).toBe("landing_redirect");
+      expect(kindOf(dirForm, "/mcp", { headers: { accept: "application/json, text/plain, */*" } })).toBe(
+        "landing_redirect",
+      );
     });
 
     it("sends POST and DELETE on /mcp to origin instead of a redirect", () => {
@@ -312,14 +327,16 @@ describe("matchRoute: the landing page answers HTML GET and HEAD only", () => {
       expect(kindOf(dirForm, "/mcp", { method: "DELETE" })).toBe("proxy");
     });
 
-    it("sends a JSON or event-stream GET on /mcp to origin instead of a redirect", () => {
+    it("sends a text/event-stream GET on /mcp to origin instead of a redirect", () => {
       expect(kindOf(dirForm, "/mcp", { headers: { accept: "application/json, text/event-stream" } })).toBe("proxy");
+      expect(kindOf(dirForm, "/mcp", { headers: { accept: "text/event-stream" } })).toBe("proxy");
     });
 
     it("applies the same rule to /mcp/ itself", () => {
       expect(kindOf(dirForm, "/mcp/")).toBe("landing");
+      expect(kindOf(dirForm, "/mcp/", { headers: { accept: "application/json" } })).toBe("landing");
       expect(kindOf(dirForm, "/mcp/", { method: "POST" })).toBe("proxy");
-      expect(kindOf(dirForm, "/mcp/", { headers: { accept: "application/json" } })).toBe("proxy");
+      expect(kindOf(dirForm, "/mcp/", { headers: { accept: "text/event-stream" } })).toBe("proxy");
     });
   });
 });

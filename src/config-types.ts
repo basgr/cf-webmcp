@@ -39,6 +39,12 @@ const PathString = z
   .string()
   .min(1)
   .refine((s) => s.startsWith("/"), { message: "path must start with /" })
+  // A leading // is a protocol-relative URL: as a Location it sends the browser to another
+  // host, and as a preflight probe path it would send the deploy token there. (A backslash,
+  // which browsers read as a slash, is already rejected by PATH_BAD_CHARS.)
+  .refine((s) => !s.startsWith("//"), {
+    message: "path must not start with // (a protocol-relative URL names another host)",
+  })
   .refine((s) => !s.includes(".."), { message: "path must not contain .." })
   .refine((s) => !s.includes("?") && !s.includes("#"), { message: "path must not contain query or fragment" })
   .refine((s) => !PATH_BAD_CHARS.test(s), {

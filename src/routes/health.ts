@@ -33,17 +33,19 @@ async function widgetAssetPresent(config: Config, opts: HealthOptions): Promise<
 }
 
 /**
- * Constant-time comparison for secret tokens. Avoids leaking the token via
- * response-time differences when the attacker controls the candidate value.
+ * Constant-time comparison for secret tokens. Both sides are hashed with SHA-256
+ * first, so the two values compared are always 32 bytes: neither the content nor the
+ * length of the token shows in the response time, whatever candidate the attacker
+ * sends. The digests are compared with crypto.subtle.timingSafeEqual, which the
+ * Workers runtime provides.
  */
-function timingSafeEqual(a: string, b: string): boolean {
-  // Length difference is not a secret; the candidate is attacker-supplied.
-  if (a.length !== b.length) return false;
-  let diff = 0;
-  for (let i = 0; i < a.length; i++) {
-    diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
-  }
-  return diff === 0;
+async function tokensMatch(candidate: string, expected: string): Promise<boolean> {
+  const encoder = new TextEncoder();
+  const [a, b] = await Promise.all([
+    crypto.subtle.digest("SHA-256", encoder.encode(candidate)),
+    crypto.subtle.digest("SHA-256", encoder.encode(expected)),
+  ]);
+  return crypto.subtle.timingSafeEqual(a, b);
 }
 
 /**
@@ -68,7 +70,7 @@ export async function healthResponse(request: Request, config: Config, opts: Hea
   if (token) {
     const auth = request.headers.get("authorization") ?? "";
     const expected = `Bearer ${token}`;
-    if (!timingSafeEqual(auth, expected)) {
+    if (!(await tokensMatch(auth, expected))) {
       return new Response("unauthorized", {
         status: 401,
         headers: { "x-robots-tag": "noindex" },

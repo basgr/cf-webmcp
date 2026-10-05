@@ -221,3 +221,58 @@ describe("healthResponse", () => {
     });
   });
 });
+
+describe("healthResponse bearer comparison", () => {
+  const base = { configHash: "abc12345", schemaVersion: 1, deployedAt: "2026-05-13T20:00:00.000Z" };
+  const get = (config: Config, bearer: string, envToken?: string) =>
+    healthResponse(
+      new Request("https://example.com/_webmcp/health", { headers: { authorization: bearer } }),
+      config,
+      { ...base, envToken },
+    );
+  const tomlToken = makeConfig({ health: { public: false, token: "s3cret-token" } });
+  const closed = makeConfig({ health: { public: false, token: "" } });
+
+  it.each([
+    ["shorter", "Bearer s3cret"],
+    ["longer", "Bearer s3cret-token-and-then-some"],
+    ["empty", "Bearer "],
+    ["missing scheme", "s3cret-token"],
+    ["same length, one character off", "Bearer s3cret-tokeN"],
+  ])("a %s wrong bearer gets 401 with [health].token", async (_label, bearer) => {
+    const res = await get(tomlToken, bearer);
+    expect(res.status).toBe(401);
+    expect(res.headers.get("x-robots-tag")).toBe("noindex");
+  });
+
+  it.each([
+    ["shorter", "Bearer s3cret"],
+    ["longer", "Bearer s3cret-token-and-then-some"],
+  ])("a %s wrong bearer gets 401 with the secret", async (_label, bearer) => {
+    expect((await get(closed, bearer, "s3cret-token")).status).toBe(401);
+  });
+
+  it("accepts the right token from either source", async () => {
+    expect((await get(tomlToken, "Bearer s3cret-token")).status).toBe(200);
+    expect((await get(closed, "Bearer s3cret-token", "s3cret-token")).status).toBe(200);
+  });
+
+  it("hashes both sides and compares the two 32-byte digests, whatever the lengths", async () => {
+    const digest = vi.spyOn(crypto.subtle, "digest");
+    const equal = vi.spyOn(crypto.subtle as unknown as { timingSafeEqual: (a: ArrayBuffer, b: ArrayBuffer) => boolean }, "timingSafeEqual");
+
+    // A candidate of another length must not return before the comparison runs: that would leak the token length.
+    const short = await get(tomlToken, "Bearer x");
+    expect(short.status).toBe(401);
+    expect(digest).toHaveBeenCalledTimes(2);
+    expect(equal).toHaveBeenCalledTimes(1);
+    const [a, b] = equal.mock.calls[0]!;
+    expect(a.byteLength).toBe(32);
+    expect(b.byteLength).toBe(32);
+
+    const long = await get(tomlToken, `Bearer ${"x".repeat(500)}`);
+    expect(long.status).toBe(401);
+    expect(digest).toHaveBeenCalledTimes(4);
+    expect(equal).toHaveBeenCalledTimes(2);
+  });
+});

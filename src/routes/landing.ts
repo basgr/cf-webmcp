@@ -17,6 +17,10 @@ export function landingResponse(
         sie: config.cache.landing_sie,
       }),
       etag: `"${configHash}"`,
+      // The router answers this path from Accept (text/event-stream goes to origin), so a
+      // cache must key on it: a browser that cached this page must not answer a later
+      // fetch with Accept: text/event-stream from it.
+      vary: "accept",
       "x-robots-tag": "noindex",
       "x-content-type-options": "nosniff",
       // Pairing UI takes a sensitive token; deny framing to prevent clickjacking.
@@ -26,9 +30,15 @@ export function landingResponse(
   });
 }
 
+/**
+ * The 308 from "/mcp" to "/mcp/". Like the page, it exists only for requests the router
+ * gave to the landing, so it varies on Accept. no-store because a browser would
+ * otherwise cache a 308 for good and send every later GET on this path, text/event-stream
+ * ones included, to the page; the cost of never caching it is one cheap Worker answer.
+ */
 export function landingRedirect(toPath: string): Response {
   return new Response(null, {
     status: 308,
-    headers: { location: toPath },
+    headers: { location: toPath, "cache-control": "no-store", vary: "accept" },
   });
 }

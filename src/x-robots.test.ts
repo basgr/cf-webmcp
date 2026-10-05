@@ -5,6 +5,10 @@
  * header on any answer (a merge, a relayed redirect, a 502 or 504, an origin
  * answer relayed as it came).
  *
+ * The exception belongs to the apex path, not to the route kind: a config that
+ * puts llms.txt or robots.txt under the namespace or `/.well-known/` gets
+ * noindex on every answer there (see the last describe block).
+ *
  * A path in `passthrough` mode is not served by cf-webmcp at all: the router
  * hands it to the ordinary proxy, and the response is origin's own. The rule
  * does not apply to it, and the Worker adds no header there.
@@ -398,4 +402,50 @@ describe("a path in passthrough mode is origin's, not a route cf-webmcp serves",
       }
     });
   }
+});
+
+describe("llms.txt and robots.txt decide by their configured path", () => {
+  // The apex exception belongs to the files at the apex. A config can put either file under a
+  // protected prefix (the namespace or /.well-known/); then the prefix rule wins and every answer,
+  // the merged one and the relays and failures alike, carries noindex.
+  const base = makeConfig();
+  const withPaths = (llms: string, robots: string, namespace = "/_webmcp"): Config => ({
+    ...base,
+    llms_txt: { ...base.llms_txt, path: llms },
+    robots_txt: { ...base.robots_txt, path: robots },
+    paths: { ...base.paths, namespace },
+  });
+
+  const underPrefix: Array<[string, Config]> = [
+    ["the namespace", withPaths("/_webmcp/llms.txt", "/_webmcp/robots.txt")],
+    ["/.well-known/", withPaths("/.well-known/llms.txt", "/.well-known/robots.txt")],
+    ["a custom namespace", withPaths("/_x/llms.txt", "/_x/robots.txt", "/_x")],
+  ];
+
+  for (const [where, config] of underPrefix) {
+    for (const kind of ["llms_txt", "robots_txt"] as const) {
+      for (const [label, answer] of Object.entries(upstreamAnswers)) {
+        it(`${kind} under ${where}: ${label} carries noindex`, async () => {
+          const res = await forbiddenRoute(kind, config, answer);
+          expect(res.headers.get("x-robots-tag"), `${kind} at ${samplePath(kind, config)}`).toBe("noindex");
+        });
+      }
+    }
+  }
+
+  it("keeps the status, body and other headers when it adds noindex", async () => {
+    const res = await forbiddenRoute("llms_txt", withPaths("/_webmcp/llms.txt", "/robots.txt"), upstreamAnswers["502 from proxyToOrigin"]!);
+    expect(res.status).toBe(502);
+    expect(await res.text()).toBe("origin request failed");
+  });
+
+  it("still strips the header from a file outside the protected prefixes, even next to a custom namespace", async () => {
+    const config = withPaths("/other/llms.txt", "/other/robots.txt", "/_x");
+    for (const kind of ["llms_txt", "robots_txt"] as const) {
+      for (const [label, answer] of Object.entries(upstreamAnswers)) {
+        const res = await forbiddenRoute(kind, config, answer);
+        expect([...res.headers.keys()], `${kind}: ${label}`).not.toContain("x-robots-tag");
+      }
+    }
+  });
 });

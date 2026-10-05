@@ -3,7 +3,7 @@ import { promises as fs, readFileSync } from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
-import { runPreflight } from "./preflight";
+import { parseArgs, probeUrl, runPreflight } from "./preflight";
 import { buildConfig } from "./build-config";
 
 /**
@@ -103,7 +103,7 @@ async function writeToml(name: string, contents: string): Promise<string> {
 
 async function run(
   toml: string,
-  opts: { deployToken?: string } = {},
+  opts: { deployToken?: string; origin?: string } = {},
 ): Promise<{ code: number; result: Result; lines: string[] }> {
   const tomlPath = await writeToml("webmcp.toml", toml);
   const outDir = path.join(tmpDir, "preflight-out");
@@ -112,6 +112,7 @@ async function run(
     outDir,
     log: (l) => lines.push(l),
     deployToken: opts.deployToken ?? "",
+    origin: opts.origin,
   });
   const result = JSON.parse(await fs.readFile(path.join(outDir, "preflight.json"), "utf8")) as Result;
   return { code, result, lines };
@@ -130,7 +131,9 @@ describe("preflight: an origin MCP server at the landing path", () => {
     const warnings = mcpWarnings(result);
     expect(warnings).toHaveLength(1);
     expect(warnings[0]).toContain("/mcp");
-    expect(warnings[0]).toMatch(/not HTML|non-HTML|HTML GET/i);
+    expect(warnings[0]).toContain(
+      "GET and HEAD requests get the landing page unless their Accept header asks for text/event-stream; every other method goes to origin",
+    );
   });
 
   it("warns for a 200 text/event-stream answer, and does not wait for the stream to end", async () => {
@@ -387,4 +390,212 @@ description = "child description"
 
     expect(result.config_hash).toBe(buildsAs);
   });
+});
+
+describe("preflight: GET probes for a directory-form landing path", () => {
+  const DIR_FORM = `${MINIMAL}\n[webmcp_landing]\npath = "/mcp/"\n`;
+  const html = () => new Response("<html></html>", { status: 200, headers: { "content-type": "text/html" } });
+  const getUrls = (calls: FetchCall[]) => calls.filter((c) => c.init.method === "GET").map((c) => c.url);
+
+  /** GET answers keyed by URL; everything else 404, POST included. */
+  function stubGets(answers: Record<string, () => Response>) {
+    const calls: FetchCall[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string | URL, init: RequestInit = {}) => {
+        calls.push({ url: String(input), init });
+        const answer = init.method === "GET" ? answers[String(input)] : undefined;
+        return answer ? answer() : new Response("not found", { status: 404 });
+      }),
+    );
+    return calls;
+  }
+
+  it("probes both /mcp/ and the slash-less /mcp, which the Worker claims for browser GETs", async () => {
+    const calls = stubGets({});
+
+    await run(DIR_FORM);
+
+    const urls = getUrls(calls);
+    expect(urls).toContain("https://example.com/mcp/");
+    expect(urls).toContain("https://example.com/mcp");
+  });
+
+  it("reports a collision when origin serves content at the slash-less /mcp", async () => {
+    stubGets({ "https://example.com/mcp": html });
+
+    const { code, result } = await run(DIR_FORM);
+
+    expect(code).toBe(1);
+    expect(result.collisions).toEqual(["/mcp: origin already serves content here"]);
+  });
+
+  it("reports a collision at /mcp/ as before", async () => {
+    stubGets({ "https://example.com/mcp/": html });
+
+    const { code, result } = await run(DIR_FORM);
+
+    expect(code).toBe(1);
+    expect(result.collisions).toEqual(["/mcp/: origin already serves content here"]);
+  });
+
+  it("treats a redirect from /mcp to /mcp/ at origin as free, like any 3xx", async () => {
+    stubGets({
+      "https://example.com/mcp": () => new Response(null, { status: 301, headers: { location: "/mcp/" } }),
+    });
+
+    const { code, result } = await run(DIR_FORM);
+
+    expect(code).toBe(0);
+    expect(result.collisions).toEqual([]);
+  });
+
+  it("probes only /mcp for a file-form landing path, and only the configured path for a custom one", async () => {
+    const plain = stubGets({});
+    await run(MINIMAL);
+    expect(getUrls(plain).filter((u) => u.includes("/mcp"))).toEqual(["https://example.com/mcp"]);
+
+    vi.unstubAllGlobals();
+    const custom = stubGets({});
+    await run(`${MINIMAL}\n[webmcp_landing]\npath = "/pair"\n`);
+    expect(getUrls(custom).filter((u) => u.includes("/pair"))).toEqual(["https://example.com/pair"]);
+  });
+
+  it("probes no landing path at all when the landing feature is off", async () => {
+    const calls = stubGets({});
+
+    await run(`${DIR_FORM}\n[features]\nwebmcp_landing = false\n`);
+
+    expect(getUrls(calls).filter((u) => /\/mcp\/?$/.test(u))).toEqual([]);
+  });
+});
+
+describe("preflight: --origin overrides where the probes go, and nothing else", () => {
+  const OVERRIDE = "https://origin.internal.example";
+  const hostsOf = (calls: FetchCall[]) => [...new Set(calls.map((c) => new URL(c.url).host))];
+
+  async function sharedOutHashes(toml: string, origin: string | undefined) {
+    const tomlPath = await writeToml("webmcp.toml", toml);
+    const outDir = path.join(tmpDir, "shared-out");
+    await buildConfig({ tomlPath, outDir });
+    const buildHash = /CONFIG_HASH = "([0-9a-f]+)"/.exec(await fs.readFile(path.join(outDir, "hash.ts"), "utf8"))![1]!;
+    await runPreflight(tomlPath, false, { outDir, log: () => {}, deployToken: "", origin });
+    const result = JSON.parse(await fs.readFile(path.join(outDir, "preflight.json"), "utf8")) as Result;
+    return { buildHash, preflightHash: result.config_hash, outDir };
+  }
+
+  it("sends every probe, GET and POST, to the override host and none to [origin].base_url", async () => {
+    const { calls } = stubOrigin();
+
+    await run(MINIMAL, { origin: OVERRIDE });
+
+    expect(calls.length).toBeGreaterThan(10);
+    expect(hostsOf(calls)).toEqual(["origin.internal.example"]);
+    expect(calls.map((c) => c.url)).toContain(`${OVERRIDE}/mcp`);
+    expect(calls.map((c) => c.url)).toContain(`${OVERRIDE}/.well-known/webmcp`);
+    expect(calls.some((c) => c.init.method === "POST" && c.url === `${OVERRIDE}/mcp`)).toBe(true);
+  });
+
+  it("keeps the paths and does not follow redirects", async () => {
+    const { calls } = stubOrigin();
+
+    await run(`${MINIMAL}\n[webmcp_landing]\npath = "/mcp/"\n`, { origin: `${OVERRIDE}/` });
+
+    const urls = calls.map((c) => c.url);
+    expect(urls).toContain(`${OVERRIDE}/mcp/`);
+    expect(urls).toContain(`${OVERRIDE}/mcp`);
+    expect(urls).toContain(`${OVERRIDE}/llms.txt`);
+    expect(calls.every((c) => c.init.redirect === "manual")).toBe(true);
+  });
+
+  it("sends the deploy token headers to the override host only", async () => {
+    const { calls } = stubOrigin();
+
+    await run(MINIMAL, { origin: OVERRIDE, deployToken: "tok-123" });
+
+    for (const { url, init } of calls) {
+      expect(new URL(url).host, url).toBe("origin.internal.example");
+      const headers = init.headers as Record<string, string>;
+      expect(headers["cf-webmcp-deploy-token"], url).toBe("tok-123");
+      expect(headers["cf-webmcp-bypass"], url).toBe("1");
+    }
+  });
+
+  it("stamps the hash of the unmodified config: it equals the build's CONFIG_HASH", async () => {
+    stubOrigin();
+
+    const { buildHash, preflightHash } = await sharedOutHashes(MINIMAL, OVERRIDE);
+
+    expect(preflightHash).toBe(buildHash);
+  });
+
+  it("stamps the same hash with and without --origin, and the next build does not call the result stale", async () => {
+    stubOrigin();
+
+    const withOverride = await sharedOutHashes(MINIMAL, OVERRIDE);
+    const without = await sharedOutHashes(MINIMAL, undefined);
+    expect(withOverride.preflightHash).toBe(without.preflightHash);
+
+    // The next build of the same TOML, in the directory preflight wrote to.
+    const tomlPath = path.join(tmpDir, "webmcp.toml");
+    await buildConfig({ tomlPath, outDir: without.outDir });
+    expect(await fs.readFile(path.join(without.outDir, "config.ts"), "utf8")).not.toContain("preflight result is stale");
+  });
+
+  it.each([
+    ["https://origin.internal.example"],
+    ["https://origin.internal.example/"],
+    ["http://localhost:8080"],
+    ["https://origin.internal.example:8443"],
+  ])("accepts %s", async (origin) => {
+    stubOrigin();
+
+    const { code } = await run(MINIMAL, { origin });
+
+    expect(code).toBe(0);
+  });
+
+  it.each([
+    ["a path", "https://origin.internal.example/app"],
+    ["a path of two slashes", "https://origin.internal.example//"],
+    ["a query", "https://origin.internal.example/?x=1"],
+    ["an empty query", "https://origin.internal.example?"],
+    ["a fragment", "https://origin.internal.example/#x"],
+    ["userinfo", "https://user:pw@origin.internal.example"],
+    ["a scheme other than http(s)", "ftp://origin.internal.example"],
+    ["a protocol-relative value", "//origin.internal.example"],
+    ["a bare host", "origin.internal.example"],
+    ["an empty value", ""],
+    ["a javascript: URL", "javascript:alert(1)"],
+  ])("rejects %s before any request is sent", async (_label, origin) => {
+    const { calls } = stubOrigin();
+
+    await expect(run(MINIMAL, { origin })).rejects.toThrow(/--origin/);
+    expect(calls).toEqual([]);
+  });
+
+  it("parses --origin from the command line", () => {
+    expect(parseArgs(["--config=a.toml", "--force", "--origin=https://o.example"])).toEqual({
+      configPath: "a.toml",
+      force: true,
+      origin: "https://o.example",
+    });
+    expect(parseArgs([])).toEqual({ configPath: "webmcp.toml", force: false, origin: undefined });
+  });
+});
+
+describe("probeUrl: a probe never leaves the host it was aimed at", () => {
+  const base = new URL("https://origin.example");
+
+  it("resolves an ordinary path on the base", () => {
+    expect(probeUrl(base, "/mcp/").href).toBe("https://origin.example/mcp/");
+    expect(probeUrl(new URL("http://localhost:8080"), "/llms.txt").href).toBe("http://localhost:8080/llms.txt");
+  });
+
+  it.each(["//evil.example/mcp/", "/\\evil.example/", "https://evil.example/x", "///evil.example"])(
+    "refuses %s, because the deploy token goes out with the request",
+    (p) => {
+      expect(() => probeUrl(base, p)).toThrow(/not https:\/\/origin\.example/);
+    },
+  );
 });

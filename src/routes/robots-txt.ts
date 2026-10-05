@@ -5,7 +5,7 @@
 
 import type { Config } from "../config-types";
 import { buildCacheControl } from "../cache";
-import { withoutRobotsTag } from "../robots-tag";
+import { applyRobotsTagRule } from "../robots-tag";
 
 const BEGIN = "# cf-webmcp:begin";
 const END = "# cf-webmcp:end";
@@ -26,12 +26,13 @@ export async function robotsTxtResponse(
     const original = await upstream.text();
     body = mergeBlock(original, block);
   } else {
-    // Relay origin's answer. This route never carries X-Robots-Tag, so the noindex
-    // proxyToOrigin puts on its own relays and failures comes off here.
-    return withoutRobotsTag(upstream);
+    // Relay origin's answer. At its apex path this route never carries X-Robots-Tag, so
+    // the noindex proxyToOrigin puts on its own relays and failures comes off here
+    // (see src/robots-tag.ts).
+    return applyRobotsTagRule(upstream, config, config.robots_txt.path);
   }
 
-  return new Response(body, {
+  const response = new Response(body, {
     status: 200,
     headers: {
       "content-type": "text/plain; charset=utf-8",
@@ -44,6 +45,8 @@ export async function robotsTxtResponse(
       "x-content-type-options": "nosniff",
     },
   });
+  // No X-Robots-Tag at the apex; noindex if the configured path sits under a protected prefix.
+  return applyRobotsTagRule(response, config, config.robots_txt.path);
 }
 
 export function mergeBlock(original: string, block: string): string {

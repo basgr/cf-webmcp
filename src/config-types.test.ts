@@ -213,3 +213,75 @@ describe("ai_catalog config", () => {
     ).toThrow();
   });
 });
+
+describe("path validation (PathString)", () => {
+  // Every config field that holds a URL path of this Worker's own. Each one ends up in a Location
+  // header, a Link header or a probe URL, so each one must stay a path on this host.
+  const pathFields: Array<{ name: string; withPath: (p: string) => Record<string, unknown> }> = [
+    { name: "manifest.path", withPath: (p) => ({ manifest: { path: p } }) },
+    { name: "manifest.aliases", withPath: (p) => ({ manifest: { aliases: [p] } }) },
+    { name: "webmcp_landing.path", withPath: (p) => ({ webmcp_landing: { path: p } }) },
+    { name: "llms_txt.path", withPath: (p) => ({ llms_txt: { path: p } }) },
+    { name: "robots_txt.path", withPath: (p) => ({ robots_txt: { path: p } }) },
+    { name: "agents_md.path", withPath: (p) => ({ agents_md: { path: p } }) },
+    { name: "agents_md.aliases", withPath: (p) => ({ agents_md: { aliases: [p] } }) },
+    { name: "api_catalog.path", withPath: (p) => ({ api_catalog: { path: p } }) },
+    { name: "ai_catalog.path", withPath: (p) => ({ ai_catalog: { path: p } }) },
+    { name: "agent_skills.path", withPath: (p) => ({ agent_skills: { path: p } }) },
+    { name: "agent_skills.aliases", withPath: (p) => ({ agent_skills: { aliases: [p] } }) },
+    { name: "agent_skills_index.path", withPath: (p) => ({ agent_skills_index: { path: p } }) },
+    { name: "paths.namespace", withPath: (p) => ({ paths: { namespace: p } }) },
+  ];
+
+  const rejected: Array<[string, string]> = [
+    ["a leading // (protocol-relative: the browser would go to evil.example)", "//evil.example/mcp/"],
+    ["a bare //", "//"],
+    ["a leading ///", "///evil.example/"],
+    ["a leading /\\ (browsers read the backslash as a slash)", "/\\evil.example/"],
+    ["a backslash anywhere", "/mcp\\evil"],
+    ["a space", "/mcp evil"],
+    ["a TAB", "/mcp\tevil"],
+    ["a CR", "/mcp\revil"],
+    ["a LF", "/mcp\nevil"],
+    ["a NUL", "/mcp\x00evil"],
+    ["a C0 control (US)", "/mcp\x1fevil"],
+    ["DEL", "/mcp\x7fevil"],
+    ["a C1 control", "/mcp\x85evil"],
+    ["a leading control character", "\x01/mcp"],
+    ["a missing leading slash", "mcp"],
+  ];
+
+  for (const { name, withPath } of pathFields) {
+    for (const [label, bad] of rejected) {
+      it(`${name} rejects ${label}`, () => {
+        expect(ConfigSchema.safeParse({ ...minimal, ...withPath(bad) }).success).toBe(false);
+      });
+    }
+  }
+
+  it("still accepts ordinary paths, including a double slash that is not at the start", () => {
+    for (const ok of ["/", "/mcp", "/mcp/", "/.well-known/agents.md", "/a//b", "/a/b/", "/foo~bar", "/foo%20bar"]) {
+      expect(ConfigSchema.safeParse({ ...minimal, webmcp_landing: { path: ok } }).success, ok).toBe(true);
+    }
+  });
+
+  it("accepts every default path", () => {
+    const c = ConfigSchema.parse(minimal);
+    const all = [
+      c.manifest.path,
+      ...c.manifest.aliases,
+      c.webmcp_landing.path,
+      c.llms_txt.path,
+      c.robots_txt.path,
+      c.agents_md.path,
+      ...c.agents_md.aliases,
+      c.api_catalog.path,
+      c.ai_catalog.path,
+      c.agent_skills.path,
+      ...c.agent_skills.aliases,
+      c.agent_skills_index.path,
+      c.paths.namespace,
+    ];
+    expect(all.every((p) => p.startsWith("/") && !p.startsWith("//"))).toBe(true);
+  });
+});

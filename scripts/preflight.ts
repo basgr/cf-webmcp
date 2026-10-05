@@ -9,14 +9,21 @@
  * Usage:
  *   npm run preflight -- --config=templates/example-site/webmcp.toml
  *   npm run preflight -- --config=webmcp.toml --force   # do not exit non-zero
+ *   npm run preflight -- --config=webmcp.toml --origin=https://origin.example.com
  *
  * Where it is valid:
  *   Preflight requests [origin].base_url as an ordinary client. It sees the
  *   origin's own answers only while that hostname is NOT routed through the
  *   Worker. Once it is, every request lands on the Worker and preflight reports
  *   the Worker's own responses (landing, manifest, merged files) back as
- *   collisions and merges. Run it before routing the hostname, or against a
- *   direct origin hostname (a copy of the TOML with [origin].base_url set to it).
+ *   collisions and merges. Run it before routing the hostname, or point it at a
+ *   direct origin hostname with --origin.
+ *
+ * --origin=<url>:
+ *   Overrides only the base URL the probes go to (an http(s) origin, no path, query,
+ *   fragment or userinfo). The config, and so the config hash stored in the result,
+ *   stays exactly what the build sees, so the result is not flagged stale. The deploy
+ *   token headers go to that host and nowhere else; redirects are never followed.
  *
  * Token headers:
  *   If CF_WEBMCP_DEPLOY_TOKEN is set, preflight sends `cf-webmcp-bypass: 1` and
@@ -36,6 +43,8 @@ import { configHashOf, resolveInherits } from "./build-config.js";
 interface Args {
   configPath: string;
   force: boolean;
+  /** --origin=<url>, validated later by parseOriginOverride. */
+  origin: string | undefined;
 }
 
 interface PathCheck {
@@ -50,14 +59,52 @@ type Outcome =
   | { kind: "collision"; status: number; contentType: string; reason: string }
   | { kind: "error"; reason: string };
 
-function parseArgs(argv: string[]): Args {
+export function parseArgs(argv: string[]): Args {
   let configPath = "webmcp.toml";
   let force = false;
+  let origin: string | undefined;
   for (const a of argv) {
     if (a === "--force") force = true;
     else if (a.startsWith("--config=")) configPath = a.slice("--config=".length);
+    else if (a.startsWith("--origin=")) origin = a.slice("--origin=".length);
   }
-  return { configPath, force };
+  return { configPath, force, origin };
+}
+
+/**
+ * Validate the --origin value: an http(s) origin and nothing more. A path, query,
+ * fragment or userinfo is refused, so the override can only change which host the
+ * probes (and the deploy token) go to, never which paths they ask for.
+ */
+export function parseOriginOverride(value: string): URL {
+  const refuse = (): never => {
+    throw new Error(
+      `--origin must be an http(s) origin without a path, such as https://origin.example.com, got ${JSON.stringify(value)}`,
+    );
+  };
+  if (value.includes("?") || value.includes("#")) return refuse();
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return refuse();
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") return refuse();
+  if (!url.hostname || url.username || url.password || url.pathname !== "/") return refuse();
+  return url;
+}
+
+/**
+ * The URL a probe requests: `pathname` on `base`. Config paths cannot start with //
+ * (PathString refuses them), but the deploy token goes out with every probe, so a
+ * result that left `base`'s origin is an error here too, not a request.
+ */
+export function probeUrl(base: URL, pathname: string): URL {
+  const url = new URL(pathname, base);
+  if (url.origin !== base.origin) {
+    throw new Error(`probe path ${JSON.stringify(pathname)} resolves to ${url.origin}, not ${base.origin}`);
+  }
+  return url;
 }
 
 async function loadConfig(p: string): Promise<Config> {
@@ -73,46 +120,39 @@ async function loadConfig(p: string): Promise<Config> {
   return parsed.data;
 }
 
-function pathsToCheck(config: Config): PathCheck[] {
-  const base = new URL(config.origin.base_url);
-  const out: PathCheck[] = [];
+/** The landing paths the router claims: the configured one and, for a directory-form path (/mcp/), the slash-less form it redirects. */
+function landingPaths(config: Config): string[] {
+  const landing = config.webmcp_landing.path;
+  const paths = [landing];
+  if (landing.endsWith("/") && landing.length > 1) paths.push(landing.slice(0, -1));
+  return paths;
+}
 
-  if (config.features.manifest) {
-    out.push({ label: config.manifest.path, url: new URL(config.manifest.path, base), expect: "claim" });
-  }
+function pathsToCheck(config: Config, base: URL): PathCheck[] {
+  const out: PathCheck[] = [];
+  const claim = (p: string, expect: PathCheck["expect"]) => out.push({ label: p, url: probeUrl(base, p), expect });
+
+  if (config.features.manifest) claim(config.manifest.path, "claim");
   if (config.features.webmcp_landing) {
-    out.push({ label: config.webmcp_landing.path, url: new URL(config.webmcp_landing.path, base), expect: "claim" });
+    // Both forms: the Worker answers GET and HEAD on /mcp (a redirect) as well as on /mcp/.
+    for (const p of landingPaths(config)) claim(p, "claim");
   }
-  if (config.features.llms_txt && config.llms_txt.mode !== "passthrough") {
-    out.push({ label: config.llms_txt.path, url: new URL(config.llms_txt.path, base), expect: "merge" });
-  }
-  if (config.features.robots_txt && config.robots_txt.mode !== "passthrough") {
-    out.push({ label: config.robots_txt.path, url: new URL(config.robots_txt.path, base), expect: "merge" });
-  }
+  if (config.features.llms_txt && config.llms_txt.mode !== "passthrough") claim(config.llms_txt.path, "merge");
+  if (config.features.robots_txt && config.robots_txt.mode !== "passthrough") claim(config.robots_txt.path, "merge");
   if (config.features.agents_md && config.agents_md.mode !== "passthrough") {
-    out.push({ label: config.agents_md.path, url: new URL(config.agents_md.path, base), expect: "merge" });
-    for (const alias of config.agents_md.aliases) {
-      out.push({ label: alias, url: new URL(alias, base), expect: "claim" });
-    }
+    claim(config.agents_md.path, "merge");
+    for (const alias of config.agents_md.aliases) claim(alias, "claim");
   }
-  if (config.features.api_catalog && config.api_catalog.mode !== "passthrough") {
-    out.push({ label: config.api_catalog.path, url: new URL(config.api_catalog.path, base), expect: "claim" });
-  }
+  if (config.features.api_catalog && config.api_catalog.mode !== "passthrough") claim(config.api_catalog.path, "claim");
   if (config.features.agent_skills && config.agent_skills.mode !== "passthrough") {
-    out.push({ label: config.agent_skills.path, url: new URL(config.agent_skills.path, base), expect: "merge" });
-    for (const alias of config.agent_skills.aliases) {
-      out.push({ label: alias, url: new URL(alias, base), expect: "claim" });
-    }
+    claim(config.agent_skills.path, "merge");
+    for (const alias of config.agent_skills.aliases) claim(alias, "claim");
   }
   if (config.features.agent_skills_index && config.agent_skills_index.mode !== "passthrough") {
-    out.push({ label: config.agent_skills_index.path, url: new URL(config.agent_skills_index.path, base), expect: "claim" });
+    claim(config.agent_skills_index.path, "claim");
   }
   // Namespace probe - verifies origin does not serve anything under /_webmcp/.
-  out.push({
-    label: `${config.paths.namespace}/__probe`,
-    url: new URL(`${config.paths.namespace}/__probe`, base),
-    expect: "claim",
-  });
+  claim(`${config.paths.namespace}/__probe`, "claim");
   return out;
 }
 
@@ -187,17 +227,13 @@ const MCP_PROBE_TIMEOUT_MS = 10_000;
 const MCP_CONTENT_TYPE = /^(?:application\/json|text\/event-stream)\s*(?:;|$)/i;
 
 /**
- * The landing paths the Worker stops answering for non-HTML requests: the configured
- * path and, for a directory-form path (/mcp/), the slash-less form the router
- * redirects (/mcp), which is where Cloudflare WebMCP Labs POSTs. Empty when the
- * landing feature is off, because then the Worker leaves the path to origin anyway.
+ * The landing paths an origin MCP server could be shadowed at: the configured path and,
+ * for a directory-form path (/mcp/), the slash-less form the router redirects (/mcp),
+ * which is where Cloudflare WebMCP Labs POSTs. Empty when the landing feature is off,
+ * because then the Worker leaves the path to origin anyway.
  */
 function mcpProbePaths(config: Config): string[] {
-  if (!config.features.webmcp_landing) return [];
-  const landing = config.webmcp_landing.path;
-  const paths = [landing];
-  if (landing.endsWith("/") && landing.length > 1) paths.push(landing.slice(0, -1));
-  return paths;
+  return config.features.webmcp_landing ? landingPaths(config) : [];
 }
 
 async function packageVersion(): Promise<string> {
@@ -284,17 +320,29 @@ export interface PreflightOptions {
   deployToken?: string;
   /** Receives each output line. Default: console.log. */
   log?: (line: string) => void;
+  /**
+   * --origin: probe this http(s) origin instead of [origin].base_url. Validated by
+   * parseOriginOverride. Only the probe target changes; the config and its hash do not.
+   */
+  origin?: string;
 }
 
 export async function runPreflight(configPath: string, force: boolean, opts: PreflightOptions = {}): Promise<number> {
   const absPath = path.resolve(configPath);
+  // Validate the override first: nothing is read or requested for a bad value.
+  const override = opts.origin === undefined ? undefined : parseOriginOverride(opts.origin);
   const config = await loadConfig(absPath);
-  const checks = pathsToCheck(config);
+  // Where the probes go. The config itself is never changed, so its hash is the build's.
+  const base = override ?? new URL(config.origin.base_url);
+  const checks = pathsToCheck(config, base);
   const deployToken = opts.deployToken ?? process.env["CF_WEBMCP_DEPLOY_TOKEN"];
   // eslint-disable-next-line no-console
   const log = opts.log ?? ((line: string) => console.log(line));
 
-  log(`preflight  ${new URL(config.origin.base_url).host}  (token: ${deployToken ? "present" : "absent"})`);
+  log(`preflight  ${base.host}  (token: ${deployToken ? "present" : "absent"})`);
+  if (override) {
+    log(`  --origin: probing ${override.origin} instead of [origin].base_url (${new URL(config.origin.base_url).origin}); the config hash is unchanged`);
+  }
 
   let hardCollisions = 0;
   const collisions: string[] = [];
@@ -312,19 +360,20 @@ export async function runPreflight(configPath: string, force: boolean, opts: Pre
     }
   }
 
-  // An origin MCP server at the landing path is not a collision: the Worker serves
-  // the landing page only for HTML GET and HEAD, so the server stays reachable for
-  // everything else. It is worth a warning, because that is a change from the days
-  // the landing answered every method.
+  // An origin MCP server at the landing path is not a collision: GET and HEAD requests
+  // get the landing page unless their Accept header asks for text/event-stream, and
+  // every other method goes to origin, so the server stays reachable for MCP clients.
+  // It is worth a warning, because that is a change from the days the landing answered
+  // every method.
   const version = await packageVersion();
   for (const landingPath of mcpProbePaths(config)) {
-    const outcome = await probeMcpServer(new URL(landingPath, config.origin.base_url), deployToken, version);
+    const outcome = await probeMcpServer(probeUrl(base, landingPath), deployToken, version);
     log(formatMcpRow(landingPath, outcome));
     if (outcome.kind === "mcp") {
       warnings.push(
         `${landingPath}: an MCP server answers here at origin (POST initialize returned 200 ${outcome.contentType}). ` +
-          `The Worker serves its landing page only to GET and HEAD requests that accept HTML; ` +
-          `non-HTML requests, MCP clients included, now reach that server.`,
+          `On the Worker, GET and HEAD requests get the landing page unless their Accept header asks for text/event-stream; ` +
+          `every other method goes to origin, so MCP clients keep reaching that server.`,
       );
     }
   }
@@ -372,7 +421,7 @@ async function writePreflightResult(
 
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
-  const code = await runPreflight(args.configPath, args.force);
+  const code = await runPreflight(args.configPath, args.force, { origin: args.origin });
   process.exit(code);
 }
 
