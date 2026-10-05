@@ -16,7 +16,7 @@
 
 import { compileTemplate } from "../mini-language";
 import { err, type ErrorPayload } from "../envelope";
-import { fetchWithManualRedirects, type RedirectFailure } from "../safe-fetch";
+import { fetchWithManualRedirects, logRedirectFailure, type RedirectFailure } from "../safe-fetch";
 
 const VERSION = "1.0";
 
@@ -87,32 +87,38 @@ export interface OriginFetchOptions {
   acceptHeader?: string;
   /**
    * Request body, already buffered. Kept as a string so a 307/308 redirect can
-   * replay it; a 301/302/303 redirect drops it and continues as a GET.
+   * replay it. A redirect that turns the request into a GET (a POST after 301,
+   * 302 or 303; see src/safe-fetch.ts) drops it.
    */
   body?: string;
   /** Set to false to send neither the bypass nor the deploy-token header. */
   bypassEnabled?: boolean;
 }
 
-/** Envelope error for a refused or unfollowable redirect. Never echoes the token or a raw Location. */
+/**
+ * Envelope error for a refused or unfollowable redirect. The messages are fixed
+ * strings: the envelope reaches the agent and its user, and the refused host (it
+ * may be an internal name) or Location (it may carry a query) are the origin's to
+ * choose. The detail goes to the Worker log instead (logRedirectFailure).
+ */
 function redirectFailureError(failure: RedirectFailure): ErrorPayload {
   switch (failure.kind) {
     case "off_list":
       return {
         code: "invalid_input",
         message: failure.redirected
-          ? `origin redirected to ${failure.origin} which is not in allowed_origins; refused to follow`
-          : `origin ${failure.origin} is not in allowed_origins`,
+          ? "origin redirected to an origin outside allowed_origins; refused to follow"
+          : "request origin is not in allowed_origins",
         retriable: false,
       };
+    case "unsupported_scheme":
+      return failure.redirected
+        ? { code: "internal", message: "origin returned an unusable redirect location", retriable: false }
+        : { code: "invalid_input", message: "request URL is not an http or https URL", retriable: false };
     case "too_many_redirects":
       return { code: "internal", message: `too many redirects (more than ${failure.maxHops})`, retriable: false };
     case "malformed_location":
-      return {
-        code: "internal",
-        message: `origin returned a malformed redirect Location: ${JSON.stringify(failure.location)}`,
-        retriable: false,
-      };
+      return { code: "internal", message: "origin returned an unusable redirect location", retriable: false };
   }
 }
 
@@ -124,7 +130,8 @@ function redirectFailureError(failure: RedirectFailure): ErrorPayload {
  *   - Redirects are followed here, not by the runtime: at most 5 hops, each target
  *     checked against ctx.allowedOrigins before any request is made to it, and the
  *     token headers attached per hop. An off-list target is refused (invalid_input)
- *     without a request, so the token cannot leak through an open redirect.
+ *     without a request, so the token cannot leak through an open redirect; the
+ *     refused host goes to the log, not into the error message.
  *   - Timeout via ctx.signal when the caller supplies one (it then also covers the
  *     body reads that follow), otherwise via ONE local AbortController and timer
  *     that covers the whole redirect chain but not the body reads.
@@ -154,7 +161,9 @@ export async function originFetch(
       { method: opts.method ?? "GET", body: opts.body },
       { allowedOrigins: ctx.allowedOrigins, headers, secretHeaders, signal },
     );
-    return result.ok ? result.response : { ok: false, error: redirectFailureError(result.failure) };
+    if (result.ok) return result.response;
+    logRedirectFailure("executor", url, result.failure);
+    return { ok: false, error: redirectFailureError(result.failure) };
   } catch (e) {
     return isAbortError(e)
       ? { ok: false, error: timeoutError(ctx.timeoutMs) }

@@ -247,6 +247,45 @@ publisher's pitfalls section
     expect(await res.text()).toContain("<html>");
   });
 
+  it.each([
+    { name: "a 500", response: () => new Response("boom", { status: 500 }), status: 500, body: "boom" },
+    {
+      name: "a non-markdown 200",
+      response: () => new Response("<html>hello</html>", { status: 200, headers: { "content-type": "text/html" } }),
+      status: 200,
+      body: "<html>hello</html>",
+    },
+    {
+      name: "a redirect",
+      response: () => new Response(null, { status: 301, headers: { location: "https://www.example.com/x" } }),
+      status: 301,
+      body: "",
+    },
+  ])("asks origin exactly once and relays $name with noindex", async ({ response, status, body }) => {
+    let calls = 0;
+    const proxy = async () => {
+      calls++;
+      return response();
+    };
+    const config = makeConfig({
+      agent_skills: {
+        path: "/.well-known/agent-skills/site/SKILL.md",
+        mode: "merge",
+        name: "",
+        description: "",
+        aliases: [],
+        hints: [],
+      },
+    });
+
+    const res = await agentSkillsResponse(new Request("https://example.com/.well-known/agent-skills/site/SKILL.md"), config, proxy);
+
+    expect(calls).toBe(1);
+    expect(res.status).toBe(status);
+    expect(res.headers.get("x-robots-tag")).toBe("noindex");
+    expect(await res.text()).toBe(body);
+  });
+
   it("escapes YAML-special chars in frontmatter", async () => {
     const proxy = async () => new Response("", { status: 404 });
     const config = makeConfig({

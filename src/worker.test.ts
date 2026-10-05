@@ -6,7 +6,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createHandler, type Env } from "./handler";
+import { createHandler, PROXY_ORIGIN_TIMEOUT_MS, type Env } from "./handler";
 import { makeDeps } from "./test-support/config";
 
 const HTML = "<html><head></head><body>hi</body></html>";
@@ -479,11 +479,16 @@ describe("content-addressed widget", () => {
   });
 });
 
-describe("proxyToOrigin redirects (llms.txt, agents.md and the other merge routes)", () => {
+describe("proxyToOrigin redirects (llms.txt, robots.txt, agents.md and the other merge routes)", () => {
   const tokenEnv: Env = { ...env, CF_WEBMCP_DEPLOY_TOKEN: "deploy-token-x" };
   const twoHosts = {
     origin: { base_url: "https://example.com", allowed_origins: ["https://example.com", "https://cdn.example.com"] },
   };
+  let errorLog: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+  });
 
   function redirectTo(status: number, location: string): Response {
     return new Response(null, { status, headers: { location } });
@@ -498,35 +503,104 @@ describe("proxyToOrigin redirects (llms.txt, agents.md and the other merge route
     return mock.mock.calls.map((c) => (typeof c[0] === "string" ? c[0] : String(c[0])));
   }
 
-  it("does not send the deploy token to an off-list redirect target: 502 with noindex, nothing requested there", async () => {
-    const fetchMock = stubOrigin({
-      "https://example.com/llms.txt": () => redirectTo(302, "https://evil.example/llms.txt"),
-      "https://evil.example/llms.txt": () => textResponse("should never be fetched"),
+  /** Neither the headers nor the (already read) body of a response may carry the deploy token. */
+  function expectNoToken(res: Response, bodyText: string) {
+    expect(JSON.stringify([...res.headers])).not.toContain("deploy-token-x");
+    expect(bodyText).not.toContain("deploy-token-x");
+  }
+
+  describe("an origin redirect that leaves allowed_origins is relayed, not followed", () => {
+    // Every route that goes through proxyToOrigin and relays an uninterpretable origin answer.
+    const relayRoutes = [
+      { name: "llms.txt", path: "/llms.txt" },
+      { name: "robots.txt", path: "/robots.txt" },
+      { name: "agents.md", path: "/.well-known/agents.md" },
+      { name: "api-catalog", path: "/.well-known/api-catalog" },
+      { name: "agent-skills (merge)", path: "/.well-known/agent-skills/site/SKILL.md" },
+    ];
+    const deps = () => makeDeps({ agent_skills: { mode: "merge" } });
+
+    it.each(relayRoutes)("$name: answers the origin's 301 with the resolved Location, no body, no-store, noindex", async ({ path }) => {
+      const fetchMock = stubOrigin({
+        [`https://example.com${path}`]: () => redirectTo(301, `https://www.example.com${path}`),
+        [`https://www.example.com${path}`]: () => textResponse("should never be fetched"),
+      });
+      const handler = createHandler(deps());
+
+      const res = await call(handler, `https://example.com${path}`, undefined, tokenEnv);
+
+      expect(res.status).toBe(301);
+      expect(res.headers.get("location")).toBe(`https://www.example.com${path}`);
+      expect(res.headers.get("cache-control")).toBe("no-store");
+      expect(res.headers.get("x-robots-tag")).toBe("noindex");
+      const body = await res.text();
+      expect(body).toBe("");
+      // Exactly one request, to origin; none to the other host, and the token is on that one only.
+      expect(urlsOf(fetchMock)).toEqual([`https://example.com${path}`]);
+      expect((fetchMock.mock.calls[0]![1]?.headers as Record<string, string>)["cf-webmcp-deploy-token"]).toBe("deploy-token-x");
+      expectNoToken(res, body);
     });
-    const handler = createHandler(makeDeps());
 
-    const res = await call(handler, "https://example.com/llms.txt", undefined, tokenEnv);
+    it("ai-catalog in merge mode keeps serving its synthesized document (200), after one request", async () => {
+      const fetchMock = stubOrigin({
+        "https://example.com/.well-known/ai-catalog.json": () =>
+          redirectTo(301, "https://www.example.com/.well-known/ai-catalog.json"),
+      });
+      const handler = createHandler(
+        makeDeps(
+          { features: { ai_catalog: true }, ai_catalog: { mode: "merge" } },
+          { assets: { aiCatalogJson: '{"synthesized":true}' } },
+        ),
+      );
 
-    expect(res.status).toBe(502);
-    expect(res.headers.get("x-robots-tag")).toBe("noindex");
-    expect(res.headers.get("content-type")).toBe("text/plain; charset=utf-8");
-    const body = await res.text();
-    expect(body).toBe("origin redirected to https://evil.example which is not in allowed_origins");
-    expect(body).not.toContain("deploy-token-x");
-    expect(urlsOf(fetchMock)).toEqual(["https://example.com/llms.txt"]);
-  });
+      const res = await call(handler, "https://example.com/.well-known/ai-catalog.json", undefined, tokenEnv);
 
-  it("answers 502 with noindex on a /.well-known route too", async () => {
-    const fetchMock = stubOrigin({
-      "https://example.com/.well-known/agents.md": () => redirectTo(301, "https://evil.example/agents.md"),
+      expect(res.status).toBe(200);
+      expect(await res.text()).toBe('{"synthesized":true}');
+      expect(res.headers.get("content-type")).toBe("application/ai-catalog+json");
+      expect(urlsOf(fetchMock)).toEqual(["https://example.com/.well-known/ai-catalog.json"]);
     });
-    const handler = createHandler(makeDeps());
 
-    const res = await call(handler, "https://example.com/.well-known/agents.md", undefined, tokenEnv);
+    it.each([301, 302, 303, 307, 308])("relays the redirect status as it came (%i)", async (status) => {
+      stubOrigin({ "https://example.com/robots.txt": () => redirectTo(status, "https://www.example.com/robots.txt") });
+      const handler = createHandler(makeDeps());
 
-    expect(res.status).toBe(502);
-    expect(res.headers.get("x-robots-tag")).toBe("noindex");
-    expect(urlsOf(fetchMock)).toEqual(["https://example.com/.well-known/agents.md"]);
+      const res = await call(handler, "https://example.com/robots.txt", undefined, tokenEnv);
+
+      expect(res.status).toBe(status);
+      expect(res.headers.get("location")).toBe("https://www.example.com/robots.txt");
+    });
+
+    it("resolves a protocol-relative or dotted Location to an absolute URL before relaying it", async () => {
+      stubOrigin({
+        "https://example.com/robots.txt": () => redirectTo(302, "//www.example.com/robots.txt?x=1"),
+        "https://example.com/llms.txt": () => redirectTo(302, "https://cdn.example.org:8443/a/../llms.txt"),
+      });
+      const handler = createHandler(makeDeps());
+
+      const robots = await call(handler, "https://example.com/robots.txt", undefined, tokenEnv);
+      const llms = await call(handler, "https://example.com/llms.txt", undefined, tokenEnv);
+
+      expect(robots.headers.get("location")).toBe("https://www.example.com/robots.txt?x=1");
+      expect(llms.headers.get("location")).toBe("https://cdn.example.org:8443/llms.txt");
+    });
+
+    it("relays the status and Location of the hop that left the list, after following an allowed hop", async () => {
+      const fetchMock = stubOrigin({
+        "https://example.com/robots.txt": () => redirectTo(301, "https://cdn.example.com/robots.txt"),
+        "https://cdn.example.com/robots.txt": () => redirectTo(307, "https://evil.example/robots.txt"),
+        "https://evil.example/robots.txt": () => textResponse("should never be fetched"),
+      });
+      const handler = createHandler(makeDeps(twoHosts));
+
+      const res = await call(handler, "https://example.com/robots.txt", undefined, tokenEnv);
+
+      expect(res.status).toBe(307);
+      expect(res.headers.get("location")).toBe("https://evil.example/robots.txt");
+      expect(res.headers.get("x-robots-tag")).toBe("noindex");
+      expect(urlsOf(fetchMock)).toEqual(["https://example.com/robots.txt", "https://cdn.example.com/robots.txt"]);
+      expectNoToken(res, await res.text());
+    });
   });
 
   it("follows a redirect to another allowed origin, sends the token to both, and merges the final body", async () => {
@@ -551,62 +625,71 @@ describe("proxyToOrigin redirects (llms.txt, agents.md and the other merge route
     }
   });
 
-  it("re-checks every hop: an allowed hop that redirects off-list never reaches the off-list host", async () => {
-    const fetchMock = stubOrigin({
-      "https://example.com/robots.txt": () => redirectTo(302, "https://cdn.example.com/robots.txt"),
-      "https://cdn.example.com/robots.txt": () => redirectTo(302, "https://evil.example/robots.txt"),
-    });
-    const handler = createHandler(makeDeps(twoHosts));
-
-    const res = await call(handler, "https://example.com/robots.txt", undefined, tokenEnv);
-
-    expect(res.status).toBe(502);
-    expect(res.headers.get("x-robots-tag")).toBe("noindex");
-    expect(urlsOf(fetchMock)).toEqual(["https://example.com/robots.txt", "https://cdn.example.com/robots.txt"]);
-  });
-
-  it("answers 502 with noindex after more than 5 redirects, without echoing any URL", async () => {
-    const routes: Record<string, Canned> = {};
-    for (let i = 0; i < 6; i++) {
-      routes[i === 0 ? "https://example.com/llms.txt" : `https://example.com/h${i}`] = () =>
-        redirectTo(302, `/h${i + 1}`);
+  describe("failures that stay a 502 with noindex and a generic body", () => {
+    async function expect502(res: Response, body: string) {
+      expect(res.status).toBe(502);
+      expect(res.headers.get("x-robots-tag")).toBe("noindex");
+      expect(res.headers.get("content-type")).toBe("text/plain; charset=utf-8");
+      const text = await res.text();
+      expect(text).toBe(body);
+      expectNoToken(res, text);
     }
-    const fetchMock = stubOrigin(routes);
-    const handler = createHandler(makeDeps());
 
-    const res = await call(handler, "https://example.com/llms.txt", undefined, tokenEnv);
+    it("more than 5 redirects", async () => {
+      const routes: Record<string, Canned> = {};
+      for (let i = 0; i < 6; i++) {
+        routes[i === 0 ? "https://example.com/llms.txt" : `https://example.com/h${i}`] = () =>
+          redirectTo(302, `/h${i + 1}`);
+      }
+      const fetchMock = stubOrigin(routes);
+      const handler = createHandler(makeDeps());
 
-    expect(res.status).toBe(502);
-    expect(res.headers.get("x-robots-tag")).toBe("noindex");
-    expect(await res.text()).toBe("origin redirected too many times");
-    expect(fetchMock).toHaveBeenCalledTimes(6);
+      const res = await call(handler, "https://example.com/llms.txt", undefined, tokenEnv);
+
+      await expect502(res, "origin redirected too many times");
+      expect(fetchMock).toHaveBeenCalledTimes(6);
+      expect(errorLog).toHaveBeenCalledTimes(1);
+    });
+
+    it("an unparseable Location, which is logged but not echoed", async () => {
+      stubOrigin({ "https://example.com/llms.txt": () => redirectTo(302, "http://:notaport?q=secret") });
+      const handler = createHandler(makeDeps());
+
+      const res = await call(handler, "https://example.com/llms.txt", undefined, tokenEnv);
+
+      await expect502(res, "origin returned an unusable redirect location");
+      const line = errorLog.mock.calls[0]![0] as string;
+      expect(line.startsWith("cf-webmcp: proxy refused an origin redirect: ")).toBe(true);
+      expect(line).toContain("http://:notaport?q=secret");
+    });
+
+    it("a blob: Location whose origin looks allowed: nothing is requested for it", async () => {
+      const fetchMock = stubOrigin({
+        "https://example.com/llms.txt": () => redirectTo(302, "blob:https://example.com/abc?q=secret"),
+      });
+      const handler = createHandler(makeDeps());
+
+      const res = await call(handler, "https://example.com/llms.txt", undefined, tokenEnv);
+
+      await expect502(res, "origin returned an unusable redirect location");
+      expect(urlsOf(fetchMock)).toEqual(["https://example.com/llms.txt"]);
+    });
+
+    it("base_url itself outside allowed_origins: nothing is sent, and only the log names the origin", async () => {
+      const fetchMock = stubOrigin({});
+      const handler = createHandler(
+        makeDeps({ origin: { base_url: "https://other.example", allowed_origins: ["https://example.com"] } }),
+      );
+
+      const res = await call(handler, "https://example.com/llms.txt", undefined, tokenEnv);
+
+      await expect502(res, "configured origin is not in allowed_origins");
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(errorLog.mock.calls[0]![0]).toContain("https://other.example");
+    });
   });
 
-  it("answers 502 with noindex on an unparseable Location, without echoing it", async () => {
-    stubOrigin({ "https://example.com/llms.txt": () => redirectTo(302, "http://:notaport") });
-    const handler = createHandler(makeDeps());
-
-    const res = await call(handler, "https://example.com/llms.txt", undefined, tokenEnv);
-
-    expect(res.status).toBe(502);
-    expect(res.headers.get("x-robots-tag")).toBe("noindex");
-    expect(await res.text()).toBe("origin returned a malformed redirect location");
-  });
-
-  it("answers 502 with noindex, and sends nothing, when base_url itself is not in allowed_origins", async () => {
-    const fetchMock = stubOrigin({});
-    const handler = createHandler(
-      makeDeps({ origin: { base_url: "https://other.example", allowed_origins: ["https://example.com"] } }),
-    );
-
-    const res = await call(handler, "https://example.com/llms.txt", undefined, tokenEnv);
-
-    expect(res.status).toBe(502);
-    expect(res.headers.get("x-robots-tag")).toBe("noindex");
-    expect(fetchMock).not.toHaveBeenCalled();
-  });
-
-  it("still relays an origin 404 and merges (no redirect involved)", async () => {
+  it("still relays an origin 404 as a merge (no redirect involved)", async () => {
     stubOrigin({ "https://example.com/llms.txt": () => new Response("nope", { status: 404 }) });
     const handler = createHandler(makeDeps());
 
@@ -614,5 +697,154 @@ describe("proxyToOrigin redirects (llms.txt, agents.md and the other merge route
 
     expect(res.status).toBe(200);
     expect(await res.text()).toContain("cf-webmcp:begin");
+  });
+
+  it("fetches origin exactly once for agent-skills when origin answers 500, and relays that answer with noindex", async () => {
+    const fetchMock = stubOrigin({
+      "https://example.com/.well-known/agent-skills/site/SKILL.md": () => new Response("boom", { status: 500 }),
+    });
+    const handler = createHandler(makeDeps({ agent_skills: { mode: "merge" } }));
+
+    const res = await call(handler, "https://example.com/.well-known/agent-skills/site/SKILL.md", undefined, tokenEnv);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(res.status).toBe(500);
+    expect(res.headers.get("x-robots-tag")).toBe("noindex");
+    expect(await res.text()).toBe("boom");
+  });
+});
+
+describe("proxyToOrigin failure handling and deadline", () => {
+  const tokenEnv: Env = { ...env, CF_WEBMCP_DEPLOY_TOKEN: "deploy-token-x" };
+  let errorLog: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function abortError(): Error {
+    return Object.assign(new Error("aborted"), { name: "AbortError" });
+  }
+
+  /** A fetch that never answers on its own and rejects with an AbortError when its signal aborts. */
+  function stallUntilAborted(init?: RequestInit): Promise<Response> {
+    return new Promise((_, reject) => {
+      init!.signal!.addEventListener("abort", () => reject(abortError()));
+    });
+  }
+
+  it("answers 502 with noindex and a generic body when the origin fetch rejects, and logs the detail", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new TypeError("Network connection lost.");
+      }),
+    );
+    const handler = createHandler(makeDeps());
+
+    const res = await call(handler, "https://example.com/robots.txt", undefined, tokenEnv);
+
+    expect(res.status).toBe(502);
+    expect(res.headers.get("x-robots-tag")).toBe("noindex");
+    expect(res.headers.get("content-type")).toBe("text/plain; charset=utf-8");
+    expect(await res.text()).toBe("origin request failed");
+    expect(errorLog).toHaveBeenCalledTimes(1);
+    const line = errorLog.mock.calls[0]![0] as string;
+    expect(line).toContain("Network connection lost.");
+    expect(line).not.toContain("\n");
+    expect(line).not.toContain("deploy-token-x");
+  });
+
+  it("answers 504 with noindex when the origin does not answer within the deadline", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("fetch", vi.fn((_url: string, init?: RequestInit) => stallUntilAborted(init)));
+    const handler = createHandler(makeDeps());
+
+    const pending = call(handler, "https://example.com/llms.txt", undefined, tokenEnv);
+    let settled = false;
+    void pending.then(() => {
+      settled = true;
+    });
+    await vi.advanceTimersByTimeAsync(PROXY_ORIGIN_TIMEOUT_MS - 1);
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    const res = await pending;
+
+    expect(res.status).toBe(504);
+    expect(res.headers.get("x-robots-tag")).toBe("noindex");
+    expect(res.headers.get("content-type")).toBe("text/plain; charset=utf-8");
+    expect(await res.text()).toBe("origin did not answer in time");
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("one deadline covers the whole chain: a stall on the second hop times out at the same moment", async () => {
+    vi.useFakeTimers();
+    const signals: AbortSignal[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: string, init?: RequestInit) => {
+        signals.push(init!.signal!);
+        // The first hop answers after 4s; the second never does.
+        return url === "https://example.com/robots.txt"
+          ? new Promise<Response>((resolve) =>
+              setTimeout(() => resolve(new Response(null, { status: 302, headers: { location: "/robots2.txt" } })), 4_000),
+            )
+          : stallUntilAborted(init);
+      }),
+    );
+    const handler = createHandler(makeDeps());
+
+    const pending = call(handler, "https://example.com/robots.txt", undefined, tokenEnv);
+    let settled = false;
+    void pending.then(() => {
+      settled = true;
+    });
+    await vi.advanceTimersByTimeAsync(4_000);
+    expect(signals).toHaveLength(2);
+    // A fresh per-hop deadline would run until 4s + PROXY_ORIGIN_TIMEOUT_MS and still be pending here.
+    await vi.advanceTimersByTimeAsync(PROXY_ORIGIN_TIMEOUT_MS - 4_000);
+    expect(settled).toBe(true);
+    const res = await pending;
+
+    expect(res.status).toBe(504);
+    expect(signals[0]).toBe(signals[1]);
+  });
+
+  it("leaves no timer behind and never aborts the signal after a successful answer, so a relayed body is not cut", async () => {
+    vi.useFakeTimers();
+    let signal: AbortSignal | undefined;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init?: RequestInit) => {
+        signal = init!.signal!;
+        return new Response("# Publisher\n", { status: 200, headers: { "content-type": "text/plain" } });
+      }),
+    );
+    const handler = createHandler(makeDeps());
+
+    const res = await call(handler, "https://example.com/llms.txt", undefined, tokenEnv);
+
+    expect(res.status).toBe(200);
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(PROXY_ORIGIN_TIMEOUT_MS * 2);
+    expect(signal!.aborted).toBe(false);
+  });
+
+  it("leaves no timer behind after a refused redirect either", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(null, { status: 301, headers: { location: "https://www.example.com/robots.txt" } })),
+    );
+    const handler = createHandler(makeDeps());
+
+    const res = await call(handler, "https://example.com/robots.txt", undefined, tokenEnv);
+
+    expect(res.status).toBe(301);
+    expect(vi.getTimerCount()).toBe(0);
   });
 });

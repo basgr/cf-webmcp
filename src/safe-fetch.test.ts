@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { fetchWithManualRedirects, MAX_REDIRECT_HOPS } from "./safe-fetch";
+import { fetchWithManualRedirects, logRedirectFailure, MAX_REDIRECT_HOPS } from "./safe-fetch";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -60,17 +60,81 @@ describe("fetchWithManualRedirects", () => {
 
     const r = await fetchWithManualRedirects(new URL("https://example.com/a"), {}, base);
 
-    // The refused origin carries no path or query, so a Location cannot smuggle text into the message.
-    expect(r).toEqual({ ok: false, failure: { kind: "off_list", origin: "https://evil.example:8443", redirected: true } });
+    // The refused origin carries no path or query; status and the resolved absolute target are
+    // there so a caller can relay the redirect itself.
+    expect(r).toEqual({
+      ok: false,
+      failure: {
+        kind: "off_list",
+        origin: "https://evil.example:8443",
+        redirected: true,
+        status: 302,
+        target: "https://evil.example:8443/b?token=1",
+      },
+    });
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it("names the scheme when the redirect target has an opaque origin", async () => {
-    stubFetch({ "https://example.com/a": () => redirect(302, "data:text/html,hi") });
+  it("reports the status of the hop that pointed off-list and the Location resolved against that hop", async () => {
+    stubFetch({
+      "https://example.com/a": () => redirect(301, "https://cdn.example.com/b"),
+      "https://cdn.example.com/b": () => redirect(307, "//evil.example/c?x=1#frag"),
+    });
 
     const r = await fetchWithManualRedirects(new URL("https://example.com/a"), {}, base);
 
-    expect(r).toEqual({ ok: false, failure: { kind: "off_list", origin: "data:", redirected: true } });
+    expect(r).toMatchObject({
+      ok: false,
+      failure: { kind: "off_list", redirected: true, status: 307, target: "https://evil.example/c?x=1#frag" },
+    });
+  });
+
+  it.each(["data:text/html,hi", "javascript:alert(1)", "ftp://example.com/x", "ws://example.com/x"])(
+    "refuses a redirect to %s as an unsupported scheme, without requesting it",
+    async (location) => {
+      const fetchMock = stubFetch({ "https://example.com/a": () => redirect(302, location) });
+
+      const r = await fetchWithManualRedirects(new URL("https://example.com/a"), {}, base);
+
+      expect(r).toEqual({
+        ok: false,
+        failure: { kind: "unsupported_scheme", protocol: new URL(location).protocol, redirected: true },
+      });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it("refuses a blob: Location even though its origin is an allowed https origin", async () => {
+    // new URL("blob:https://example.com/abc").origin is "https://example.com", so an allow-list check
+    // alone would let it through and workerd would then throw with the full URL in the message.
+    expect(new URL("blob:https://example.com/abc?q=secret").origin).toBe("https://example.com");
+    const fetchMock = stubFetch({ "https://example.com/a": () => redirect(302, "blob:https://example.com/abc?q=secret") });
+
+    const r = await fetchWithManualRedirects(new URL("https://example.com/a"), {}, base);
+
+    expect(r).toEqual({ ok: false, failure: { kind: "unsupported_scheme", protocol: "blob:", redirected: true } });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("refuses a blob: starting URL without sending anything", async () => {
+    const fetchMock = stubFetch({});
+
+    const r = await fetchWithManualRedirects(new URL("blob:https://example.com/x"), {}, base);
+
+    expect(r).toEqual({ ok: false, failure: { kind: "unsupported_scheme", protocol: "blob:", redirected: false } });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("checks the scheme on every hop, not only the first redirect", async () => {
+    const fetchMock = stubFetch({
+      "https://example.com/a": () => redirect(302, "https://cdn.example.com/b"),
+      "https://cdn.example.com/b": () => redirect(302, "blob:https://example.com/c"),
+    });
+
+    const r = await fetchWithManualRedirects(new URL("https://example.com/a"), {}, base);
+
+    expect(r).toMatchObject({ ok: false, failure: { kind: "unsupported_scheme", redirected: true } });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
   it("compares origins after normalising the allow-list entries (trailing slash, path)", async () => {
@@ -127,7 +191,27 @@ describe("fetchWithManualRedirects", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it("drops content-type and content-length (any case) when a 301/302/303 turns the request into a GET", async () => {
+  it("merges header names case-insensitively: a secret replaces a same-named plain header instead of combining with it", async () => {
+    const fetchMock = stubFetch({ "https://example.com/a": () => new Response("ok", { status: 200 }) });
+
+    await fetchWithManualRedirects(
+      new URL("https://example.com/a"),
+      {},
+      {
+        ...base,
+        headers: { "CF-WEBMCP-DEPLOY-TOKEN": "plain", "User-Agent": "test-agent" },
+        secretHeaders: { "cf-webmcp-deploy-token": "s3cret" },
+      },
+    );
+
+    const sent = fetchMock.mock.calls[0]![1].headers;
+    expect(sent["cf-webmcp-deploy-token"]).toBe("s3cret");
+    expect(JSON.stringify(sent)).not.toContain("plain");
+    expect(Object.keys(sent).filter((k) => k.toLowerCase() === "cf-webmcp-deploy-token")).toHaveLength(1);
+    expect(sent["user-agent"]).toBe("test-agent");
+  });
+
+  it("drops content-type and content-length (any case) when a 303 turns a POST into a GET", async () => {
     const fetchMock = stubFetch({
       "https://example.com/a": () => redirect(303, "/b"),
       "https://example.com/b": () => new Response("ok", { status: 200 }),
@@ -140,7 +224,7 @@ describe("fetchWithManualRedirects", () => {
     );
 
     const [first, second] = fetchMock.mock.calls;
-    expect(first![1].headers["Content-Type"]).toBe("application/json");
+    expect(first![1].headers["content-type"]).toBe("application/json");
     expect(second![1].method).toBe("GET");
     expect(second![1].body).toBeUndefined();
     expect(Object.keys(second![1].headers).map((k) => k.toLowerCase())).not.toContain("content-type");
@@ -164,6 +248,46 @@ describe("fetchWithManualRedirects", () => {
     expect(second[1].method).toBe("POST");
     expect(second[1].body).toBe('{"a":1}');
     expect(second[1].headers["content-type"]).toBe("application/json");
+  });
+
+  describe("method rewriting follows the Fetch spec", () => {
+    async function followOnce(status: number, method: string, body?: string) {
+      const fetchMock = stubFetch({
+        "https://example.com/a": () => redirect(status, "/b"),
+        "https://example.com/b": () => new Response("ok", { status: 200 }),
+      });
+      await fetchWithManualRedirects(
+        new URL("https://example.com/a"),
+        { method, body },
+        { ...base, headers: { ...base.headers, "content-type": "text/plain" } },
+      );
+      const second = fetchMock.mock.calls[1]![1];
+      return { method: second.method, body: second.body, contentType: second.headers["content-type"] };
+    }
+
+    it.each([301, 302])("%i turns a POST into a GET and drops body and content-type", async (status) => {
+      expect(await followOnce(status, "POST", "x")).toEqual({ method: "GET", body: undefined, contentType: undefined });
+    });
+
+    it.each([301, 302])("%i keeps a PUT, with its body and content-type", async (status) => {
+      expect(await followOnce(status, "PUT", "x")).toEqual({ method: "PUT", body: "x", contentType: "text/plain" });
+    });
+
+    it.each([301, 302, 303])("%i keeps HEAD as HEAD", async (status) => {
+      expect(await followOnce(status, "HEAD")).toMatchObject({ method: "HEAD", body: undefined });
+    });
+
+    it.each(["POST", "PUT", "DELETE"])("303 turns %s into a GET and drops body and content-type", async (method) => {
+      expect(await followOnce(303, method, "x")).toEqual({ method: "GET", body: undefined, contentType: undefined });
+    });
+
+    it("303 keeps a GET as GET", async () => {
+      expect(await followOnce(303, "GET")).toMatchObject({ method: "GET", body: undefined });
+    });
+
+    it.each([307, 308])("%i keeps any method, body and content-type", async (status) => {
+      expect(await followOnce(status, "PUT", "x")).toEqual({ method: "PUT", body: "x", contentType: "text/plain" });
+    });
   });
 
   it("stays GET after a 307 on a GET, and never passes a body with a GET", async () => {
@@ -233,5 +357,30 @@ describe("fetchWithManualRedirects", () => {
     await expect(fetchWithManualRedirects(new URL("https://example.com/a"), {}, base)).rejects.toMatchObject({
       name: "AbortError",
     });
+  });
+});
+
+describe("logRedirectFailure", () => {
+  it("writes one console.error line: a fixed prefix and JSON, with the start URL cut to origin and path", () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const nasty = "http://bad" + String.fromCharCode(1) + '"quote\nbreak';
+
+    logRedirectFailure("executor", new URL("https://example.com/search?q=private#h"), {
+      kind: "malformed_location",
+      location: nasty,
+    });
+
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(spy.mock.calls[0]).toHaveLength(1);
+    const line = spy.mock.calls[0]![0] as string;
+    expect(line.startsWith("cf-webmcp: executor refused an origin redirect: {")).toBe(true);
+    expect([...line].some((ch) => ch.charCodeAt(0) < 0x20)).toBe(false);
+    expect(line).not.toContain("private");
+    expect(JSON.parse(line.slice(line.indexOf("{")))).toEqual({
+      start: "https://example.com/search",
+      kind: "malformed_location",
+      location: nasty,
+    });
+    spy.mockRestore();
   });
 });

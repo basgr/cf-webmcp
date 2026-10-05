@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, afterEach } from "vitest";
+import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 import { resolveUrl, originFetch, mapOriginStatus, readWithLimit } from "./common";
 
 const ctx = {
@@ -157,6 +157,24 @@ function calledUrls(mock: ReturnType<typeof stubFetch>): string[] {
 const twoHostCtx = { ...ctx, allowedOrigins: ["https://example.com", "https://cdn.example.com"] };
 
 describe("originFetch redirects", () => {
+  let errorLog: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  /** The JSON detail of the single console.error line a refused redirect writes. */
+  function loggedDetail(): Record<string, unknown> {
+    expect(errorLog).toHaveBeenCalledTimes(1);
+    const line = errorLog.mock.calls[0]![0] as string;
+    expect(line.startsWith("cf-webmcp: executor refused an origin redirect: ")).toBe(true);
+    return JSON.parse(line.slice(line.indexOf("{")));
+  }
+
   it("never sends a request to an off-list redirect target, and returns invalid_input", async () => {
     const fetchMock = stubFetch({
       "https://example.com/a": () => redirect(302, "https://evil.example/steal"),
@@ -168,11 +186,26 @@ describe("originFetch redirects", () => {
     if (r instanceof Response) throw new Error("expected error");
     expect(r.error.code).toBe("invalid_input");
     expect(r.error.retriable).toBe(false);
-    expect(r.error.message).toBe(
-      "origin redirected to https://evil.example which is not in allowed_origins; refused to follow",
-    );
-    expect(r.error.message).not.toContain(ctx.deployToken);
+    expect(r.error.message).toBe("origin redirected to an origin outside allowed_origins; refused to follow");
     expect(calledUrls(fetchMock)).toEqual(["https://example.com/a"]);
+  });
+
+  it("keeps the refused host out of the envelope and puts the detail in one log line instead", async () => {
+    stubFetch({ "https://example.com/a": () => redirect(302, "https://intranet.corp.example:8443/admin?token=abc") });
+
+    const r = await originFetch(ctx, new URL("https://example.com/a"));
+
+    if (r instanceof Response) throw new Error("expected error");
+    expect(JSON.stringify(r.error)).not.toMatch(/intranet|corp|8443|admin|abc/);
+    expect(JSON.stringify(r.error)).not.toContain(ctx.deployToken);
+    expect(loggedDetail()).toEqual({
+      start: "https://example.com/a",
+      kind: "off_list",
+      origin: "https://intranet.corp.example:8443",
+      redirected: true,
+      status: 302,
+      target: "https://intranet.corp.example:8443/admin?token=abc",
+    });
   });
 
   it("uses redirect: manual on every hop", async () => {
@@ -225,7 +258,7 @@ describe("originFetch redirects", () => {
 
     if (r instanceof Response) throw new Error("expected error");
     expect(r.error.code).toBe("invalid_input");
-    expect(r.error.message).toContain("https://evil.example");
+    expect(r.error.message).toBe("origin redirected to an origin outside allowed_origins; refused to follow");
     expect(calledUrls(fetchMock)).toEqual(["https://example.com/a"]);
   });
 
@@ -331,30 +364,96 @@ describe("originFetch redirects", () => {
     expect(mapOriginStatus(r.status)?.code).toBe("internal");
   });
 
-  it("maps an unparseable Location to a non-retriable internal error that quotes a truncated value", async () => {
-    const bad = "http://" + "x".repeat(300) + ":notaport";
+  it("maps an unparseable Location to a generic non-retriable internal error and logs the truncated value", async () => {
+    const bad = "http://" + "x".repeat(300) + ":notaport?q=secret";
     const fetchMock = stubFetch({ "https://example.com/a": () => redirect(302, bad) });
 
     const r = await originFetch(ctx, new URL("https://example.com/a"));
 
     if (r instanceof Response) throw new Error("expected error");
-    expect(r.error.code).toBe("internal");
-    expect(r.error.retriable).toBe(false);
-    expect(r.error.message).toContain('"http://xxxx');
-    expect(r.error.message).not.toContain("x".repeat(250));
-    expect(r.error.message.length).toBeLessThan(300);
+    expect(r.error).toEqual({
+      code: "internal",
+      message: "origin returned an unusable redirect location",
+      retriable: false,
+    });
     expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(loggedDetail()).toEqual({
+      start: "https://example.com/a",
+      kind: "malformed_location",
+      location: bad.slice(0, 200),
+    });
   });
 
-  it("refuses a redirect to a non-http scheme without requesting it", async () => {
+  it("refuses a redirect to a non-http scheme without requesting it, with the same generic internal error", async () => {
     const fetchMock = stubFetch({ "https://example.com/a": () => redirect(302, "javascript:alert(1)") });
 
     const r = await originFetch(ctx, new URL("https://example.com/a"));
 
     if (r instanceof Response) throw new Error("expected error");
-    expect(r.error.code).toBe("invalid_input");
-    expect(r.error.message).toContain("not in allowed_origins");
+    expect(r.error).toEqual({
+      code: "internal",
+      message: "origin returned an unusable redirect location",
+      retriable: false,
+    });
     expect(calledUrls(fetchMock)).toEqual(["https://example.com/a"]);
+  });
+
+  it("refuses a blob: redirect whose origin looks allowed, and keeps its URL out of the envelope", async () => {
+    // new URL("blob:https://example.com/abc").origin === "https://example.com": an origin check alone passes it,
+    // and workerd would then throw a TypeError that quotes the whole URL, query included.
+    const fetchMock = stubFetch({
+      "https://example.com/a": () => redirect(302, "blob:https://example.com/abc?q=secret"),
+      "blob:https://example.com/abc?q=secret": () => new Response("should never be fetched", { status: 200 }),
+    });
+
+    const r = await originFetch(ctx, new URL("https://example.com/a"));
+
+    if (r instanceof Response) throw new Error("expected error");
+    expect(r.error).toEqual({
+      code: "internal",
+      message: "origin returned an unusable redirect location",
+      retriable: false,
+    });
+    expect(JSON.stringify(r.error)).not.toContain("secret");
+    expect(calledUrls(fetchMock)).toEqual(["https://example.com/a"]);
+  });
+
+  it("refuses a non-http(s) starting URL without sending anything", async () => {
+    const fetchMock = stubFetch({});
+
+    const r = await originFetch(ctx, new URL("blob:https://example.com/x?q=secret"));
+
+    if (r instanceof Response) throw new Error("expected error");
+    expect(r.error.code).toBe("invalid_input");
+    expect(r.error.retriable).toBe(false);
+    expect(JSON.stringify(r.error)).not.toContain("secret");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("logs a refused redirect chain that is too long, and keeps the envelope generic", async () => {
+    stubFetch({ "https://example.com/loop": () => redirect(302, "/loop") });
+
+    await originFetch(ctx, new URL("https://example.com/loop"));
+
+    expect(loggedDetail()).toEqual({ start: "https://example.com/loop", kind: "too_many_redirects", maxHops: 5 });
+  });
+
+  it("sends no secret header on any hop when bypassEnabled is false, even with a token configured", async () => {
+    const fetchMock = stubFetch({
+      "https://example.com/a": () => redirect(302, "https://cdn.example.com/b"),
+      "https://cdn.example.com/b": () => new Response("ok", { status: 200 }),
+    });
+
+    const r = await originFetch(twoHostCtx, new URL("https://example.com/a"), { bypassEnabled: false });
+
+    expect(r).toBeInstanceOf(Response);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    for (const [, init] of fetchMock.mock.calls) {
+      expect(init.headers["cf-webmcp-bypass"]).toBeUndefined();
+      expect(init.headers["cf-webmcp-deploy-token"]).toBeUndefined();
+      expect(JSON.stringify(init.headers)).not.toContain("deploy-token-x");
+      expect(init.headers["user-agent"]).toMatch(/^cf-webmcp\//);
+    }
   });
 
   it("cancels the body of an intermediate redirect response before following it", async () => {

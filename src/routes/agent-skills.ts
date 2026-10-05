@@ -24,15 +24,15 @@ export async function agentSkillsResponse(
   config: Config,
   proxyToOrigin: (url: URL) => Promise<Response>,
 ): Promise<Response> {
-  const body = await buildBody(config, proxyToOrigin);
-  if (body === null) {
-    // Origin returned non-markdown in merge mode; pass it through unchanged
-    // rather than overwrite publisher content. The path is under /.well-known/*
-    // so enforce the noindex tag even on the relayed response.
-    const target = new URL(config.agent_skills.path, config.origin.base_url);
-    const upstream = await proxyToOrigin(target);
-    return withNoindex(upstream);
+  const built = await buildBody(config, proxyToOrigin);
+  if (built.kind === "relay") {
+    // Origin returned something that is not markdown (or not a 200/404) in merge
+    // mode; pass that same response through unchanged rather than overwrite
+    // publisher content, and without asking origin a second time. The path is under
+    // /.well-known/* so enforce the noindex tag even on the relayed response.
+    return withNoindex(built.upstream);
   }
+  const body = built.text;
 
   return new Response(body, {
     status: 200,
@@ -68,28 +68,31 @@ export function agentSkillsRedirect(config: Config): Response {
   });
 }
 
+/** What the merge step produced: the document to serve, or the origin response to relay as it came. */
+type BuiltBody = { kind: "body"; text: string } | { kind: "relay"; upstream: Response };
+
 async function buildBody(
   config: Config,
   proxyToOrigin: (url: URL) => Promise<Response>,
-): Promise<string | null> {
+): Promise<BuiltBody> {
   const skillBody = buildSkillBody(config);
 
   if (config.agent_skills.mode === "synthesize" || config.agent_skills.mode === "replace") {
-    return buildFrontmatter(config) + skillBody;
+    return { kind: "body", text: buildFrontmatter(config) + skillBody };
   }
 
   // merge
   const target = new URL(config.agent_skills.path, config.origin.base_url);
   const upstream = await proxyToOrigin(target);
   if (upstream.status === 404) {
-    return buildFrontmatter(config) + skillBody;
+    return { kind: "body", text: buildFrontmatter(config) + skillBody };
   }
   if (upstream.status === 200 && isMarkdownish(upstream.headers.get("content-type"))) {
     const original = await upstream.text();
-    return mergeBlock(original, skillBody);
+    return { kind: "body", text: mergeBlock(original, skillBody) };
   }
-  // Non-markdown / non-200 -> signal caller to passthrough.
-  return null;
+  // Non-markdown / non-200: hand the response itself back for the caller to relay.
+  return { kind: "relay", upstream };
 }
 
 /**

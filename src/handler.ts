@@ -29,7 +29,15 @@ import { agentSkillsResponse, agentSkillsRedirect } from "./routes/agent-skills"
 import { agentSkillsIndexResponse } from "./routes/agent-skills-index";
 import { buildLinkHeader, mergeLinkHeader } from "./link-header";
 import { formsForPath, safeInject, shouldInject } from "./injection/html-rewriter";
-import { fetchWithManualRedirects, type RedirectFailure } from "./safe-fetch";
+import { isAbortError } from "./executors/common";
+import { fetchWithManualRedirects, logRedirectFailure, type RedirectFailure } from "./safe-fetch";
+
+/**
+ * One deadline for a whole proxyToOrigin redirect chain, up to the moment the final
+ * response headers arrive. It is cleared then, so a body that is being relayed is
+ * never cut off by it.
+ */
+export const PROXY_ORIGIN_TIMEOUT_MS = 10_000;
 
 export interface Env {
   CF_WEBMCP_ASSETS: R2Bucket;
@@ -159,10 +167,12 @@ export function createHandler(deps: HandlerDeps): Required<Pick<ExportedHandler<
   }
 
   /**
-   * GET a path on origin for the merge/passthrough routes (llms.txt, robots.txt,
-   * agents.md, the catalogs). Redirects are followed here, not by the runtime, so
-   * every hop is checked against allowed_origins before it is requested and the
-   * deploy token only ever goes to a listed origin. A failure is a 502.
+   * GET a path on origin for the merge routes (llms.txt, robots.txt, agents.md and
+   * the catalogs). Redirects are followed here, not by the runtime, so every hop is
+   * checked against allowed_origins before it is requested and the deploy token only
+   * ever goes to a listed origin. An origin redirect that leaves the list is relayed
+   * to the caller's client instead of followed. Any other failure is a 502 (a stalled
+   * origin a 504), always with noindex, so a route never throws.
    */
   async function proxyToOrigin(url: URL, env: Env): Promise<Response> {
     const target = new URL(url.pathname + url.search, config.origin.base_url);
@@ -171,42 +181,77 @@ export function createHandler(deps: HandlerDeps): Required<Pick<ExportedHandler<
       secretHeaders["cf-webmcp-bypass"] = "1";
       secretHeaders["cf-webmcp-deploy-token"] = env.CF_WEBMCP_DEPLOY_TOKEN;
     }
-    const result = await fetchWithManualRedirects(
-      target,
-      { method: "GET" },
-      {
-        allowedOrigins: config.origin.allowed_origins,
-        headers: { "user-agent": "cf-webmcp/1.0" },
-        secretHeaders,
-      },
-    );
-    return result.ok ? result.response : proxyFailure(result.failure);
+    const deadline = new AbortController();
+    const timer = setTimeout(() => deadline.abort(), PROXY_ORIGIN_TIMEOUT_MS);
+    try {
+      const result = await fetchWithManualRedirects(
+        target,
+        { method: "GET" },
+        {
+          allowedOrigins: config.origin.allowed_origins,
+          headers: { "user-agent": "cf-webmcp/1.0" },
+          secretHeaders,
+          signal: deadline.signal,
+        },
+      );
+      return result.ok ? result.response : proxyFailure(target, result.failure);
+    } catch (e) {
+      if (isAbortError(e)) return plainError(504, "origin did not answer in time");
+      console.error(
+        `cf-webmcp: proxy origin fetch failed: ${JSON.stringify({
+          start: target.origin + target.pathname,
+          error: (e as Error | null)?.message ?? String(e),
+        })}`,
+      );
+      return plainError(502, "origin request failed");
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   /**
-   * The 502 for a refused or unfollowable origin redirect. proxyToOrigin serves
-   * routes under /.well-known/* (and llms.txt, robots.txt); the body is an error,
-   * so it always carries noindex, even on the two apex routes whose success
-   * responses are exempt. Only an origin (never a path, query or raw Location)
-   * is echoed, and never the deploy token.
+   * The answer for a redirect proxyToOrigin refused or could not follow.
+   *
+   * An origin that redirects to a host outside allowed_origins (typically apex to
+   * www, or back) gets its redirect relayed as it was: same status, Location resolved
+   * to an absolute URL, no body. Nothing is requested at the target and no token goes
+   * with it. This keeps a crawler's robots.txt fetch from turning into a 5xx, which
+   * Google reads as disallow-all. no-store because the relay is our decision about
+   * an allow-list, not a statement by the origin.
+   *
+   * Everything else is a 502 with a fixed message. The refused value goes to the log,
+   * never to the client: a host can be an internal name and a Location can carry a query.
+   *
+   * Every response here carries noindex. These routes live under /.well-known/*
+   * (llms.txt and robots.txt are exempt on success, but an error or a relay is
+   * not content worth indexing).
    */
-  function proxyFailure(failure: RedirectFailure): Response {
-    let message: string;
+  function proxyFailure(start: URL, failure: RedirectFailure): Response {
+    if (failure.kind === "off_list" && failure.redirected) {
+      return new Response(null, {
+        status: failure.status,
+        headers: { location: failure.target, "cache-control": "no-store", "x-robots-tag": "noindex" },
+      });
+    }
+    logRedirectFailure("proxy", start, failure);
     switch (failure.kind) {
       case "off_list":
-        message = failure.redirected
-          ? `origin redirected to ${failure.origin} which is not in allowed_origins`
-          : `origin ${failure.origin} is not in allowed_origins`;
-        break;
+        return plainError(502, "configured origin is not in allowed_origins");
+      case "unsupported_scheme":
+        return plainError(
+          502,
+          failure.redirected ? "origin returned an unusable redirect location" : "configured origin is not an http or https URL",
+        );
       case "too_many_redirects":
-        message = "origin redirected too many times";
-        break;
+        return plainError(502, "origin redirected too many times");
       case "malformed_location":
-        message = "origin returned a malformed redirect location";
-        break;
+        return plainError(502, "origin returned an unusable redirect location");
     }
+  }
+
+  function plainError(status: number, message: string): Response {
     return new Response(message, {
-      status: 502,
+      status,
       headers: { "content-type": "text/plain; charset=utf-8", "x-robots-tag": "noindex" },
     });
   }

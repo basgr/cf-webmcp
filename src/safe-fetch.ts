@@ -6,13 +6,18 @@
  * would already have gone to whatever host the chain ended on. This helper turns
  * redirect following off and does it in a loop instead:
  *
- *   - Before every request, including each redirect hop, the target's origin is
- *     checked against the allow-list. An off-list target is refused without any
- *     request to it, so nothing, secret or not, is ever sent there.
- *   - The secret headers are attached per hop, only after that check passed.
+ *   - Before every request, including each redirect hop, the target must be an
+ *     http: or https: URL whose origin is on the allow-list. Anything else is
+ *     refused without a request to it, so nothing, secret or not, is ever sent
+ *     there. The scheme check comes first because a blob: URL reports the origin
+ *     of the URL inside it (new URL("blob:https://a.example/x").origin is
+ *     "https://a.example"), which an origin check alone would let through.
+ *   - The secret headers are attached per hop, only after those checks passed.
  *   - At most `maxHops` redirects are followed (5 by default).
- *   - 301, 302 and 303 continue as a bodyless GET; 307 and 308 replay the method
- *     and the already buffered body.
+ *   - The method follows the Fetch spec: 301/302 turn a POST into a GET, 303 turns
+ *     everything but GET and HEAD into a GET, 307/308 change nothing. A request that
+ *     becomes a GET loses its body and its body headers; otherwise the already
+ *     buffered body is replayed.
  *   - One AbortSignal covers every hop, so a caller's deadline spans the chain.
  *
  * A redirect status without a Location header is not a redirect we can follow:
@@ -27,20 +32,24 @@ export const MAX_REDIRECT_HOPS = 5;
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 
 /** Request-body headers that must not outlive the body when a redirect turns the request into a GET. */
-const BODY_HEADERS = new Set(["content-type", "content-length", "content-encoding"]);
+const BODY_HEADERS = ["content-type", "content-length", "content-encoding"];
 
-/** How much of an unparseable Location is reported back. */
+/** How much of an unparseable Location is reported (in the log, never to a client). */
 const MAX_REPORTED_LOCATION = 200;
 
 export type RedirectFailure =
+  /** The very first URL was already off the list. `origin` is scheme://host[:port] only. */
+  | { kind: "off_list"; origin: string; redirected: false }
   /**
-   * `origin` is scheme://host[:port] only (the scheme for an opaque origin such as
-   * data:), so a Location cannot put path or query text into a message.
-   * `redirected` is false when the very first URL was already off the list.
+   * A redirect pointed off the list. `status` is the status of the redirect response that
+   * pointed there and `target` the Location resolved to an absolute http(s) URL, so a caller
+   * can relay the redirect itself. Nothing was requested at `target`.
    */
-  | { kind: "off_list"; origin: string; redirected: boolean }
+  | { kind: "off_list"; origin: string; redirected: true; status: number; target: string }
+  /** The target is not an http(s) URL (blob:, data:, javascript:, ftp:, ...). `protocol` includes the colon. */
+  | { kind: "unsupported_scheme"; protocol: string; redirected: boolean }
   | { kind: "too_many_redirects"; maxHops: number }
-  /** `location` is the raw header value cut to 200 characters; quote it, never interpolate it bare. */
+  /** `location` is the raw header value cut to 200 characters. It may hold anything: log it, never show it. */
   | { kind: "malformed_location"; location: string };
 
 export type ManualRedirectResult =
@@ -50,16 +59,19 @@ export type ManualRedirectResult =
 export interface ManualRedirectInit {
   /** Defaults to GET. A body is only sent with a method that may carry one. */
   method?: string;
-  /** Already buffered, so a 307/308 can replay it. */
+  /** Already buffered, so a 307/308 (or a 301/302 on a non-POST) can replay it. */
   body?: string;
 }
 
 export interface ManualRedirectOptions {
   /** Origins (or URLs, normalised here with `new URL(x).origin`) the chain may visit. */
   allowedOrigins: readonly string[];
-  /** Sent on every hop. */
+  /** Sent on every hop. Names are case-insensitive. */
   headers: Readonly<Record<string, string>>;
-  /** Sent on every hop, but only because the hop's origin passed the allow-list check first. */
+  /**
+   * Sent on every hop, but only because the hop passed the scheme and allow-list checks
+   * first. Set on top of `headers`, replacing a same-named header whatever its case.
+   */
   secretHeaders?: Readonly<Record<string, string>>;
   /** One signal for the whole chain. */
   signal?: AbortSignal;
@@ -81,13 +93,20 @@ function normaliseOrigins(entries: readonly string[]): Set<string> {
   return origins;
 }
 
-function describeOrigin(url: URL): string {
-  return url.origin === "null" ? url.protocol : url.origin;
+function isHttp(url: URL): boolean {
+  return url.protocol === "http:" || url.protocol === "https:";
 }
 
 /** Release the connection behind a response we are not going to read. */
 function discard(res: Response): void {
   res.body?.cancel().catch(() => {});
+}
+
+/** Does a redirect with this status turn a request with this method into a bodyless GET? (Fetch spec, HTTP-redirect fetch.) */
+function becomesGet(status: number, method: string): boolean {
+  if (status === 303) return method !== "GET" && method !== "HEAD";
+  if (status === 301 || status === 302) return method === "POST";
+  return false;
 }
 
 export async function fetchWithManualRedirects(
@@ -99,19 +118,32 @@ export async function fetchWithManualRedirects(
   const maxHops = opts.maxHops ?? MAX_REDIRECT_HOPS;
 
   let current = url;
-  let method = init.method ?? "GET";
+  let method = (init.method ?? "GET").toUpperCase();
   let body = init.body;
-  let headers: Record<string, string> = { ...opts.headers };
+  const plainHeaders = new Headers(opts.headers);
   let redirects = 0;
+  let viaStatus = 0;
 
   while (true) {
-    if (!allowed.has(current.origin)) {
-      return { ok: false, failure: { kind: "off_list", origin: describeOrigin(current), redirected: redirects > 0 } };
+    if (!isHttp(current)) {
+      return { ok: false, failure: { kind: "unsupported_scheme", protocol: current.protocol, redirected: redirects > 0 } };
     }
+    if (!allowed.has(current.origin)) {
+      return {
+        ok: false,
+        failure:
+          redirects > 0
+            ? { kind: "off_list", origin: current.origin, redirected: true, status: viaStatus, target: current.href }
+            : { kind: "off_list", origin: current.origin, redirected: false },
+      };
+    }
+
+    const hopHeaders = new Headers(plainHeaders);
+    for (const [name, value] of Object.entries(opts.secretHeaders ?? {})) hopHeaders.set(name, value);
 
     const res = await fetch(current.toString(), {
       method,
-      headers: { ...headers, ...opts.secretHeaders },
+      headers: Object.fromEntries(hopHeaders.entries()),
       body: method === "GET" || method === "HEAD" ? undefined : body,
       redirect: "manual",
       signal: opts.signal,
@@ -133,13 +165,25 @@ export async function fetchWithManualRedirects(
     }
     discard(res);
     redirects++;
+    viaStatus = res.status;
 
-    // The executors only issue GET and POST, so "301/302/303 become GET" is exact for them.
-    if (res.status !== 307 && res.status !== 308) {
+    if (becomesGet(res.status, method)) {
       method = "GET";
       body = undefined;
-      headers = Object.fromEntries(Object.entries(headers).filter(([name]) => !BODY_HEADERS.has(name.toLowerCase())));
+      for (const name of BODY_HEADERS) plainHeaders.delete(name);
     }
     current = next;
   }
+}
+
+/**
+ * Write the detail of a refused redirect to the Worker log as ONE line: a fixed
+ * prefix and a JSON object (so control characters in a hostile Location are
+ * escaped), no stack. The caller's client-facing message stays generic; this line
+ * is where an operator finds the host or value that was refused. The start URL is
+ * cut to origin and path so a query string never reaches the log.
+ */
+export function logRedirectFailure(via: "executor" | "proxy", start: URL, failure: RedirectFailure): void {
+  const where = isHttp(start) ? start.origin + start.pathname : start.protocol;
+  console.error(`cf-webmcp: ${via} refused an origin redirect: ${JSON.stringify({ start: where, ...failure })}`);
 }
