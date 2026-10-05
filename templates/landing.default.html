@@ -83,7 +83,7 @@ hr{border:none;border-top:1px solid #e5e7eb;margin:2.5rem 0}
 <p>WebMCP is a way for websites to expose structured tools that AI agents can call. There are two runtimes behind the same name, and they reach different agents.</p>
 <ul>
   <li><strong>The W3C draft</strong> (<a href="https://github.com/webmachinelearning/webmcp"><code>webmachinelearning/webmcp</code></a>): a browser API at <code>document.modelContext</code> (older builds expose the deprecated <code>navigator.modelContext</code> alias). Used by browser-native agents (Chrome, Cloudflare Kitesurf, Cloudflare Browser Run lab sessions). No pairing needed; tools register automatically when the page loads. <strong>Chrome ships WebMCP to users through an origin trial (from Chrome 149) on sites that send a trial token</strong>; without one, WebMCP is behind <code>chrome://flags/#enable-webmcp-testing</code>.</li>
-  <li><strong>The jasonjmcghee library</strong> (<a href="https://github.com/jasonjmcghee/WebMCP"><code>jasonjmcghee/WebMCP</code></a>): a localhost websocket bridge for desktop MCP clients (Claude Desktop, Cursor, Claude Code, Windsurf). Requires a one-time pairing flow.</li>
+  <li><strong>The jasonjmcghee library</strong> (<a href="https://github.com/jasonjmcghee/WebMCP"><code>jasonjmcghee/WebMCP</code></a>): a localhost websocket bridge for desktop MCP clients (Claude Desktop, Cursor, Claude Code, Windsurf). Requires the bridge program running on your computer and a pairing token.</li>
 </ul>
 <p class="muted">This site uses <a href="https://github.com/basgr/cf-webmcp">cf-webmcp</a> to expose both surfaces from a single config.</p>
 

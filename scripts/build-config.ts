@@ -29,7 +29,7 @@ import { compileTemplate } from "../src/mini-language.js";
 import { decodeOriginTrialToken, type OriginTrialPayload } from "../src/origin-trial.js";
 import { buildFrontmatter, buildSkillBody } from "../src/routes/agent-skills.js";
 import { LICENSE_PREAMBLE } from "../src/widget-preamble.js";
-import { sha256Hex, widgetAssetName } from "./widget-pin.js";
+import { bridgeNpmVersion, sha256Hex, widgetAssetName } from "./widget-pin.js";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const OUT_DIR = path.join(ROOT, "src", "generated");
@@ -641,16 +641,37 @@ function escapeHtml(s: string): string {
 }
 
 /**
- * {{widget_block}}: the pairing instructions with the bridge CLI command, the widget's <script>
- * and the inline script that starts the widget. It is built only when the widget ships (the
- * feature is on and the pin is usable), so a landing without the widget carries no pairing copy
- * and no CLI line.
+ * How long the widget stays connected without mouse or keyboard activity on the page: 30
+ * minutes, in milliseconds, for the vendored widget's `inactivityTimeout` option (webmcp.js:17;
+ * its default is 5 minutes). A tool call does not reset that timer. Well below 2147483647, the
+ * largest delay setTimeout keeps (a larger one fires at once).
+ */
+const WIDGET_INACTIVITY_MS = 30 * 60 * 1000;
+
+/**
+ * {{widget_block}}: the pairing instructions, the widget's <script> and the inline script that
+ * starts the widget. It is built only when the widget ships (the feature is on and the pin is
+ * usable), so a landing without the widget carries no pairing copy and no bridge command.
  *
- * The CLI command names the bridge release of the vendored widget: the pin's version without
- * its leading "v" (upstream tag v0.1.13 is npm version 0.1.13). The widget talks the bridge's own
- * websocket protocol to the daemon this command starts. The client config that `--config` writes
- * runs `@jason.today/webmcp@latest --mcp` (upstream src/config.js), so the client's MCP side is
- * not pinned by this line.
+ * Every bridge command names the release of the vendored widget: the pin's version without its
+ * leading "v" (upstream tag v0.1.13 is npm version 0.1.13). The steps follow what the pinned
+ * bridge needs, not its own shortcuts:
+ *   - `--foreground` in a terminal. Without it the bridge forks its websocket daemon with no
+ *     terminal attached, and on Windows that daemon exits at once (it calls
+ *     process.stdin.setRawMode, which only a terminal has; src/websocket-server.js:1504-1514).
+ *   - The client entry by hand, pinned. The bridge's own `--config <client>` writes
+ *     `@jason.today/webmcp@latest --mcp`, and on Windows into a directory Claude Desktop does not
+ *     read (src/config.js:56-104), so the landing never offers it.
+ *   - The bridge running before the client starts: the client's side of the bridge reconnects
+ *     without its token (src/server.js:216-222), so it connects only on its first try.
+ *   - A restart after the very first run: that run writes the bridge's server token to
+ *     ~/.webmcp/.env (src/websocket-server.js:1421-1427) but compares connections against the
+ *     value it loaded at start-up (src/config.js:28-31, src/websocket-server.js:111-118), so it
+ *     refuses the client's side until it is started again.
+ * The Claude Desktop entry is JSON, HTML-escaped into a <code> block.
+ *
+ * The step that points at the widget stays hidden until the widget is on the page, and an empty
+ * status line below the steps takes the init script's message when it cannot be loaded.
  *
  * With SRI the widget's tag carries `integrity` and `crossorigin="anonymous"`: the integrity
  * value is the hash of the composed R2 object (preamble + widget), which the Worker serves
@@ -658,22 +679,31 @@ function escapeHtml(s: string): string {
  */
 function buildWidgetBlock(config: Config, widgetUrl: string, sri: string | null, cliVersion: string): string {
   const sriAttrs = sri ? ` integrity="${escapeHtml(sri)}" crossorigin="anonymous"` : "";
-  const cli = `npx -y @jason.today/webmcp@${cliVersion} --config claude`;
+  const spec = `@jason.today/webmcp@${cliVersion}`;
+  const code = (text: string): string => `<code>${escapeHtml(text)}</code>`;
+  const clientEntry = JSON.stringify({ mcpServers: { webmcp: { command: "npx", args: ["-y", spec, "--mcp"] } } }, null, 2);
+  const minutes = WIDGET_INACTIVITY_MS / 60000;
   return [
     `<h2>Pairing required</h2>`,
-    `    <p>Your browser does not expose WebMCP natively. A desktop MCP client (Claude Desktop, Cursor, Claude Code, Windsurf) can still reach this page's tools through a small localhost bridge. The bridge has two halves:</p>`,
-    `    <ul>`,
-    `      <li>A CLI you run in a terminal that opens a localhost MCP server and tells your client about it.</li>`,
-    `      <li>A widget on this page that opens a WebSocket to that local server and forwards tool calls.</li>`,
-    `    </ul>`,
-    `    <p>The widget itself is not your MCP client - it is the in-browser side of the wire. Three steps to pair:</p>`,
+    `    <p>Your browser does not expose WebMCP natively. A desktop MCP client can still call this page's tools through the WebMCP bridge, a small program on your computer, and the widget on this page.</p>`,
     `    <ol>`,
-    `      <li>Install and start the localhost bridge. Run this in a terminal, replacing <code>claude</code> with <code>cursor</code>, <code>cline</code>, or <code>windsurf</code> as needed:`,
-    `        <pre>${escapeHtml(cli)}</pre>`,
+    `      <li>Start the bridge in a terminal and leave the terminal open while you use this site's tools:`,
+    `        <pre>${code(`npx -y ${spec} --foreground`)}</pre>`,
+    `        Press Ctrl+C in that terminal to stop it. The first time you run the bridge on a computer, stop it with Ctrl+C as soon as it has started and run the same command again: the first run creates the bridge's settings in ${code("~/.webmcp")} but does not use them yet.</li>`,
+    `      <li>Add the bridge to your MCP client, then restart the client (quit it fully and open it again). The bridge must already be running when the client starts.`,
+    `        <ul>`,
+    `          <li>Claude Desktop: add this entry to ${code("claude_desktop_config.json")} (macOS: ${code("~/Library/Application Support/Claude/")}, Windows: ${code("%APPDATA%\\Claude\\")}):`,
+    `            <pre>${code(clientEntry)}</pre></li>`,
+    `          <li>Cursor: the same entry in ${code("~/.cursor/mcp.json")}.</li>`,
+    `          <li>Claude Code: ${code(`claude mcp add webmcp -- npx -y ${spec} --mcp`)}</li>`,
+    `          <li>Other MCP clients: add a local server that runs ${code(`npx -y ${spec} --mcp`)}, where the client's documentation says.</li>`,
+    `        </ul>`,
     `      </li>`,
-    `      <li>In your MCP client, ask for a pairing token (or run the bridge's pairing command directly).</li>`,
-    `      <li>Click the blue square in the bottom right corner of this page, paste the token and press Connect. The widget hands the connection to the bridge; from then on, your MCP client can list and call this site's tools. The token is single-use and discarded after pairing.</li>`,
+    `      <li>Ask your MCP client for a WebMCP pairing token, or run ${code(`npx -y ${spec} --new`)} in a second terminal.</li>`,
+    `      <li id="webmcp-widget-step" hidden>Click the blue square in the bottom right corner of this page, paste the token and press Connect. Keep this tab open. The widget disconnects after ${minutes} minutes without mouse or keyboard activity on this page; to reconnect, get a new token and repeat this step.</li>`,
     `    </ol>`,
+    `    <p id="webmcp-widget-error" role="status" hidden></p>`,
+    `    <p>If your client shows no tools from this site, check that the terminal from step 1 is still open, then restart the MCP client. After restarting your computer, repeat step 1 before you open the client.</p>`,
     `    <script src="${escapeHtml(widgetUrl)}" defer${sriAttrs}></script>`,
     `    <script>`,
     buildWidgetInit(config),
@@ -688,12 +718,14 @@ function buildWidgetBlock(config: Config, widgetUrl: string, sri: string | null,
  * answers the MCP `tools/call` with that value unchanged, so `execute` returns an MCP
  * CallToolResult: the bootstrap's run(), the envelope as text and isError unless ok:true.
  *
- * It runs on window load: the widget's script is deferred, so it has run by then unless it
- * failed to load (the R2 object missing answers 503, an SRI mismatch), and then `WebMCP` is
- * undefined and nothing starts. Nothing starts either when the browser has WebMCP of its own:
- * the state script then shows Connected and the bootstrap has registered the tools there. Every
- * step that can throw is caught, and the script is its own <script> element, so a widget failure
- * never reaches the landing's state script.
+ * It runs on window load: the widget's script is deferred, so it has run by then. Nothing starts
+ * when the browser has WebMCP of its own: the state script then shows Connected and the
+ * bootstrap has registered the tools there. Otherwise the widget starts with a 30 minute
+ * inactivity timeout, and once it is on the page the step that points at it is revealed. When
+ * it cannot be loaded (its script did not run: R2 answered 503, an SRI mismatch; its constructor
+ * threw; it put nothing on the page), the script says so in the console and in the pairing
+ * block's status line, as text. Every step that can throw is caught, and the script is its own
+ * <script> element, so a widget failure never reaches the landing's state script.
  *
  * Every value from the config goes in through inlineScriptLiteral, so a description cannot end
  * the <script> element. ES5, like the rest of the landing.
@@ -717,6 +749,24 @@ ${EXEC_CLIENT_JS}
       if (typeof console !== 'undefined' && console.warn) console.warn('cf-webmcp: fallback widget: ' + what, e);
     } catch (err) {}
   }
+  // The pairing block's step that points at the widget, hidden until the widget is there.
+  function showWidgetStep() {
+    try {
+      var step = document.getElementById('webmcp-widget-step');
+      if (step) step.removeAttribute('hidden');
+    } catch (e) {}
+  }
+  // The widget cannot be loaded: say so in the console and, as text, in the pairing block.
+  function failed(what, e) {
+    warn(what, e);
+    try {
+      var line = document.getElementById('webmcp-widget-error');
+      if (line) {
+        line.textContent = 'The pairing widget could not be loaded, so this page cannot be paired right now. Reload the page to try again.';
+        line.removeAttribute('hidden');
+      }
+    } catch (err) {}
+  }
   // The same test the state script uses for Connected: document.modelContext with
   // registerTool, else the deprecated navigator alias with it.
   function hasNativeWebMCP() {
@@ -730,16 +780,28 @@ ${EXEC_CLIENT_JS}
     }
   }
   function start() {
-    // The widget script did not load (503 from R2, SRI mismatch): nothing to start.
-    if (typeof WebMCP === 'undefined') return;
     if (hasNativeWebMCP()) return;
-    var w;
-    try {
-      w = new WebMCP({});
-    } catch (e) {
-      warn('could not start', e);
+    // The widget script did not run: R2 answered 503, the SRI check failed, or the network did.
+    if (typeof WebMCP === 'undefined') {
+      failed('the widget script did not load');
       return;
     }
+    var w;
+    try {
+      w = new WebMCP({ inactivityTimeout: ${WIDGET_INACTIVITY_MS} });
+    } catch (e) {
+      failed('the widget could not start', e);
+      return;
+    }
+    var mounted = null;
+    try {
+      mounted = document.querySelector('[data-webmcp-widget]');
+    } catch (e) {}
+    if (!mounted) {
+      failed('the widget did not appear on the page');
+      return;
+    }
+    showWidgetStep();
 ${registrations.join("\n")}
   }
   try {
@@ -1231,15 +1293,13 @@ interface WidgetBuild {
 
 const SERVED_SHA256_RE = /^[0-9a-f]{64}$/;
 const SERVED_SRI_RE = /^sha384-[A-Za-z0-9+/]{64}$/;
-/** A release tag (v0.1.13) or version (0.1.13); group 1 is the npm version. */
-const RELEASE_VERSION_RE = /^v?(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)$/;
 
 /**
  * Resolve the widget from vendor/webmcp/current.json, and only from there: the
  * vendored webmcp.js is gitignored and absent in CI, so the build never reads it.
  *
  * A pin that is missing, "unpinned", lacks valid served_sha256 / served_sri, or
- * has a version that is not a release version (vX.Y.Z, from which the landing
+ * has a version that is not a release tag (vX.Y.Z, from which the landing
  * names the bridge CLI) disables the widget consistently (no asset, no landing
  * block, widget_enabled_js false) with a warning when fallback_widget is on. The
  * build still succeeds, so a fresh checkout or CI smoke build works without a
@@ -1291,10 +1351,10 @@ async function resolveWidget(config: Config, pinPath: string): Promise<WidgetBui
   }
   // The landing tells the visitor which bridge CLI to run, and that release must match the widget.
   const version = pin["version"];
-  const release = typeof version === "string" ? RELEASE_VERSION_RE.exec(version) : null;
-  if (!release || !release[1]) {
+  const cliVersion = typeof version === "string" ? bridgeNpmVersion(version) : null;
+  if (cliVersion === null) {
     return disable(
-      `${rel} has version ${JSON.stringify(version)}, which is not a release version (vX.Y.Z), so the landing cannot name the matching bridge CLI`,
+      `${rel} has version ${JSON.stringify(version)}, which is not a release tag (vX.Y.Z), so the landing cannot name the matching bridge CLI`,
     );
   }
 
@@ -1309,7 +1369,7 @@ async function resolveWidget(config: Config, pinPath: string): Promise<WidgetBui
   return {
     asset: widgetAssetName(servedSha256),
     sri: config.features.subresource_integrity ? servedSri : null,
-    cliVersion: release[1],
+    cliVersion,
   };
 }
 

@@ -34,7 +34,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { LICENSE_PREAMBLE } from "../src/widget-preamble.js";
-import { makePin, sha256Hex } from "./widget-pin.js";
+import { bridgeNpmVersion, makePin, sha256Hex } from "./widget-pin.js";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -49,7 +49,12 @@ export function defaultReleaseUrl(version: string): string {
   return `https://raw.githubusercontent.com/jasonjmcghee/WebMCP/${encodeURIComponent(version)}/src/webmcp.js`;
 }
 
-function parseArgs(argv: string[]): Args {
+/**
+ * The command line, checked before anything is downloaded. --version must be a release tag
+ * vX.Y.Z: the build names the bridge CLI from it (bridgeNpmVersion) and disables the widget for
+ * any other version, so a pin that cannot be used is refused here, not discovered at build time.
+ */
+export function parseArgs(argv: string[]): Args {
   const args: Record<string, string> = {};
   for (const a of argv) {
     const m = /^--([^=]+)=(.+)$/.exec(a);
@@ -58,6 +63,12 @@ function parseArgs(argv: string[]): Args {
   if (!args["version"] || !args["sha256"]) {
     throw new Error(
       `usage: npm run update-widget -- --version=vX.Y.Z --sha256=<hex> [--release-url=https://...]`,
+    );
+  }
+  if (bridgeNpmVersion(args["version"]) === null) {
+    throw new Error(
+      `--version=${JSON.stringify(args["version"])} is not a release tag. Use the upstream tag in the form vX.Y.Z ` +
+        `(for example v0.1.13): the landing page names the bridge CLI of the same release, @jason.today/webmcp@X.Y.Z.`,
     );
   }
   return {

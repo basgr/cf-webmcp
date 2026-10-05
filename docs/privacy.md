@@ -62,7 +62,7 @@ The `cf-webmcp-bypass` header tells the publisher's Bot Management that this tra
 
 ## The fallback widget
 
-If `[features].fallback_widget = true`, the widget JS from `jasonjmcghee/WebMCP` is served from R2 on the landing page. The widget creates a localhost-only websocket connection between the visitor's browser and their desktop MCP client. Pairing requires a one-time token the visitor copies from their client. No third-party servers are involved.
+If `[features].fallback_widget = true` (it is off by default), the widget JS from `jasonjmcghee/WebMCP` is served from R2 on the landing page. The widget opens a websocket connection from the visitor's browser to the bridge program on the visitor's own computer (`ws://localhost:<port>`), which relays tool calls to their desktop MCP client. The bridge listens on all of that computer's network interfaces, not only on localhost, and accepts websocket connections only with a token: pairing needs a single-use token the visitor gets from their client or from the bridge. A plain HTTP request to the bridge's port answers with a short banner that any web page may read, so a page can tell whether the bridge is running. No third-party servers are involved. See [Known limits of the desktop bridge](deployment.md#known-limits-of-the-desktop-bridge).
 
 ## Health endpoint
 

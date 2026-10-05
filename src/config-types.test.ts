@@ -15,6 +15,14 @@ const minimal = {
   ],
 };
 
+describe("[features].fallback_widget", () => {
+  it("is off unless the config switches it on (the widget is opt-in)", () => {
+    expect(ConfigSchema.parse(minimal).features.fallback_widget).toBe(false);
+    expect(ConfigSchema.parse({ ...minimal, features: {} }).features.fallback_widget).toBe(false);
+    expect(ConfigSchema.parse({ ...minimal, features: { fallback_widget: true } }).features.fallback_widget).toBe(true);
+  });
+});
+
 describe("site.domain validation", () => {
   it("accepts a bare hostname and a hostname:port", () => {
     expect(ConfigSchema.parse({ ...minimal, site: { domain: "example.com", name: "x" } }).site.domain).toBe(

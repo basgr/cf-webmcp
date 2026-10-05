@@ -23,11 +23,11 @@ Tool calls add a fraction on top, since they are a small fraction of total page 
 
 ## R2 storage (for the fallback widget)
 
-R2 has a free tier that covers `cf-webmcp` with room to spare: 10 GB of storage per month, 1 million Class A operations per month, 10 million Class B operations per month. The widget JS is roughly 30KB. One stored object, a handful of reads on each Worker cold start. Nowhere near the free tier ceiling.
+R2 has a free tier that covers `cf-webmcp` with room to spare: 10 GB of storage per month, 1 million Class A operations per month, 10 million Class B operations per month. The widget JS is roughly 70 KB (68,930 bytes for v0.1.13 with its license preamble). One stored object, a handful of reads on each Worker cold start. Nowhere near the free tier ceiling.
 
 Beyond free tier: 0.015 EUR/GB/month for storage, with no egress fees on R2.
 
-R2 activation requires a payment method on file even at zero usage. If you do not enable R2, set `[features].fallback_widget = false` in your TOML and remove the `[[r2_buckets]]` block from `wrangler.toml`. Browser-native users keep working; desktop MCP clients see the "widget disabled" landing state.
+R2 activation requires a payment method on file even at zero usage. If you do not enable R2, leave `[features].fallback_widget` off (the default is `false`; the default, WordPress and WooCommerce templates switch it on, so set it to `false` there) and remove the `[[r2_buckets]]` block from `wrangler.toml`. Browser-native users keep working; desktop MCP clients see the "widget disabled" landing state.
 
 ## Cache hits do not count
 

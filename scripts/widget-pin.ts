@@ -74,6 +74,19 @@ export function makePin(version: string, raw: Uint8Array, preamble: string): Req
   };
 }
 
+/**
+ * A pin version is an upstream release tag, vX.Y.Z and nothing else. The tag names the git tag
+ * update-widget downloads from, and without its "v" the npm version of the bridge CLI the
+ * landing page tells visitors to run (tag v0.1.13 is @jason.today/webmcp@0.1.13).
+ */
+const RELEASE_TAG_RE = /^v(\d+\.\d+\.\d+)$/;
+
+/** The bridge's npm version for a release tag ("v0.1.13" gives "0.1.13"), or null for anything else. */
+export function bridgeNpmVersion(tag: string): string | null {
+  const m = RELEASE_TAG_RE.exec(tag);
+  return m && m[1] ? m[1] : null;
+}
+
 /** R2 object key / file name for a served_sha256: widget.<first 16 hex>.js. */
 export function widgetAssetName(servedSha256: string): string {
   if (!/^[0-9a-f]{64}$/.test(servedSha256)) {

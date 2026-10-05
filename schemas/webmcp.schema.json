@@ -120,7 +120,7 @@
             },
             "fallback_widget": {
               "type": "boolean",
-              "default": true
+              "default": false
             }
           },
           "additionalProperties": false,
@@ -370,6 +370,21 @@
                 "passthrough"
               ],
               "default": "synthesize"
+            }
+          },
+          "additionalProperties": false,
+          "default": {}
+        },
+        "origin_trial": {
+          "type": "object",
+          "properties": {
+            "tokens": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9+/]+={0,2}$"
+              },
+              "default": []
             }
           },
           "additionalProperties": false,

@@ -18,7 +18,7 @@ const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..
  * the script rather than by reading its text.
  */
 
-const TOML = `
+const BASE_TOML = `
 schema_version = 1
 
 [site]
@@ -39,7 +39,9 @@ description = "Search the site."
   sitemap_url = "https://example.com/sitemap.xml"
 `;
 
-const WIDGET_OFF = `${TOML}\n[features]\nfallback_widget = false\n`;
+/** The widget is opt-in, so the "widget on" landing switches it on. */
+const TOML = `${BASE_TOML}\n[features]\nfallback_widget = true\n`;
+const WIDGET_OFF = `${BASE_TOML}\n[features]\nfallback_widget = false\n`;
 
 /** A tool whose description tries to end the inline script, plus a second tool with a schema. */
 const HOSTILE_DESCRIPTION = "</script><script>alert(1)</script> <!--<script>";
@@ -548,12 +550,36 @@ describe("the fallback widget init script", () => {
     execute: (input?: unknown) => unknown;
   }
 
+  /** A page element the init script may reveal: it only ever sets text and removes `hidden`. */
+  class FakeElement {
+    hidden = true;
+    text = "";
+    get textContent(): string {
+      return this.text;
+    }
+    set textContent(value: string) {
+      this.text = value;
+    }
+    set innerHTML(value: string) {
+      throw new Error(`innerHTML was assigned: ${value}`);
+    }
+    removeAttribute(name: string): void {
+      if (name === "hidden") this.hidden = false;
+    }
+    setAttribute(name: string): void {
+      if (name === "hidden") this.hidden = true;
+    }
+  }
+
   interface WidgetRun {
     constructed: unknown[];
     registered: Registered[];
     fetches: Array<{ url: string; init: Record<string, unknown> }>;
     loadHandlers: Array<() => void>;
     warnings: unknown[][];
+    /** The hidden "Click the blue square" step and the hidden failure line in the pairing block. */
+    step: FakeElement;
+    error: FakeElement;
     /** Runs the load handlers, as the browser does after the deferred widget script ran. */
     load(): void;
   }
@@ -561,14 +587,19 @@ describe("the fallback widget init script", () => {
   interface WidgetRunOptions {
     /** The page's location; null for no location global at all. */
     location?: Record<string, unknown> | null;
-    /** "absent": the widget script did not load (R2 503, SRI mismatch). */
-    webmcp?: "ok" | "absent" | "constructor-throws" | "first-register-throws";
+    /**
+     * "absent": the widget script did not load (R2 503, SRI mismatch). "no-mount": the
+     * constructor returns but puts no widget on the page.
+     */
+    webmcp?: "ok" | "absent" | "constructor-throws" | "first-register-throws" | "no-mount";
     /** What fetch answers; default a JSON envelope { ok: true, data: {} }. */
     fetchImpl?: (url: string, init: Record<string, unknown>) => unknown;
     readyState?: string;
     /** document.modelContext / navigator.modelContext, as for the state script. */
     documentModelContext?: Record<string, unknown> | null;
     navigatorModelContext?: Record<string, unknown>;
+    /** The page has neither the step nor the failure line (getElementById answers null). */
+    noBlockElements?: boolean;
   }
 
   const OK_ENVELOPE = { ok: true, data: { entries: [{ url: "https://example.com/a" }] } };
@@ -587,15 +618,20 @@ describe("the fallback widget init script", () => {
       fetches: [],
       loadHandlers: [],
       warnings: [],
+      step: new FakeElement(),
+      error: new FakeElement(),
       load: () => {
         for (const fn of run.loadHandlers) fn();
       },
     };
     const mode = o.webmcp ?? "ok";
+    let mounted: FakeElement | null = null;
     class FakeWebMCP {
       constructor(options: unknown) {
         if (mode === "constructor-throws") throw new Error("widget constructor boom");
         run.constructed.push(options);
+        // The real widget appends <div data-webmcp-widget> to document.body.
+        if (mode !== "no-mount") mounted = new FakeElement();
       }
       registerTool(name: string, description: string, schema: unknown, execute: (input?: unknown) => unknown): void {
         if (mode === "first-register-throws" && run.registered.length === 0 && !(this as { thrown?: boolean }).thrown) {
@@ -605,7 +641,14 @@ describe("the fallback widget init script", () => {
         run.registered.push({ name, description, schema, execute });
       }
     }
-    const doc: Record<string, unknown> = { readyState: o.readyState ?? "loading" };
+    const elements: Record<string, FakeElement> = o.noBlockElements
+      ? {}
+      : { "webmcp-widget-step": run.step, "webmcp-widget-error": run.error };
+    const doc: Record<string, unknown> = {
+      readyState: o.readyState ?? "loading",
+      getElementById: (id: string) => elements[id] ?? null,
+      querySelector: (selector: string) => (selector === "[data-webmcp-widget]" ? mounted : null),
+    };
     if (o.documentModelContext !== undefined) doc["modelContext"] = o.documentModelContext;
     const nav: Record<string, unknown> = {};
     if (o.navigatorModelContext !== undefined) nav["modelContext"] = o.navigatorModelContext;
@@ -631,13 +674,14 @@ describe("the fallback widget init script", () => {
     return run;
   }
 
-  it("does nothing before load, then starts the widget once with no options and registers every tool once", () => {
+  it("does nothing before load, then starts the widget once with a 30 minute inactivity timeout and registers every tool once", () => {
     const run = runWidgetInit(landingTwoTools);
     expect(run.constructed).toEqual([]);
     expect(run.loadHandlers).toHaveLength(1);
     run.load();
     expect(run.constructed).toHaveLength(1);
-    expect(JSON.stringify(run.constructed[0])).toBe("{}");
+    // The vendored widget reads options.inactivityTimeout in milliseconds (webmcp.js:17, 893).
+    expect(JSON.parse(JSON.stringify(run.constructed[0]))).toEqual({ inactivityTimeout: 1800000 });
     expect(run.registered.map((r) => r.name)).toEqual(["search_pages", "list_pages"]);
     expect(run.registered[0]!.description).toBe("Search the site.");
     expect(JSON.parse(JSON.stringify(run.registered[1]!.schema))).toEqual({
@@ -743,18 +787,45 @@ describe("the fallback widget init script", () => {
     expect(run.fetches[0]!.url).toBe("http://localhost:8787/_webmcp/exec/search_pages");
   });
 
-  it("does nothing, and throws nothing, when the widget script did not load", () => {
-    const run = runWidgetInit(landingWidgetOn, { webmcp: "absent" });
-    expect(() => run.load()).not.toThrow();
-    expect(run.constructed).toEqual([]);
-    expect(run.registered).toEqual([]);
+  it("reveals the blue-square step once the widget is on the page, and leaves the failure line hidden", () => {
+    const run = runWidgetInit(landingWidgetOn);
+    expect(run.step.hidden).toBe(true);
+    run.load();
+    expect(run.step.hidden).toBe(false);
+    expect(run.error.hidden).toBe(true);
+    expect(run.error.textContent).toBe("");
+    expect(run.warnings).toEqual([]);
   });
 
-  it("throws nothing when the widget constructor throws, and says so in the console", () => {
-    const run = runWidgetInit(landingWidgetOn, { webmcp: "constructor-throws" });
+  // The widget never got onto the page: its script did not run (R2 503, SRI mismatch), its
+  // constructor threw, or it returned without mounting. The step stays hidden and one line says so.
+  it.each([
+    ["its script did not load", "absent"],
+    ["its constructor throws", "constructor-throws"],
+    ["it does not mount", "no-mount"],
+  ] as const)("says on the page and in the console that the widget could not be loaded when %s", (_label, webmcp) => {
+    const run = runWidgetInit(landingWidgetOn, { webmcp });
     expect(() => run.load()).not.toThrow();
     expect(run.registered).toEqual([]);
+    expect(run.step.hidden).toBe(true);
+    expect(run.error.hidden).toBe(false);
+    expect(run.error.textContent).toMatch(/widget .*could not be loaded/i);
     expect(run.warnings.length).toBeGreaterThan(0);
+    expect(String(run.warnings[0]![0])).toContain("cf-webmcp");
+  });
+
+  it("does not construct anything when the widget script did not load", () => {
+    const run = runWidgetInit(landingWidgetOn, { webmcp: "absent" });
+    run.load();
+    expect(run.constructed).toEqual([]);
+  });
+
+  it("throws nothing when the page has neither the step nor the failure line (a custom template)", () => {
+    for (const webmcp of ["ok", "absent"] as const) {
+      const run = runWidgetInit(landingWidgetOn, { webmcp, noBlockElements: true });
+      expect(() => run.load()).not.toThrow();
+      expect(run.constructed).toHaveLength(webmcp === "ok" ? 1 : 0);
+    }
   });
 
   it("registers the remaining tools when one registerTool call throws", () => {
@@ -792,6 +863,12 @@ describe("the fallback widget init script", () => {
     const run = runWidgetInit(landingWidgetOn, init);
     run.load();
     expect(run.constructed).toHaveLength(shownState === "state-pair" ? 1 : 0);
+    // With WebMCP of its own the page shows Connected: the pairing block stays as it was.
+    if (shownState === "state-native") {
+      expect(run.step.hidden).toBe(true);
+      expect(run.error.hidden).toBe(true);
+      expect(run.warnings).toEqual([]);
+    }
   });
 
   it("is absent from a landing without the widget", () => {

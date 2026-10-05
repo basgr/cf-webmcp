@@ -249,7 +249,12 @@ const Features = z.object({
    * tooling layer cannot accept the integrity attribute (unusual).
    */
   subresource_integrity: z.boolean().default(true),
-  fallback_widget: z.boolean().default(true),
+  /**
+   * The desktop pairing widget (jasonjmcghee/WebMCP) on the landing page. Opt-in: it needs the
+   * widget object in R2 (`npm run upload-widget`) and a bridge program on the visitor's
+   * computer, with the limits listed in docs/deployment.md.
+   */
+  fallback_widget: z.boolean().default(false),
 });
 
 const ManifestBlock = z.object({

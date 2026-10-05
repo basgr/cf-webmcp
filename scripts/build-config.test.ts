@@ -621,6 +621,9 @@ async function writePin(name: string, pin: Record<string, unknown>): Promise<str
   return p;
 }
 
+/** The widget is opt-in: appends the [features] table that switches it on (for a TOML without one). */
+const widgetOn = (toml: string): string => `${toml}\n[features]\nfallback_widget = true\n`;
+
 const widgetScriptTag = (landing: string): string | undefined => landing.match(/<script[^>]*widget\.[^>]*><\/script>/)?.[0];
 
 describe("content-addressed bootstrap", () => {
@@ -679,7 +682,7 @@ describe("content-addressed widget", () => {
   it("names the widget from the pin: widget.<first 16 hex of served_sha256>.js", async () => {
     const pin = fakePin("widget A");
     const pinPath = await writePin("pin.json", pin);
-    const { files } = await runBuild(await writeToml("w-name.toml", MINIMAL), { widgetPinPath: pinPath });
+    const { files } = await runBuild(await writeToml("w-name.toml", widgetOn(MINIMAL)), { widgetPinPath: pinPath });
     const expected = `widget.${(pin["served_sha256"] as string).slice(0, 16)}.js`;
 
     expect(exportedConst(files["config.ts"]!, "WIDGET_ASSET")).toBe(expected);
@@ -723,7 +726,7 @@ describe("content-addressed widget", () => {
 
   it("puts integrity and crossorigin on the widget script tag when SRI is on", async () => {
     const pin = fakePin("widget A");
-    const { files } = await runBuild(await writeToml("w-tag.toml", MINIMAL), {
+    const { files } = await runBuild(await writeToml("w-tag.toml", widgetOn(MINIMAL)), {
       widgetPinPath: await writePin("pin.json", pin),
     });
     const tag = widgetScriptTag(files["landing.html"]!)!;
@@ -733,7 +736,7 @@ describe("content-addressed widget", () => {
   });
 
   it("omits integrity from the widget tag and exports WIDGET_SRI null when subresource_integrity is off", async () => {
-    const off = `${MINIMAL}\n\n[features]\nsubresource_integrity = false\n`;
+    const off = `${MINIMAL}\n\n[features]\nsubresource_integrity = false\nfallback_widget = true\n`;
     const pin = fakePin("widget A");
     const { files } = await runBuild(await writeToml("w-sri-off.toml", off), {
       widgetPinPath: await writePin("pin.json", pin),
@@ -769,7 +772,7 @@ describe("content-addressed widget", () => {
         const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
         const pinPath = pin ? await writePin("pin.json", pin) : path.join(tmpDir, "does-not-exist.json");
 
-        const { files } = await runBuild(await writeToml("w-unpinned.toml", MINIMAL), { widgetPinPath: pinPath });
+        const { files } = await runBuild(await writeToml("w-unpinned.toml", widgetOn(MINIMAL)), { widgetPinPath: pinPath });
 
         expect(exportedConst(files["config.ts"]!, "WIDGET_ASSET")).toBeNull();
         expect(exportedConst(files["config.ts"]!, "WIDGET_SRI")).toBeNull();
@@ -808,7 +811,7 @@ describe("content-addressed widget", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const pin = fakePin("widget A", { preamble_sha256: sha256("an older preamble") });
 
-    const { files } = await runBuild(await writeToml("w-preamble.toml", MINIMAL), {
+    const { files } = await runBuild(await writeToml("w-preamble.toml", widgetOn(MINIMAL)), {
       widgetPinPath: await writePin("pin.json", pin),
     });
 
@@ -820,7 +823,7 @@ describe("content-addressed widget", () => {
 
   it("does not warn when the preamble matches the pin", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    await runBuild(await writeToml("w-ok.toml", MINIMAL), {
+    await runBuild(await writeToml("w-ok.toml", widgetOn(MINIMAL)), {
       widgetPinPath: await writePin("pin.json", fakePin("widget A")),
     });
     expect(warn.mock.calls.map((c) => String(c[0])).filter((m) => /widget|preamble/i.test(m))).toEqual([]);
@@ -828,8 +831,8 @@ describe("content-addressed widget", () => {
 });
 
 // ---------------------------------------------------------------------------
-// The fallback widget on the landing page: started, given this site's tools, and paired
-// through a bridge CLI pinned to the vendored widget's version.
+// The fallback widget on the landing page: opt-in, started, given this site's tools, and
+// paired through a bridge pinned to the vendored widget's version.
 // ---------------------------------------------------------------------------
 
 /** MINIMAL plus two more tools, so "once per tool" and the order are visible. */
@@ -869,12 +872,36 @@ function execClient(js: string): string {
   return js.slice(start, end + 4);
 }
 
+/** Text with the five entities escapeHtml writes turned back into characters. */
+function unescapeHtml(s: string): string {
+  return s
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&amp;/g, "&");
+}
+
+/** The text of every <code> element, unescaped. */
+const codeBlocks = (html: string): string[] =>
+  [...html.matchAll(/<code>([\s\S]*?)<\/code>/g)].map((m) => unescapeHtml(m[1]!));
+
 describe("landing: the fallback widget is started and registers this site's tools", () => {
   const pinFor = (version: string): Promise<string> =>
     writePin(`pin-${version.replace(/[^a-z0-9]/gi, "_")}.json`, fakePin("widget A", { version }));
 
+  it("is off unless [features].fallback_widget = true, and then quiet about the pin", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { files } = await runBuild(await writeToml("wi-default.toml", MINIMAL), { widgetPinPath: await pinFor("v0.1.13") });
+    const html = files["landing.html"]!;
+    expect(widgetInit(html)).toBeUndefined();
+    expect(html).not.toContain("@jason.today/webmcp");
+    expect(html).toContain("var widgetEnabled = false;");
+    expect(warn.mock.calls.map((c) => String(c[0])).filter((m) => /widget/i.test(m))).toEqual([]);
+  });
+
   it("starts the widget only if its script ran: a typeof WebMCP guard, then new WebMCP(", async () => {
-    const { files } = await runBuild(await writeToml("wi-guard.toml", MINIMAL), { widgetPinPath: await pinFor("v0.1.13") });
+    const { files } = await runBuild(await writeToml("wi-guard.toml", widgetOn(MINIMAL)), { widgetPinPath: await pinFor("v0.1.13") });
     const init = widgetInit(files["landing.html"]!);
     expect(init).toBeDefined();
     expect(init!.split("new WebMCP(")).toHaveLength(2);
@@ -882,8 +909,17 @@ describe("landing: the fallback widget is started and registers this site's tool
     expect(init!.indexOf("typeof WebMCP === 'undefined'")).toBeLessThan(init!.indexOf("new WebMCP("));
   });
 
+  it("gives the widget a 30 minute inactivity timeout, and says so on the page", async () => {
+    const { files } = await runBuild(await writeToml("wi-timeout.toml", widgetOn(MINIMAL)), { widgetPinPath: await pinFor("v0.1.13") });
+    const html = files["landing.html"]!;
+    expect(widgetInit(html)).toContain("new WebMCP({ inactivityTimeout: 1800000 })");
+    expect(html).toContain(
+      "The widget disconnects after 30 minutes without mouse or keyboard activity on this page; to reconnect, get a new token and repeat this step.",
+    );
+  });
+
   it("registers each tool once, in config order, after the widget's own script tag", async () => {
-    const { files } = await runBuild(await writeToml("wi-three.toml", THREE_TOOLS), { widgetPinPath: await pinFor("v0.1.13") });
+    const { files } = await runBuild(await writeToml("wi-three.toml", widgetOn(THREE_TOOLS)), { widgetPinPath: await pinFor("v0.1.13") });
     const html = files["landing.html"]!;
     const init = widgetInit(html)!;
     expect(init.match(/registerTool\(/g)).toHaveLength(3);
@@ -893,31 +929,78 @@ describe("landing: the fallback widget is started and registers this site's tool
     expect(html.indexOf(widgetScriptTag(html)!)).toBeLessThan(html.indexOf(init));
   });
 
-  it("pins the bridge CLI to the version in the pin, without the leading v", async () => {
+  it("names the bridge pinned to the version in the pin in every command: foreground, client entry, Claude Code, --new", async () => {
     for (const [version, npm] of [
       ["v0.1.13", "0.1.13"],
       ["v2.3.4", "2.3.4"],
     ] as const) {
-      const { files } = await runBuild(await writeToml(`wi-cli-${npm}.toml`, MINIMAL), { widgetPinPath: await pinFor(version) });
+      const { files } = await runBuild(await writeToml(`wi-cli-${npm}.toml`, widgetOn(MINIMAL)), { widgetPinPath: await pinFor(version) });
       const html = files["landing.html"]!;
-      expect(html).toContain(`npx -y @jason.today/webmcp@${npm} --config claude`);
-      expect(html.match(/@jason\.today\/webmcp@/g)).toHaveLength(1);
+      const code = codeBlocks(html);
+      expect(code).toContain(`npx -y @jason.today/webmcp@${npm} --foreground`);
+      expect(code).toContain(`claude mcp add webmcp -- npx -y @jason.today/webmcp@${npm} --mcp`);
+      expect(code).toContain(`npx -y @jason.today/webmcp@${npm} --new`);
+      const specs = html.match(/@jason\.today\/webmcp@[^\s"&<]*/g) ?? [];
+      expect(specs.length).toBeGreaterThanOrEqual(4);
+      expect(new Set(specs)).toEqual(new Set([`@jason.today/webmcp@${npm}`]));
       expect(html).not.toContain("@latest");
+      expect(html).not.toContain("--config");
     }
   });
 
-  it("keeps the pairing copy and the CLI line inside the pairing state", async () => {
-    const { files } = await runBuild(await writeToml("wi-state.toml", MINIMAL), { widgetPinPath: await pinFor("v0.1.13") });
+  it("gives the Claude Desktop entry as HTML-escaped JSON that reads back as the entry", async () => {
+    const { files } = await runBuild(await writeToml("wi-json.toml", widgetOn(MINIMAL)), { widgetPinPath: await pinFor("v0.1.13") });
     const html = files["landing.html"]!;
-    const pair = html.slice(html.indexOf('id="state-pair"'), html.indexOf('id="state-disabled"'));
+    expect(html).not.toMatch(/"mcpServers"/);
+    expect(html).toContain("&quot;mcpServers&quot;");
+    const json = codeBlocks(html).find((c) => c.includes("mcpServers"));
+    expect(JSON.parse(json!)).toEqual({
+      mcpServers: { webmcp: { command: "npx", args: ["-y", "@jason.today/webmcp@0.1.13", "--mcp"] } },
+    });
+    expect(html).toContain("<code>claude_desktop_config.json</code>");
+    expect(html).toContain("<code>~/.cursor/mcp.json</code>");
+  });
+
+  it("tells the visitor to keep the bridge running first, restart the client, and what to do when tools are missing", async () => {
+    const { files } = await runBuild(await writeToml("wi-steps.toml", widgetOn(MINIMAL)), { widgetPinPath: await pinFor("v0.1.13") });
+    const text = files["landing.html"]!.replace(/<[^>]+>/g, "").replace(/\s+/g, " ");
+    expect(text).toContain("leave the terminal open while you use this site's tools");
+    expect(text).toContain("Press Ctrl+C in that terminal to stop it.");
+    // A first --foreground run writes the bridge's server token but does not load it, so the
+    // client's side is refused until the bridge restarts (upstream src/websocket-server.js).
+    expect(text).toContain(
+      "The first time you run the bridge on a computer, stop it with Ctrl+C as soon as it has started and run the same command again: the first run creates the bridge's settings in ~/.webmcp but does not use them yet.",
+    );
+    expect(text).toContain("The bridge must already be running when the client starts.");
+    expect(text).toContain(
+      "If your client shows no tools from this site, check that the terminal from step 1 is still open, then restart the MCP client. After restarting your computer, repeat step 1 before you open the client.",
+    );
+  });
+
+  it("hides the widget step until the widget mounts, next to an empty status line for a widget that failed", async () => {
+    const { files } = await runBuild(await writeToml("wi-hidden.toml", widgetOn(MINIMAL)), { widgetPinPath: await pinFor("v0.1.13") });
+    const html = files["landing.html"]!;
+    expect(html).toMatch(/<li id="webmcp-widget-step" hidden>Click the blue square in the bottom right corner of this page/);
+    expect(html).toContain('<p id="webmcp-widget-error" role="status" hidden></p>');
+    // The failure text is written by the init script, never shipped as page text.
+    expect(html.replace(/<script[\s\S]*?<\/script>/g, "")).not.toMatch(/could not be loaded/);
+  });
+
+  it("keeps the pairing copy and every bridge command inside the pairing state", async () => {
+    const { files } = await runBuild(await writeToml("wi-state.toml", widgetOn(MINIMAL)), { widgetPinPath: await pinFor("v0.1.13") });
+    const html = files["landing.html"]!;
+    const start = html.indexOf('id="state-pair"');
+    const end = html.indexOf('id="state-disabled"');
+    const pair = html.slice(start, end);
     expect(pair).toContain("Pairing required");
-    expect(pair).toContain("npx -y @jason.today/webmcp@0.1.13");
     expect(pair).toContain("new WebMCP(");
-    expect(html.indexOf("npx -y")).toBe(html.lastIndexOf("npx -y"));
+    const outside = html.slice(0, start) + html.slice(end);
+    expect(outside).not.toContain("@jason.today/webmcp");
+    expect(outside).not.toContain("npx -y");
   });
 
   it("drops the unused widget mount", async () => {
-    const { files } = await runBuild(await writeToml("wi-mount.toml", MINIMAL), { widgetPinPath: await pinFor("v0.1.13") });
+    const { files } = await runBuild(await writeToml("wi-mount.toml", widgetOn(MINIMAL)), { widgetPinPath: await pinFor("v0.1.13") });
     expect(files["landing.html"]).not.toContain("webmcp-widget-mount");
   });
 
@@ -926,7 +1009,7 @@ describe("landing: the fallback widget is started and registers this site's tool
       'name   = "Example Co."',
       'name   = "Example Co."\npublic_url = "https://www.example.com"',
     ).concat('\n[paths]\nnamespace = "/_agents"\n');
-    const { files } = await runBuild(await writeToml("wi-origin.toml", custom), { widgetPinPath: await pinFor("v0.1.13") });
+    const { files } = await runBuild(await writeToml("wi-origin.toml", widgetOn(custom)), { widgetPinPath: await pinFor("v0.1.13") });
     const init = widgetInit(files["landing.html"]!)!;
     expect(init).toContain("location.origin !== 'null'");
     expect(init).toContain("location.protocol + '//' + location.host");
@@ -937,14 +1020,14 @@ describe("landing: the fallback widget is started and registers this site's tool
   });
 
   it("shares the bootstrap's exec client byte for byte, so the two cannot drift", async () => {
-    const { files } = await runBuild(await writeToml("wi-shared.toml", MINIMAL), { widgetPinPath: await pinFor("v0.1.13") });
+    const { files } = await runBuild(await writeToml("wi-shared.toml", widgetOn(MINIMAL)), { widgetPinPath: await pinFor("v0.1.13") });
     expect(execClient(widgetInit(files["landing.html"]!)!)).toBe(execClient(files["bootstrap.js"]!));
   });
 
   it("escapes a tool description that closes the script element", async () => {
     const hostile = "</script><script>alert(1)</script>";
     const toml = MINIMAL.replace('description = "Search the site."', `description = ${JSON.stringify(hostile)}`);
-    const { files } = await runBuild(await writeToml("wi-close.toml", toml), { widgetPinPath: await pinFor("v0.1.13") });
+    const { files } = await runBuild(await writeToml("wi-close.toml", widgetOn(toml)), { widgetPinPath: await pinFor("v0.1.13") });
     const html = files["landing.html"]!;
     // Only the widget init and the state script: the description opened no script of its own.
     const scripts = inlineScripts(html);
@@ -958,7 +1041,7 @@ describe("landing: the fallback widget is started and registers this site's tool
   it("escapes an HTML comment opener and the JavaScript line separators in a description", async () => {
     const hostile = `<!--<script> a${String.fromCharCode(0x2028)}b${String.fromCharCode(0x2029)}c`;
     const toml = MINIMAL.replace('description = "Search the site."', `description = ${JSON.stringify(hostile)}`);
-    const { files } = await runBuild(await writeToml("wi-comment.toml", toml), { widgetPinPath: await pinFor("v0.1.13") });
+    const { files } = await runBuild(await writeToml("wi-comment.toml", widgetOn(toml)), { widgetPinPath: await pinFor("v0.1.13") });
     const init = widgetInit(files["landing.html"]!)!;
     expect(init).not.toContain("<!--");
     expect(init).not.toMatch(new RegExp("[" + String.fromCharCode(0x2028, 0x2029) + "]"));
@@ -968,26 +1051,41 @@ describe("landing: the fallback widget is started and registers this site's tool
   });
 
   it("is ES5, every inline script of a landing with the widget", async () => {
-    const { files } = await runBuild(await writeToml("wi-es5.toml", THREE_TOOLS), { widgetPinPath: await pinFor("v0.1.13") });
+    const { files } = await runBuild(await writeToml("wi-es5.toml", widgetOn(THREE_TOOLS)), { widgetPinPath: await pinFor("v0.1.13") });
     const scripts = inlineScripts(files["landing.html"]!);
     expect(scripts).toHaveLength(2);
     for (const s of scripts) expect(es5Violations(s)).toEqual([]);
   });
 
-  describe("a landing without the widget has no pairing copy, no CLI line and no init", () => {
+  describe("a landing without the widget has no pairing copy, no bridge command and no init", () => {
     // The last field: whether the pin itself is unusable, which also leaves WIDGET_ASSET null.
     // With the feature off, the build still names the asset; the router does not serve it.
     const cases: Array<[string, string, () => Promise<string>, boolean]> = [
-      ["an unpinned pin", MINIMAL, () => writePin("pin.json", { version: "unpinned", sha256: "" }), true],
+      ["the default config (the widget is opt-in)", MINIMAL, () => pinFor("v0.1.13"), false],
+      ["an unpinned pin", widgetOn(MINIMAL), () => writePin("pin.json", { version: "unpinned", sha256: "" }), true],
       ["fallback_widget = false with a usable pin", `${MINIMAL}\n[features]\nfallback_widget = false\n`, () => pinFor("v0.1.13"), false],
-      ["a pin whose version is not a release version", MINIMAL, () => pinFor("main"), true],
+      ["a pin whose version is a branch name", widgetOn(MINIMAL), () => pinFor("main"), true],
+      ["a pin whose version has no leading v", widgetOn(MINIMAL), () => pinFor("0.1.13"), true],
+      ["a pin whose version is a pre-release", widgetOn(MINIMAL), () => pinFor("v0.1.13-beta.1"), true],
     ];
     for (const [label, toml, pin, unusablePin] of cases) {
       it(`with ${label}`, async () => {
         vi.spyOn(console, "warn").mockImplementation(() => {});
         const { files } = await runBuild(await writeToml("wi-off.toml", toml), { widgetPinPath: await pin() });
         const html = files["landing.html"]!;
-        for (const gone of ["new WebMCP(", "registerTool(", "@jason.today/webmcp", "npx -y", "Pairing required", "webmcp-widget-mount", "widget below"]) {
+        for (const gone of [
+          "new WebMCP(",
+          "registerTool(",
+          "@jason.today/webmcp",
+          "npx -y",
+          "--foreground",
+          "claude mcp add",
+          "mcpServers",
+          "Pairing required",
+          "webmcp-widget-mount",
+          "webmcp-widget-step",
+          "widget below",
+        ]) {
           expect(html, gone).not.toContain(gone);
         }
         expect(widgetScriptTag(html)).toBeUndefined();
@@ -996,12 +1094,36 @@ describe("landing: the fallback widget is started and registers this site's tool
       });
     }
 
-    it("says why when the pin's version is not a release version", async () => {
+    it("says why when the pin's version is not a release tag", async () => {
       const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-      await runBuild(await writeToml("wi-badver.toml", MINIMAL), { widgetPinPath: await pinFor("main") });
+      await runBuild(await writeToml("wi-badver.toml", widgetOn(MINIMAL)), { widgetPinPath: await pinFor("main") });
       const messages = warn.mock.calls.map((c) => String(c[0]));
       expect(messages.some((m) => /version/i.test(m) && m.includes('"main"') && /update-widget/.test(m))).toBe(true);
     });
+  });
+});
+
+describe("templates: the widget is opt-in, and switched on explicitly where a template wants it", () => {
+  const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+
+  it.each([
+    ["templates/default.toml", true],
+    ["templates/wordpress.toml", true],
+    ["templates/woocommerce.toml", true],
+    ["templates/example-site/webmcp.toml", false],
+  ] as const)("%s sets fallback_widget = %s itself, with a comment that says it is opt-in", async (rel, value) => {
+    const text = await fs.readFile(path.join(repoRoot, rel), "utf8");
+    const line = text.split(/\r?\n/).find((l) => /^fallback_widget\s*=/.test(l));
+    expect(line, rel).toBeDefined();
+    expect(line).toMatch(new RegExp(`^fallback_widget\\s*=\\s*${value}\\b`));
+    if (value) expect(line).toMatch(/opt-in/i);
+    if (value) expect(line).toMatch(/upload-widget/);
+  });
+
+  it("the committed JSON schema gives fallback_widget the default false (npm run build:schema)", async () => {
+    const schema = JSON.parse(await fs.readFile(path.join(repoRoot, "schemas", "webmcp.schema.json"), "utf8"));
+    const features = schema.definitions.WebMCPConfig.properties.features.properties;
+    expect(features.fallback_widget).toEqual({ type: "boolean", default: false });
   });
 });
 

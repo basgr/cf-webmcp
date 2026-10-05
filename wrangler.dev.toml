@@ -1,6 +1,6 @@
 # Local dev Wrangler config. Used by `npm run dev:worker`.
 # Origin proxy target lives at http://localhost:8081 (started by `npm run dev:origin`).
-# No real R2 bucket; fallback widget is disabled in templates/example-site/webmcp.toml.
+# No remote R2 bucket; the fallback widget is off in templates/example-site/webmcp.toml.
 
 name               = "cf-webmcp-dev"
 main               = "src/worker.ts"
@@ -10,8 +10,10 @@ compatibility_flags = ["nodejs_compat"]
 [dev]
 port = 8787
 
-# A local R2 binding so the widget route doesn't fail typecheck.
-# Miniflare provides a local-only in-memory bucket; nothing is uploaded.
+# A local R2 binding for the widget route. Miniflare keeps the bucket in the local
+# state on disk (.wrangler/state), never in Cloudflare. `npm run upload-widget -- --local`
+# writes the widget object there (it reads this file by default), and `npm run e2e:pairing`
+# serves it from there.
 [[r2_buckets]]
 binding     = "CF_WEBMCP_ASSETS"
 bucket_name = "cf-webmcp-dev-assets"

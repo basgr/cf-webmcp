@@ -448,11 +448,13 @@ describe("content-addressed bootstrap", () => {
 describe("content-addressed widget", () => {
   const WIDGET_ASSET = "widget.fedcba9876543210.js";
   const WIDGET_BODY = "/*preamble*/\nwidget();";
+  /** The widget is opt-in ([features].fallback_widget defaults to false). */
+  const WIDGET_ON = { features: { fallback_widget: true } };
 
   it("serves the current widget object from R2 as stored", async () => {
     const fetchMock = stubOrigin({});
     const { env: r2Env } = envWithObjects({ [WIDGET_ASSET]: WIDGET_BODY });
-    const handler = createHandler(makeDeps({}, { meta: { WIDGET_ASSET } }));
+    const handler = createHandler(makeDeps(WIDGET_ON, { meta: { WIDGET_ASSET } }));
 
     const res = await call(handler, `https://example.com/_webmcp/${WIDGET_ASSET}`, undefined, r2Env);
 
@@ -465,7 +467,7 @@ describe("content-addressed widget", () => {
   it("answers a stale widget hash with 404 no-store noindex without touching R2 or origin", async () => {
     const fetchMock = stubOrigin({});
     const { env: r2Env, get } = envWithObjects({ [WIDGET_ASSET]: WIDGET_BODY });
-    const handler = createHandler(makeDeps({}, { meta: { WIDGET_ASSET } }));
+    const handler = createHandler(makeDeps(WIDGET_ON, { meta: { WIDGET_ASSET } }));
 
     const res = await call(handler, "https://example.com/_webmcp/widget.0000000000000000.js", undefined, r2Env);
 
@@ -479,7 +481,7 @@ describe("content-addressed widget", () => {
   it("answers any widget path with 404 noindex when the build has no widget asset", async () => {
     const fetchMock = stubOrigin({});
     const { env: r2Env, get, head } = envWithObjects({});
-    const handler = createHandler(makeDeps({}, { meta: { WIDGET_ASSET: null } }));
+    const handler = createHandler(makeDeps(WIDGET_ON, { meta: { WIDGET_ASSET: null } }));
 
     const res = await call(handler, "https://example.com/_webmcp/widget.anything.js", undefined, r2Env);
 
@@ -505,7 +507,7 @@ describe("content-addressed widget", () => {
   it("health reports widget_asset_present null and never probes R2 when the build has no widget", async () => {
     stubOrigin({});
     const { env: r2Env, head } = envWithObjects({});
-    const handler = createHandler(makeDeps({}, { meta: { WIDGET_ASSET: null } }));
+    const handler = createHandler(makeDeps(WIDGET_ON, { meta: { WIDGET_ASSET: null } }));
 
     const res = await call(handler, "https://example.com/_webmcp/health", undefined, r2Env);
 
@@ -518,7 +520,7 @@ describe("content-addressed widget", () => {
     stubOrigin({});
     const present = envWithObjects({ [WIDGET_ASSET]: WIDGET_BODY });
     const absent = envWithObjects({});
-    const handler = createHandler(makeDeps({}, { meta: { WIDGET_ASSET } }));
+    const handler = createHandler(makeDeps(WIDGET_ON, { meta: { WIDGET_ASSET } }));
 
     const a = await call(handler, "https://example.com/_webmcp/health", undefined, present.env);
     const b = await call(handler, "https://example.com/_webmcp/health", undefined, absent.env);

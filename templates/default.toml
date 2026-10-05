@@ -42,7 +42,7 @@ api_catalog      = true
 agent_skills     = true
 agent_skills_index = true
 # ai_catalog     = true   # ARD publisher catalog at /.well-known/ai-catalog.json (opt-in; ARD is a v0.9 draft)
-fallback_widget  = true   # desktop MCP client reach matters; widget is opt-in but ON by default
+fallback_widget  = true   # opt-in desktop pairing widget (off by default); needs the widget in R2: npm run update-widget, then npm run upload-widget before deploy
 
 # ---------- Paths ----------
 # Trailing slash is significant:

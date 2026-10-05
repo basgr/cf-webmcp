@@ -67,13 +67,13 @@ The upstream `webmachinelearning/webmcp` project ships an **Inspector** browser 
 
 ## What if a visitor doesn't enable the flag
 
-That is the entire reason `fallback_widget = true` exists. With the widget enabled:
+That is what `fallback_widget = true` is for. The widget is opt-in (off by default) and has [known limits](deployment.md#known-limits-of-the-desktop-bridge). With the widget enabled:
 
 - A native-flag visitor → green Connected. Tools auto-registered. No pairing.
-- A non-flag visitor with a desktop MCP client (Claude Desktop, Cursor, Claude Code, Windsurf) → blue Pairing required. They install the localhost bridge, paste a token, and connect through the widget.
+- A non-flag visitor with a desktop MCP client (Claude Desktop, Cursor, Claude Code, Windsurf) → blue Pairing required. They start the bridge in a terminal, add it to their MCP client, paste a token into the widget, and keep the terminal open while they use the tools.
 - A non-flag visitor without a desktop MCP client → red Not connected. No path to use the tools from this browser. They are not the audience.
 
-In short: most real visitors should be on the pair path until browser-native lands in stable. Keep `fallback_widget = true` until at least Chrome stable ships the WebMCP producer API (`document.modelContext.registerTool`).
+In short: until Chrome stable ships the WebMCP producer API (`document.modelContext.registerTool`), the pair path is how desktop MCP clients of visitors without the flag reach your tools. Switch `fallback_widget = true` on if those visitors matter to you and the bridge's limits suit them.
 
 ## Other browsers
 
@@ -89,7 +89,7 @@ Browser APIs that other surfaces depend on (especially agent APIs that can call 
 
 Until the flag is gone:
 
-- Always set `fallback_widget = true` in production. The widget covers desktop-client visitors who do not have the flag.
+- Consider `fallback_widget = true` if desktop-client visitors without the flag matter to you. It is opt-in: it needs `npm run upload-widget` before deploy and a bridge program on the visitor's computer, with [known limits](deployment.md#known-limits-of-the-desktop-bridge).
 - Run preflight before deploy so you know `/mcp` is uncontested on your domain.
 - Encourage technical visitors to enable the flag if they want the browser-native path (no token paste). The `/mcp` page's About section links here.
 - Test the three states yourself (flag on, flag off + widget on, flag off + widget off) before announcing publicly.

@@ -112,13 +112,13 @@ Reports which Worker-claimed paths are free, which will be merged, and which col
 
 ## Pairing end-to-end (fallback widget)
 
-`npm run e2e:pairing` checks the desktop pairing flow with real parts: an MCP client, the bridge CLI the landing page names, the widget in Chrome, the Worker in `wrangler dev` and the example-site origin. It is not part of `npm test`; run it by hand after a change to the widget block, the pin or the bridge version.
+`npm run e2e:pairing` follows the pairing steps the landing page shows, with real parts: the bridge the page names, an MCP client, the widget in Chrome, the Worker in `wrangler dev` and the example-site origin. It takes the bridge commands from the built page itself. It is not part of `npm test`; run it by hand after a change to the widget block, the pin or the bridge version.
 
 Prerequisites:
 
 - The vendored widget file. It is gitignored; fetch it with the version and sha256 from `vendor/webmcp/current.json`: `npm run update-widget -- --version=<version> --sha256=<sha256>`.
 - Google Chrome, installed. The script launches it through `playwright-core` (`channel: "chrome"`); set `CHROME_PATH` to use another Chrome or Chromium binary. It never downloads a browser.
-- Network access on the first run: `npx` installs the bridge into a temporary npm cache.
+- Network access: `npx` installs the bridge into a temporary npm cache on every run.
 
 ```bash
 npm run e2e:pairing
@@ -126,25 +126,26 @@ npm run e2e:pairing
 
 What it does, in order:
 
-1. Copies `templates/example-site/webmcp.toml` to a temporary file with `fallback_widget = true` and free ports, and builds `src/generated` from it. The landing must name `npx -y @jason.today/webmcp@<pinned version> --config claude`.
+1. Copies `templates/example-site/webmcp.toml` to a temporary file with `fallback_widget = true` and free ports, builds `src/generated` from it, and reads the pairing steps from the built landing: the `--foreground` command, the Claude Desktop entry and the `--new` command.
 2. Runs `npm run upload-widget -- --local`, which puts the composed widget object into the local R2 state of `wrangler.dev.toml`.
 3. Starts the origin (`scripts/dev-origin.ts`) and `wrangler dev --config wrangler.dev.toml --port <free port>`, and checks that the Worker serves the widget object with the pinned hash.
-4. Starts the bridge's websocket daemon with `npx -y @jason.today/webmcp@<pinned> --port <free port>`, as step 1 on the landing does, then the bridge's MCP side with `--mcp --port <same port>` as a stdio server through `@modelcontextprotocol/sdk`.
-5. Gets a pairing token from the bridge's own `_webmcp_get-token` tool, opens the landing in headless Chrome, clicks the widget, pastes the token and waits for "Connected".
-6. Asserts that `tools/list` shows the example tools and that `tools/call` of `search_pages` returns the executor envelope as text with `isError: false`, and with `isError: true` for an input without `query`. The bridge prefixes a page's tools with its host, `.` and `:` replaced by `_`: on port 8787 the tool is `localhost_8787-search_pages`.
+4. On Windows only: runs the bridge without `--foreground` (`npx -y @jason.today/webmcp@<pinned> --port <free port>`) and checks that the daemon it forks has exited 5 seconds later. That is why step 1 on the landing says `--foreground`.
+5. Page step 1: runs the page's `--foreground` command with `--port <free port>` as a long-running child. The bridge's home directory is new, so, as the page says for a first run, it stops it once (after checking that `~/.webmcp/.env` now exists) and starts it again.
+6. Page step 2: starts the page's Claude Desktop entry (`npx -y @jason.today/webmcp@<pinned> --mcp`, plus `--port`) as a stdio server through `@modelcontextprotocol/sdk`, and waits until that side has reached the daemon.
+7. Page step 3: checks that the page's `--new` command prints a token for the daemon, then gets the token it pairs with from the bridge's own `_webmcp_get-token` tool.
+8. Page step 4: opens the landing in headless Chrome, waits for the widget to mount and the step that points at it to appear, clicks the widget, pastes the token and waits for "Connected".
+9. Asserts that `tools/list` shows the example tools and that `tools/call` of `search_pages` returns the executor envelope as text with `isError: false`, and with `isError: true` for an input without `query`. The bridge prefixes a page's tools with its host, `.` and `:` replaced by `_`: on port 8787 the tool is `localhost_8787-search_pages`.
+10. Opens the landing once more with the widget script answering 503, and checks that the page shows its "could not be loaded" line, keeps the widget step hidden and warns in the console.
 
 It prints PASS or FAIL per step, prints the last lines of each process's output on a failure, and exits 1 on any failure.
 
-What it leaves alone: it never passes `--config` to the bridge, so no desktop MCP client config is written. The bridge runs with `HOME` and `USERPROFILE` set to a temporary directory, so its state (`~/.webmcp`: server token, pairing tokens, PID file) lands there and not in your home directory. Ports are picked at run time and passed as arguments; no tracked file changes.
+What it leaves alone: it never passes `--config` to the bridge, so no desktop MCP client config is written. The bridge's processes run with `HOME`, `USERPROFILE`, `APPDATA`, `LOCALAPPDATA`, `XDG_CONFIG_HOME` and `XDG_DATA_HOME` set to a temporary directory, so the bridge's state (`~/.webmcp`: server token, pairing tokens, PID file) lands there and not in your home directory. Ports are picked at run time and passed as arguments; no tracked file changes.
 
-What it changes: `src/generated` (gitignored) is rebuilt from the example-site TOML at the end, as `npm test` builds it. The widget object stays in `.wrangler/state` (gitignored). Every child process (origin, `wrangler dev`, the bridge, the daemon it detaches, Chrome) is stopped on every path, Ctrl+C included, and the script checks that their ports are closed and removes its temporary directory.
+What it changes: `src/generated` (gitignored) is rebuilt from the example-site TOML at the end, as `npm test` builds it. The widget object stays in `.wrangler/state` (gitignored). Every child process tree (origin, `wrangler dev`, the bridge's daemon and MCP side, every `npx` under them, Chrome) is stopped on every path, Ctrl+C and a command that runs past its time included (`taskkill /T` on Windows), and the script checks that the ports are closed and removes its temporary directory.
 
-Two things in the bridge (`@jason.today/webmcp` 0.1.13) shape the script:
+The Windows shim: the bridge's daemon calls `process.stdin.setRawMode(true)` on Windows (`src/websocket-server.js:1504-1514` in the bridge's source), which only a terminal has. A visitor runs step 1 in a terminal, where it works. The script starts the daemon as a child process without a terminal, so on Windows, and only for the daemon, it preloads a shim (`NODE_OPTIONS=--require`) that gives stdin a no-op `setRawMode`. The MCP side and the one-shot commands run without it. The limits this script works within are listed in [Known limits of the desktop bridge](deployment.md#known-limits-of-the-desktop-bridge).
 
-- **Windows.** The daemon calls `process.stdin.setRawMode(true)` on Windows (`src/websocket-server.js:1504-1514`), which only a terminal has. Started without one, as an MCP client starts it, it exits with `TypeError: process.stdin.setRawMode is not a function` and nothing listens on the websocket port. On Windows the script preloads a shim into the bridge's processes (`NODE_OPTIONS=--require`) that gives stdin a no-op `setRawMode`. A visitor's bridge has no such shim.
-- **Start order.** The MCP side connects to the daemon 100 ms after it starts, and reconnects without the server token (`src/server.js:216-222`), which the daemon answers with 401. It only connects when the daemon is already running, so the script starts the daemon first, as step 1 on the landing does.
-
-The bridge's websocket port defaults to 4797; the script passes a free one with `--port`.
+The bridge's websocket port defaults to 4797; the script passes free ones with `--port`.
 
 ## What is not available locally
 

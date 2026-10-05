@@ -30,7 +30,7 @@ agents_md        = true
 api_catalog      = true
 agent_skills     = true
 agent_skills_index = true
-fallback_widget  = false   # local dev does not have R2 widget ready
+fallback_widget  = false   # opt-in; local dev needs npm run upload-widget -- --local first (npm run e2e:pairing switches it on in a copy)
 
 [manifest]
 path = "/.well-known/webmcp"

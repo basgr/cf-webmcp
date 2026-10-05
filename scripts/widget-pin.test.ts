@@ -4,7 +4,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { LICENSE_PREAMBLE } from "../src/widget-preamble";
-import { composeWidget, computeServedFields, makePin, sha256Hex, widgetAssetName } from "./widget-pin";
+import { bridgeNpmVersion, composeWidget, computeServedFields, makePin, sha256Hex, widgetAssetName } from "./widget-pin";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -81,6 +81,20 @@ describe("widgetAssetName", () => {
   });
 });
 
+describe("bridgeNpmVersion", () => {
+  it("is the npm version of a release tag vX.Y.Z: the tag without its v", () => {
+    expect(bridgeNpmVersion("v0.1.13")).toBe("0.1.13");
+    expect(bridgeNpmVersion("v10.20.300")).toBe("10.20.300");
+  });
+
+  it.each(["0.1.13", "main", "v0.1", "v0.1.13-beta.1", "v0.1.13 ", " v0.1.13", "v0.1.13\n", "V0.1.13", "", "unpinned"])(
+    "is null for %j, which is not a release tag",
+    (version) => {
+      expect(bridgeNpmVersion(version)).toBeNull();
+    },
+  );
+});
+
 describe("sha256Hex", () => {
   it("hashes strings as utf-8 and bytes as given", () => {
     expect(sha256Hex("abc")).toBe(VECTOR.rawSha256);
@@ -95,7 +109,7 @@ describe("committed vendor/webmcp/current.json", () => {
 
   it("carries the served fields in the right shapes", async () => {
     const pin = await readPin();
-    expect(pin["version"]).toMatch(/^v\d+\.\d+\.\d+/);
+    expect(pin["version"]).toMatch(/^v\d+\.\d+\.\d+$/);
     expect(pin["sha256"]).toMatch(/^[0-9a-f]{64}$/);
     expect(pin["served_sha256"]).toMatch(/^[0-9a-f]{64}$/);
     expect(pin["served_sri"]).toMatch(/^sha384-[A-Za-z0-9+/]{64}$/);
