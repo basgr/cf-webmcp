@@ -11,6 +11,7 @@
 import type { ExecutorContext } from "./common";
 import { fromErr, logExecutorProblem, mapOriginStatus, originFetch, readFailure, readWithLimit } from "./common";
 import { err, ok, type Envelope } from "../envelope";
+import { elementContents, unwrapCdata } from "./xml-scan";
 
 /** Largest sitemap body we will read. The protocol caps a sitemap at 50 MB; this is a deliberate, lower bound for an edge Worker. */
 export const MAX_SITEMAP_BYTES = 5 * 1024 * 1024;
@@ -68,15 +69,14 @@ export async function runSitemapFilter(
  * Minimal sitemap parser. Accepts plain <urlset> sitemaps. Sitemap-index files
  * are not followed in v1 (publishers can point the executor at a leaf sitemap).
  *
- * Tag matching is regex-based and tolerant of attributes, CDATA, and namespaces.
+ * Tag matching is tolerant of attributes, CDATA, and namespaces, and case-insensitive.
  * Robust enough for well-formed sitemaps. Malformed XML returns whatever it
- * could parse.
+ * could parse. It reads the body in one pass (src/executors/xml-scan.ts), whatever
+ * tags are left open: the body is origin's, up to 5 MiB.
  */
 export function parseSitemap(xml: string): SitemapEntry[] {
   const out: SitemapEntry[] = [];
-  const urlBlocks = xml.matchAll(/<url\b[^>]*>([\s\S]*?)<\/url>/gi);
-  for (const m of urlBlocks) {
-    const block = m[1];
+  for (const block of elementContents(xml, "url")) {
     if (!block) continue;
     const loc = extractTag(block, "loc");
     if (!loc) continue;
@@ -88,9 +88,9 @@ export function parseSitemap(xml: string): SitemapEntry[] {
   return out;
 }
 
+/** The first `<tag>` element's content in `block`, CDATA unwrapped and trimmed; undefined when there is none or it is empty. */
 function extractTag(block: string, tag: string): string | undefined {
-  const re = new RegExp(`<${tag}\\b[^>]*>([\\s\\S]*?)</${tag}>`, "i");
-  const m = block.match(re);
-  if (!m || !m[1]) return undefined;
-  return m[1].replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, "$1").trim();
+  const content = elementContents(block, tag, 1)[0];
+  if (!content) return undefined;
+  return unwrapCdata(content).trim();
 }
