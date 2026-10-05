@@ -250,35 +250,49 @@ function buildManifest(config: Config, configHash: string, bootstrapName: string
   };
 }
 
-/** The script body served at /<namespace>/bootstrap.<hash>.js. */
 /**
  * Per-executor-type defaults for the WebMCP ToolAnnotations dictionary.
  *
  * All five executor types are read-only (none mutate origin state), so
- * readOnlyHint defaults to true across the board. untrustedContentHint
+ * readOnlyHint defaults to true and consequentialHint (Chrome's "this call may not
+ * be undoable") to false across the board. untrustedContentHint
  * varies: sitemap_filter returns URL + lastmod strings (structurally
  * constrained, low free-form-content risk), the other four surface
  * origin-fetched content that an agent should treat with the usual
- * untrusted-content care.
+ * untrusted-content care. An executor type this table does not know is assumed
+ * to write: not read-only, consequential.
  *
- * Publishers can override either field per-tool via `[tools.annotations]`.
+ * Publishers can override each field per-tool via `[tools.annotations]`.
+ * Exported for the build tests.
  */
-function defaultAnnotationsFor(executorType: string): { readOnlyHint: boolean; untrustedContentHint: boolean } {
+export function defaultAnnotationsFor(executorType: string): {
+  readOnlyHint: boolean;
+  untrustedContentHint: boolean;
+  consequentialHint: boolean;
+} {
   switch (executorType) {
     case "sitemap_filter":
-      return { readOnlyHint: true, untrustedContentHint: false };
+      return { readOnlyHint: true, untrustedContentHint: false, consequentialHint: false };
     case "rss_feed":
     case "dom_extract":
     case "http_json":
     case "http_get":
-      return { readOnlyHint: true, untrustedContentHint: true };
+      return { readOnlyHint: true, untrustedContentHint: true, consequentialHint: false };
     default:
-      return { readOnlyHint: false, untrustedContentHint: true };
+      return { readOnlyHint: false, untrustedContentHint: true, consequentialHint: true };
   }
 }
 
+/**
+ * The script body served at /<namespace>/bootstrap.<hash>.js.
+ *
+ * The exec endpoints it calls are root-relative (`<namespace>/exec/<tool>`), not absolute to
+ * [site].domain: the script must work on whichever host served the page (www, workers.dev,
+ * preview and staging hosts), where an absolute URL to the canonical host is cross-origin and
+ * the exec endpoint sends no CORS headers. The discovery documents (manifest, Link header,
+ * llms.txt, agents.md, SKILL.md) stay absolute: they are read from outside the page.
+ */
 function buildBootstrap(config: Config, configHash: string): string {
-  const base = siteBase(config);
   const ns = config.paths.namespace;
   const toolPayload = config.tools.map((t) => {
     const defaults = defaultAnnotationsFor(t.executor.type);
@@ -286,6 +300,7 @@ function buildBootstrap(config: Config, configHash: string): string {
     const annotations = {
       readOnlyHint: override.read_only_hint ?? defaults.readOnlyHint,
       untrustedContentHint: override.untrusted_content_hint ?? defaults.untrustedContentHint,
+      consequentialHint: override.consequential_hint ?? defaults.consequentialHint,
     };
     return {
       name: t.name,
@@ -293,7 +308,7 @@ function buildBootstrap(config: Config, configHash: string): string {
       description: t.description,
       inputSchema: t.input_schema,
       annotations,
-      endpoint: `${base}${ns}/exec/${t.name}`,
+      endpoint: `${ns}/exec/${t.name}`,
     };
   });
 
@@ -313,14 +328,26 @@ function buildBootstrap(config: Config, configHash: string): string {
   }
   if (!ctx) return;
   var TOOLS = ${JSON.stringify(toolPayload)};
-  // De-dupe against declarative form tools already on the page. Registering the
-  // same WebMCP tool name from both this script (registerTool) and a stamped
-  // <form toolname> crashes the renderer (Chrome bad_message 345,
-  // RFHI_WEBMCP_REGISTER_DUPLICATE_TOOL_NAME) - a Mojo IPC kill that try/catch
-  // cannot trap. The build refuses cf-webmcp's own tool/form name collisions;
-  // this guard additionally covers names a publisher hand-stamped in origin
-  // HTML, which the build cannot see. Object.create(null) so a hostile
-  // toolname like "__proto__" cannot poison the lookup.
+  // Cloudflare WebMCP Labs (a dashboard preview feature) injects
+  // /.webmcp/bridge.js, which registers its own tools on this same host object.
+  // The build refuses the tool and form names Labs reserves; the names of tools
+  // it proxies from the site's MCP server are not known at build time, so say so
+  // in the console when the bridge is on the page.
+  try {
+    if (document.querySelector('script[src$="/.webmcp/bridge.js"]') && typeof console !== 'undefined' && console.info) {
+      console.info('cf-webmcp: Cloudflare WebMCP Labs bridge detected; keep tool names distinct from its tools');
+    }
+  } catch (e) {}
+  // De-dupe against tools already on the page. Registering the same WebMCP tool
+  // name twice (this script's registerTool plus a stamped <form toolname>, or
+  // plus another script's registerTool) crashes the renderer (Chrome
+  // bad_message 345, RFHI_WEBMCP_REGISTER_DUPLICATE_TOOL_NAME) - a Mojo IPC kill
+  // that try/catch cannot trap. The build refuses cf-webmcp's own tool/form name
+  // collisions; this guard additionally covers names a publisher hand-stamped in
+  // origin HTML, which the build cannot see. First the [toolname] elements,
+  // which is synchronous. Whether getTools() also lists declarative form tools
+  // is not known, so it adds to that set and never replaces it. Object.create(null)
+  // so a hostile toolname like "__proto__" cannot poison the lookup.
   var declared = Object.create(null);
   try {
     var stamped = document.querySelectorAll('[toolname]');
@@ -354,24 +381,83 @@ function buildBootstrap(config: Config, configHash: string): string {
       };
     });
   }
-  TOOLS.forEach(function (t) {
-    if (declared[t.name]) return; // already declared on the page via a stamped form
-    try {
-      var toolDef = {
-        name: t.name,
-        description: t.description,
-        inputSchema: t.inputSchema,
-        annotations: t.annotations,
-        execute: function (input) { return run(t.endpoint, input); },
-      };
-      if (t.title) toolDef.title = t.title;
-      ctx.registerTool(toolDef);
-    } catch (e) {
-      if (typeof console !== 'undefined' && console.warn) {
-        console.warn('cf-webmcp: failed to register tool', t.name, e);
-      }
+  // One AbortController per tool: Chrome (153+) unregisters a tool when the
+  // signal passed to registerTool aborts. Older builds ignore the second
+  // argument (WebIDL drops extra arguments), so it is always passed. Nothing
+  // aborts these controllers and nothing is exposed globally; they are held here
+  // so a later SPA-navigation hook can unregister a tool.
+  var controllers = [];
+  var registered = Object.create(null);
+  var done = false;
+  function warnFailed(name, e) {
+    if (typeof console !== 'undefined' && console.warn) {
+      console.warn('cf-webmcp: failed to register tool', name, e);
     }
-  });
+  }
+  // Registers every tool whose name is not in "known". Runs once: every path
+  // below (getTools missing, throwing, rejecting, resolving) ends here, and the
+  // flag makes a second arrival a no-op.
+  function registerAll(known) {
+    if (done) return;
+    done = true;
+    TOOLS.forEach(function (t) {
+      if (known[t.name] || registered[t.name]) return;
+      registered[t.name] = true;
+      try {
+        var toolDef = {
+          name: t.name,
+          description: t.description,
+          inputSchema: t.inputSchema,
+          annotations: t.annotations,
+          execute: function (input) { return run(t.endpoint, input); },
+        };
+        if (t.title) toolDef.title = t.title;
+        var controller = typeof AbortController === 'function' ? new AbortController() : null;
+        var result;
+        if (controller) {
+          controllers.push(controller);
+          result = ctx.registerTool(toolDef, { signal: controller.signal });
+        } else {
+          result = ctx.registerTool(toolDef);
+        }
+        // registerTool may return a promise; a rejection must not surface as an
+        // unhandled one.
+        if (result && typeof result.then === 'function') {
+          Promise.resolve(result).catch(function (e) { warnFailed(t.name, e); });
+        }
+      } catch (e) {
+        warnFailed(t.name, e);
+      }
+    });
+  }
+  var pending = null;
+  if (typeof ctx.getTools === 'function' && typeof Promise === 'function') {
+    try {
+      pending = Promise.resolve(ctx.getTools());
+    } catch (e) {
+      pending = null;
+    }
+  }
+  if (!pending) {
+    registerAll(declared);
+  } else {
+    pending.then(function (list) {
+      var known = Object.create(null);
+      var k;
+      for (k in declared) known[k] = true;
+      if (list && typeof list.length === 'number') {
+        for (var j = 0; j < list.length; j++) {
+          var entry = list[j];
+          if (entry && typeof entry.name === 'string' && entry.name) known[entry.name] = true;
+        }
+      }
+      registerAll(known);
+    }, function () {
+      registerAll(declared);
+    }).catch(function () {
+      registerAll(declared);
+    });
+  }
 })();
 `;
 }
@@ -396,6 +482,17 @@ function buildWidgetBlock(widgetUrl: string, sri: string | null): string {
 }
 
 /**
+ * The bootstrap's <script> for the landing page, in the form the Worker injects it into proxied
+ * pages: root-relative, deferred, with `integrity` and `crossorigin="anonymous"` when SRI is on.
+ * The landing is served by the Worker itself, so the injection never reaches it; without this tag
+ * the page would say its tools are registered with your agent while registering none.
+ */
+function buildBootstrapBlock(bootstrapUrl: string, sri: string | null): string {
+  const sriAttrs = sri ? ` integrity="${escapeHtml(sri)}" crossorigin="anonymous"` : "";
+  return `<script src="${escapeHtml(bootstrapUrl)}" defer${sriAttrs}></script>`;
+}
+
+/**
  * The landing page served at /<webmcp_landing.path>.
  *
  * Loads an HTML template (default: `templates/landing.default.html`) and
@@ -412,6 +509,12 @@ function buildWidgetBlock(widgetUrl: string, sri: string | null): string {
  *   {{widget_block}}      - the widget mount + script tag (empty if disabled, which
  *                           includes a missing or unpinned vendor/webmcp/current.json)
  *   {{widget_enabled_js}} - literal "true" or "false" for inline JS
+ *   {{bootstrap_block}}   - the bootstrap <script>: root-relative src, deferred, with
+ *                           integrity + crossorigin="anonymous" when
+ *                           [features].subresource_integrity is on. It registers this
+ *                           site's tools on the landing page itself, because the
+ *                           Worker's HTML injection does not reach the landing.
+ *                           A template without the placeholder loads nothing.
  *
  * The runtime state-branching JS in the template is what selects which
  * state-* div becomes visible. As long as the override template keeps the
@@ -421,6 +524,7 @@ async function buildLanding(
   config: Config,
   configHash: string,
   widget: WidgetBuild,
+  bootstrap: { asset: string; sri: string | null },
   tomlPath: string,
 ): Promise<string> {
   const ns = config.paths.namespace;
@@ -456,6 +560,7 @@ async function buildLanding(
     tool_list: toolList,
     widget_block: widgetBlock,
     widget_enabled_js: showWidget ? "true" : "false",
+    bootstrap_block: buildBootstrapBlock(`${ns}/${bootstrap.asset}`, bootstrap.sri),
   };
 
   return templateSrc.replace(/\{\{\s*([a-z_]+)\s*\}\}/g, (_, name: string) => {
@@ -638,6 +743,39 @@ function checkPathCollisions(config: Config): void {
     }
     seen.set(c.path, c.name);
   }
+}
+
+/**
+ * Tool names Cloudflare WebMCP Labs registers on document.modelContext. Labs is a dashboard
+ * preview feature that injects `<script type="module" src="/.webmcp/bridge.js"
+ * data-packs="c2pa,mcp-server-client" data-mcp-url="/mcp">`; the c2pa pack registers these two
+ * tools. Anything else Labs registers (tools proxied from the site's own MCP server) is named
+ * by the site and cannot be known here. One list, used by the build check below.
+ */
+export const CLOUDFLARE_WEBMCP_LABS_TOOL_NAMES: readonly string[] = ["scan_images_c2pa", "inspect_image_c2pa"];
+
+/**
+ * Refuse a `[[tools]]` or `[[forms]]` name that Cloudflare WebMCP Labs has taken. A page that
+ * runs both Labs and cf-webmcp would register the name twice, and a duplicate name kills the
+ * Chrome renderer (bad_message 345). A form counts too: its stamped `toolname` attribute is
+ * registered by the browser as a tool. Every offender is reported at once.
+ */
+function checkReservedToolNames(config: Config): void {
+  const reserved = new Set(CLOUDFLARE_WEBMCP_LABS_TOOL_NAMES);
+  const problems: string[] = [];
+  for (const t of config.tools) {
+    if (reserved.has(t.name)) problems.push(`[[tools]] name "${t.name}"`);
+  }
+  for (const f of config.forms) {
+    if (reserved.has(f.name)) problems.push(`[[forms]] name "${f.name}"`);
+  }
+  if (problems.length === 0) return;
+  throw new Error(
+    `[build-config] reserved tool name: ${problems.join(", ")}. ` +
+      `Cloudflare WebMCP Labs (a dashboard preview feature that injects /.webmcp/bridge.js) registers ` +
+      `${CLOUDFLARE_WEBMCP_LABS_TOOL_NAMES.join(" and ")} on document.modelContext. A page that runs both would ` +
+      `register the name twice, which kills the Chrome renderer (bad_message 345). Rename it.`,
+  );
 }
 
 /**
@@ -1017,6 +1155,7 @@ export async function buildConfig(opts: BuildOptions): Promise<void> {
   }
   checkAllowList(config);
   checkPathCollisions(config);
+  checkReservedToolNames(config);
   checkToolNameCollisions(config);
   checkOriginTrial(config, opts.now ?? new Date());
 
@@ -1030,18 +1169,26 @@ export async function buildConfig(opts: BuildOptions): Promise<void> {
   // the SRI hash computed below over the same string.
   const bootstrap = buildBootstrap(config, configHash);
   const bootstrapName = `bootstrap.${sha256Hex(bootstrap).slice(0, 16)}.js`;
+  // The SRI hash is over the same string, and the landing page's own <script> for the
+  // bootstrap needs both, so both are fixed before the landing is built.
+  const bootstrapSri = computeBootstrapSri(config, bootstrap);
   // The widget is named after the composed object recorded in the pin, so a TOML
   // edit never moves it and a pin change always does.
   const widget = await resolveWidget(config, opts.widgetPinPath ?? DEFAULT_WIDGET_PIN_PATH);
 
   const manifest = buildManifest(config, configHash, bootstrapName);
-  const landing = await buildLanding(config, configHash, widget, opts.tomlPath);
+  const landing = await buildLanding(
+    config,
+    configHash,
+    widget,
+    { asset: bootstrapName, sri: bootstrapSri },
+    opts.tomlPath,
+  );
   const aiCatalog = config.features.ai_catalog ? buildAiCatalog(config) : null;
   const aiCatalogStr = aiCatalog ? stringifyCanonical(aiCatalog) : "";
   const buildAt = new Date().toISOString();
   const preflight = await loadPreflightResult(opts.outDir, configHash);
   const agentSkillsDigest = await computeAgentSkillsDigest(config);
-  const bootstrapSri = computeBootstrapSri(config, bootstrap);
   const manifestStr = JSON.stringify(manifest, null, 2);
   // Token-budget hints for the /llms.txt links, computed over the exact
   // bodies the worker serves at those paths.

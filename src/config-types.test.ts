@@ -41,6 +41,35 @@ describe("site.domain validation", () => {
   });
 });
 
+describe("[tools.annotations]", () => {
+  const withAnnotations = (annotations: unknown) => ({
+    ...minimal,
+    tools: [{ ...minimal.tools[0]!, annotations }],
+  });
+
+  it("accepts consequential_hint beside the other two hints", () => {
+    const parsed = ConfigSchema.parse(
+      withAnnotations({ read_only_hint: true, untrusted_content_hint: false, consequential_hint: true }),
+    );
+    expect(parsed.tools[0]!.annotations).toEqual({
+      read_only_hint: true,
+      untrusted_content_hint: false,
+      consequential_hint: true,
+    });
+  });
+
+  it("rejects a non-boolean consequential_hint", () => {
+    expect(() => ConfigSchema.parse(withAnnotations({ consequential_hint: "yes" }))).toThrow();
+  });
+
+  it("adds no default: an omitted hint stays out of the parsed config", () => {
+    expect(ConfigSchema.parse(minimal).tools[0]!.annotations).toBeUndefined();
+    expect(ConfigSchema.parse(withAnnotations({ read_only_hint: true })).tools[0]!.annotations).toEqual({
+      read_only_hint: true,
+    });
+  });
+});
+
 describe("forms selector grammar", () => {
   const form = (selector: string, params: Array<{ selector: string; description: string }> = []) => ({
     ...minimal,

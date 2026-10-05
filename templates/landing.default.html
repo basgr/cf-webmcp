@@ -84,7 +84,7 @@ hr{border:none;border-top:1px solid #e5e7eb;margin:2.5rem 0}
   <div class="callout callout-warning">
     <h2>Not connected</h2>
     <p>Your browser does not expose WebMCP, and the fallback widget for desktop MCP clients is disabled on this site. You cannot pair from here right now.</p>
-    <p>If you are testing this site, you can enable browser-native WebMCP in Chrome or Edge by flipping a flag at <code>chrome://flags/#enable-webmcp-testing</code> and relaunching. If you are the site owner, set <code>fallback_widget = true</code> in <code>webmcp.toml</code> and redeploy to enable the desktop pairing flow.</p>
+    <p>Chrome reaches users with WebMCP through an origin trial (from Chrome 149) when the site sends a trial token. To test without a token, turn on <code>chrome://flags/#enable-webmcp-testing</code> and relaunch. Cloudflare's Kitesurf agent browser also supports WebMCP. If you are the site owner, set <code>fallback_widget = true</code> in <code>webmcp.toml</code> and redeploy to enable the desktop pairing flow.</p>
   </div>
 </div>
 
@@ -96,7 +96,7 @@ hr{border:none;border-top:1px solid #e5e7eb;margin:2.5rem 0}
 <h2>About WebMCP</h2>
 <p>WebMCP is a way for websites to expose structured tools that AI agents can call. There are two runtimes behind the same name, and they reach different agents.</p>
 <ul>
-  <li><strong>The W3C draft</strong> (<a href="https://github.com/webmachinelearning/webmcp"><code>webmachinelearning/webmcp</code></a>): a browser API at <code>document.modelContext</code> (older builds expose the deprecated <code>navigator.modelContext</code> alias). Used by browser-native agents (Chromium with the flag, Cloudflare Browser Run lab sessions). No pairing needed; tools register automatically when the page loads. <strong>As of mid-2026 this is behind <code>chrome://flags/#enable-webmcp-testing</code></strong> in Chrome and Edge.</li>
+  <li><strong>The W3C draft</strong> (<a href="https://github.com/webmachinelearning/webmcp"><code>webmachinelearning/webmcp</code></a>): a browser API at <code>document.modelContext</code> (older builds expose the deprecated <code>navigator.modelContext</code> alias). Used by browser-native agents (Chrome, Cloudflare Kitesurf, Cloudflare Browser Run lab sessions). No pairing needed; tools register automatically when the page loads. <strong>Chrome reaches users through an origin trial from Chrome 149</strong>, when the site sends a trial token; without one, WebMCP is behind <code>chrome://flags/#enable-webmcp-testing</code>.</li>
   <li><strong>The jasonjmcghee library</strong> (<a href="https://github.com/jasonjmcghee/WebMCP"><code>jasonjmcghee/WebMCP</code></a>): a localhost websocket bridge for desktop MCP clients (Claude Desktop, Cursor, Claude Code, Windsurf). Requires the one-time pairing flow above.</li>
 </ul>
 <p class="muted">This site uses <a href="https://github.com/basgr/cf-webmcp">cf-webmcp</a> to expose both surfaces from a single config.</p>
@@ -107,34 +107,42 @@ hr{border:none;border-top:1px solid #e5e7eb;margin:2.5rem 0}
   <ul id="webmcp-diag"><li>checking...</li></ul>
 </details>
 
+{{bootstrap_block}}
 <script>
 (function () {
-  // Producer host: document.modelContext is current (Chrome 150+); the
-  // navigator binding is the deprecated 146-149 alias whose accessor logs a
-  // console warning, so only read it when document lacks the API. The `in`
-  // checks are safe (they do not invoke the accessor).
+  // Producer host, chosen the way the bootstrap chooses it: document.modelContext
+  // is current (Chrome 150+); the navigator binding is the deprecated 146-149
+  // alias whose accessor logs a console warning, so only read it when document
+  // lacks a usable API. The `in` checks are safe (they do not invoke the accessor).
   var hasDoc = 'modelContext' in document;
   var hasNav = 'modelContext' in navigator;
-  var mc = hasDoc ? document.modelContext : (hasNav ? navigator.modelContext : null);
+  var dmc = hasDoc ? document.modelContext : null;
+  var mc = (dmc && typeof dmc.registerTool === 'function') ? dmc : (hasNav ? navigator.modelContext : null);
+  var shown = dmc || mc;
   var mct = navigator.modelContextTesting;
+  var absentDoc = 'undefined (document.modelContext absent)';
   var probes = {
     'document.modelContext': hasDoc,
     'navigator.modelContext (deprecated alias)': hasNav,
-    'typeof modelContext.registerTool': mc ? typeof mc.registerTool : 'undefined (modelContext absent)',
+    'typeof modelContext.registerTool': shown ? typeof shown.registerTool : 'undefined (modelContext absent)',
+    'typeof document.modelContext.getTools': dmc ? typeof dmc.getTools : absentDoc,
+    'typeof document.modelContext.executeTool': dmc ? typeof dmc.executeTool : absentDoc,
+    "'ontoolchange' in document.modelContext": dmc ? ('ontoolchange' in dmc) : 'n/a (document.modelContext absent)',
     'navigator.modelContextTesting': 'modelContextTesting' in navigator,
     'typeof navigator.modelContextTesting.listTools': mct ? typeof mct.listTools : 'undefined (modelContextTesting absent)',
     'typeof navigator.modelContextTesting.executeTool': mct ? typeof mct.executeTool : 'undefined (modelContextTesting absent)',
     'fallback widget configured': {{widget_enabled_js}}
   };
-  var hasProducer = !!mc && probes['typeof modelContext.registerTool'] === 'function';
+  var hasProducer = !!mc && typeof mc.registerTool === 'function';
   var widgetEnabled = {{widget_enabled_js}};
   var id = hasProducer ? 'state-native' : (widgetEnabled ? 'state-pair' : 'state-disabled');
   var el = document.getElementById(id);
   if (el) el.classList.add('active');
 
   var ul = document.getElementById('webmcp-diag');
+  var namesText = null;
   if (ul) {
-    ul.innerHTML = '';
+    ul.textContent = '';
     Object.keys(probes).forEach(function (key) {
       var li = document.createElement('li');
       var k = document.createElement('code');
@@ -143,9 +151,54 @@ hr{border:none;border-top:1px solid #e5e7eb;margin:2.5rem 0}
       li.appendChild(document.createTextNode(': ' + probes[key]));
       ul.appendChild(li);
     });
+    // The names getTools() reports, once the bootstrap above has registered this
+    // site's tools. Filled in later, in this one list item; text only, never HTML.
+    if (dmc && typeof dmc.getTools === 'function' && typeof Promise === 'function') {
+      var namesLi = document.createElement('li');
+      var namesKey = document.createElement('code');
+      namesKey.textContent = 'document.modelContext.getTools() names';
+      namesLi.appendChild(namesKey);
+      namesText = document.createTextNode(': waiting for the page to finish loading');
+      namesLi.appendChild(namesText);
+      ul.appendChild(namesLi);
+    }
     var conclusion = document.createElement('li');
     conclusion.textContent = 'Selected state: ' + id;
     ul.appendChild(conclusion);
+  }
+
+  function describeError(e) {
+    return String((e && e.message) || e);
+  }
+  function showNames(text) {
+    namesText.textContent = ': ' + text;
+  }
+  function listNames() {
+    var pending;
+    try {
+      pending = Promise.resolve(dmc.getTools());
+    } catch (e) {
+      showNames('getTools() threw: ' + describeError(e));
+      return;
+    }
+    pending.then(function (list) {
+      var names = [];
+      if (list && typeof list.length === 'number') {
+        for (var i = 0; i < list.length; i++) {
+          if (list[i] && typeof list[i].name === 'string') names.push(list[i].name);
+        }
+      }
+      showNames(names.length ? names.join(', ') : 'none registered');
+    }, function (e) {
+      showNames('getTools() rejected: ' + describeError(e));
+    });
+  }
+  if (namesText) {
+    // The bootstrap is deferred and registers once its own getTools() answer is in,
+    // so ask again whenever the tool set changes as well as at load.
+    if (document.readyState === 'complete') listNames();
+    else window.addEventListener('load', listNames);
+    if (typeof dmc.addEventListener === 'function') dmc.addEventListener('toolchange', listNames);
   }
 })();
 </script>

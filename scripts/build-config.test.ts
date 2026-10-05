@@ -4,8 +4,9 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
-import { buildConfig } from "./build-config";
+import { buildConfig, CLOUDFLARE_WEBMCP_LABS_TOOL_NAMES, defaultAnnotationsFor } from "./build-config";
 import { LICENSE_PREAMBLE } from "../src/widget-preamble";
+import { es5Violations, inlineScripts } from "../src/test-support/es5";
 import { expiryInDays, makeOriginTrialToken, type TokenPayload } from "../src/test-support/origin-trial";
 
 /**
@@ -362,12 +363,12 @@ selector    = "form#contact2"
   });
 
   it("bootstrap.js emits WebMCP ToolAnnotations defaults per executor type", async () => {
-    // MINIMAL uses sitemap_filter -> readOnlyHint:true, untrustedContentHint:false
+    // MINIMAL uses sitemap_filter -> readOnlyHint:true, untrustedContentHint:false, consequentialHint:false
     const toml = await writeToml("annot-sitemap.toml", MINIMAL);
     const { files } = await runBuild(toml);
     const js = files["bootstrap.js"]!;
     expect(js).toContain('"name":"search_pages"');
-    expect(js).toContain('"annotations":{"readOnlyHint":true,"untrustedContentHint":false}');
+    expect(js).toContain('"annotations":{"readOnlyHint":true,"untrustedContentHint":false,"consequentialHint":false}');
   });
 
   it("bootstrap.js sets untrustedContentHint:true for content-fetching executors", async () => {
@@ -392,7 +393,7 @@ description = "Fetch a page"
     const { files } = await runBuild(toml);
     const js = files["bootstrap.js"]!;
     expect(js).toContain('"name":"get_page"');
-    expect(js).toContain('"annotations":{"readOnlyHint":true,"untrustedContentHint":true}');
+    expect(js).toContain('"annotations":{"readOnlyHint":true,"untrustedContentHint":true,"consequentialHint":false}');
   });
 
   it("bootstrap.js honors per-tool [tools.annotations] overrides", async () => {
@@ -406,9 +407,9 @@ description = "Fetch a page"
     const { files } = await runBuild(toml);
     const js = files["bootstrap.js"]!;
     // Default for sitemap_filter would be readOnlyHint:true, untrustedContentHint:false.
-    // Override should flip both.
+    // Override should flip both, and leave consequentialHint at its default.
     expect(js).toContain('"name":"search_pages"');
-    expect(js).toContain('"annotations":{"readOnlyHint":false,"untrustedContentHint":true}');
+    expect(js).toContain('"annotations":{"readOnlyHint":false,"untrustedContentHint":true,"consequentialHint":false}');
   });
 
   it("bootstrap.js emits title only when set on the tool", async () => {
@@ -1169,5 +1170,341 @@ describe("buildConfig: [origin_trial]", () => {
     const token = tokenFor({ expiry: expiryInDays(365) });
     const toml = await writeToml("ot-clock.toml", otToml([token]));
     await expect(runBuild(toml, { now: new Date(Date.now() + 400 * DAY_MS) })).rejects.toThrow(/expired/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The generated bootstrap and the landing page: getTools() de-dupe, abort signals,
+// root-relative URLs, the reserved Cloudflare WebMCP Labs names. What the generated code
+// does when it runs is in bootstrap.vm.test.ts; here it is what the build emits.
+// ---------------------------------------------------------------------------
+
+/** The TOOLS array the bootstrap carries, parsed back out of the generated text. */
+function toolsIn(js: string): Array<{ name: string; endpoint: string; annotations: Record<string, unknown> }> {
+  const m = js.match(/var TOOLS = (\[.*\]);/);
+  if (!m) throw new Error("no TOOLS array in the bootstrap");
+  return JSON.parse(m[1]!);
+}
+
+const FIVE_EXECUTORS = `${MINIMAL}
+
+[[tools]]
+name        = "list_posts"
+description = "List posts."
+  [tools.input_schema]
+  type = "object"
+  [tools.executor]
+  type     = "rss_feed"
+  feed_url = "https://example.com/feed/"
+
+[[tools]]
+name        = "get_page"
+description = "Fetch a page."
+  [tools.input_schema]
+  type = "object"
+  [tools.executor]
+  type         = "dom_extract"
+  url_template = "https://example.com/about"
+
+[[tools]]
+name        = "get_json"
+description = "Fetch JSON."
+  [tools.input_schema]
+  type = "object"
+  [tools.executor]
+  type         = "http_json"
+  url_template = "https://example.com/wp-json/wp/v2/posts"
+
+[[tools]]
+name        = "get_text"
+description = "Fetch text."
+  [tools.input_schema]
+  type = "object"
+  [tools.executor]
+  type         = "http_get"
+  url_template = "https://example.com/robots.txt"
+`;
+
+describe("bootstrap.js: getTools() de-dupe, abort signals, rejections", () => {
+  it("asks getTools() for the registered names, passes a signal and catches registerTool rejections", async () => {
+    const { files } = await runBuild(await writeToml("bs-gettools.toml", MINIMAL));
+    const js = files["bootstrap.js"]!;
+    expect(js).toContain("getTools");
+    expect(js).toContain("typeof ctx.getTools === 'function'");
+    expect(js).toContain("AbortController");
+    expect(js).toContain("signal");
+    expect(js).toContain(".catch(");
+    // The [toolname] scan stays: it is the fallback, and whether getTools() lists declarative tools is unknown.
+    expect(js).toContain("querySelectorAll('[toolname]')");
+  });
+
+  it("keeps the document-first host probe and the navigator fallback", async () => {
+    const { files } = await runBuild(await writeToml("bs-host.toml", MINIMAL));
+    const js = files["bootstrap.js"]!;
+    expect(js.indexOf("document.modelContext")).toBeGreaterThan(-1);
+    expect(js.indexOf("document.modelContext")).toBeLessThan(js.indexOf("navigator.modelContext"));
+  });
+
+  it("never aborts a controller (aborting would unregister the tool)", async () => {
+    const { files } = await runBuild(await writeToml("bs-noabort.toml", MINIMAL));
+    expect(files["bootstrap.js"]).not.toMatch(/\.abort\s*\(/);
+  });
+
+  it("looks for the Cloudflare WebMCP Labs bridge script", async () => {
+    const { files } = await runBuild(await writeToml("bs-labs.toml", MINIMAL));
+    const js = files["bootstrap.js"]!;
+    expect(js).toContain(`document.querySelector('script[src$="/.webmcp/bridge.js"]')`);
+    expect(js).toContain("Cloudflare WebMCP Labs");
+  });
+
+  it("is ES5 for every template: bootstrap and landing script", async () => {
+    const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+    const tomls = [
+      "templates/example-site/webmcp.toml",
+      "templates/default.toml",
+      "templates/wordpress.toml",
+      "templates/woocommerce.toml",
+    ];
+    for (const rel of tomls) {
+      const { files } = await runBuild(path.join(repoRoot, rel));
+      expect(es5Violations(files["bootstrap.js"]!), `${rel} bootstrap`).toEqual([]);
+      const scripts = inlineScripts(files["landing.html"]!);
+      expect(scripts.length, `${rel} landing has an inline script`).toBeGreaterThan(0);
+      for (const s of scripts) expect(es5Violations(s), `${rel} landing script`).toEqual([]);
+      await fs.rm(path.join(tmpDir, "out"), { recursive: true, force: true });
+    }
+  });
+});
+
+describe("bootstrap.js: root-relative exec endpoints", () => {
+  it("points every endpoint at the namespace, root-relative, with no host in the bootstrap", async () => {
+    const { files } = await runBuild(await writeToml("rr-default.toml", MINIMAL));
+    const js = files["bootstrap.js"]!;
+    expect(toolsIn(js).map((t) => t.endpoint)).toEqual(["/_webmcp/exec/search_pages"]);
+    expect(js).toContain("/_webmcp/exec/");
+    expect(js).not.toContain("https://example.com/_webmcp/exec");
+    expect(js).not.toMatch(/https?:\/\/[^"'\s]*\/exec\//);
+    expect(js).not.toContain("example.com");
+  });
+
+  it("follows [paths].namespace and ignores [site].public_url", async () => {
+    const custom = MINIMAL.replace(
+      'name   = "Example Co."',
+      'name   = "Example Co."\npublic_url = "https://www.example.com"',
+    ).concat('\n[paths]\nnamespace = "/_agents"\n');
+    const { files } = await runBuild(await writeToml("rr-ns.toml", custom));
+    const js = files["bootstrap.js"]!;
+    expect(toolsIn(js).map((t) => t.endpoint)).toEqual(["/_agents/exec/search_pages"]);
+    expect(js).not.toContain("www.example.com");
+  });
+
+  it("leaves every discovery document absolute: manifest endpoints and links", async () => {
+    const withPublicUrl = MINIMAL.replace(
+      'name   = "Example Co."',
+      'name   = "Example Co."\npublic_url = "https://www.example.com"',
+    );
+    const { files } = await runBuild(await writeToml("rr-manifest.toml", withPublicUrl));
+    const manifest = JSON.parse(files["manifest.json"]!);
+    const asset = exportedConst(files["config.ts"]!, "BOOTSTRAP_ASSET") as string;
+    expect(manifest.tools[0].endpoint).toBe("https://www.example.com/_webmcp/exec/search_pages");
+    expect(manifest.links.bootstrap).toBe(`https://www.example.com/_webmcp/${asset}`);
+    expect(manifest.links.self).toMatch(/^https:\/\/www\.example\.com\//);
+    expect(manifest.links.landing).toMatch(/^https:\/\/www\.example\.com\//);
+  });
+});
+
+describe("bootstrap.js: consequentialHint", () => {
+  it("is false by default for all five executor types", async () => {
+    const { files } = await runBuild(await writeToml("ch-five.toml", FIVE_EXECUTORS));
+    const tools = toolsIn(files["bootstrap.js"]!);
+    expect(tools.map((t) => t.name)).toEqual(["search_pages", "list_posts", "get_page", "get_json", "get_text"]);
+    for (const t of tools) expect(t.annotations["consequentialHint"], t.name).toBe(false);
+  });
+
+  it("follows [tools.annotations].consequential_hint", async () => {
+    const on = `${MINIMAL}\n  [tools.annotations]\n  consequential_hint = true\n`;
+    const { files } = await runBuild(await writeToml("ch-on.toml", on));
+    expect(toolsIn(files["bootstrap.js"]!)[0]!.annotations).toEqual({
+      readOnlyHint: true,
+      untrustedContentHint: false,
+      consequentialHint: true,
+    });
+  });
+
+  it("does not emit the debugging annotation", async () => {
+    const { files } = await runBuild(await writeToml("ch-nodebug.toml", MINIMAL));
+    expect(files["bootstrap.js"]).not.toContain("debugging");
+  });
+
+  it("does not touch the manifest, which carries no annotations", async () => {
+    const { files } = await runBuild(await writeToml("ch-manifest.toml", MINIMAL));
+    expect(files["manifest.json"]).not.toContain("onsequential");
+    expect(files["manifest.json"]).not.toContain("readOnlyHint");
+  });
+
+  it("adds no schema default: the field stays out of the config (and CONFIG_HASH) until it is set", async () => {
+    const unset = await runBuild(await writeToml("ch-hash-a.toml", MINIMAL));
+    const otherField = await runBuild(
+      await writeToml("ch-hash-b.toml", `${MINIMAL}\n  [tools.annotations]\n  read_only_hint = true\n`),
+    );
+    expect(unset.files["config.ts"]).not.toContain("consequential_hint");
+    expect(otherField.files["config.ts"]).not.toContain("consequential_hint");
+    const set = await runBuild(
+      await writeToml("ch-hash-c.toml", `${MINIMAL}\n  [tools.annotations]\n  consequential_hint = false\n`),
+    );
+    expect(set.files["config.ts"]).toContain("consequential_hint");
+  });
+
+  describe("defaultAnnotationsFor", () => {
+    it.each(["sitemap_filter", "rss_feed", "dom_extract", "http_json", "http_get"])(
+      "%s: read-only and not consequential",
+      (type) => {
+        expect(defaultAnnotationsFor(type)).toMatchObject({ readOnlyHint: true, consequentialHint: false });
+      },
+    );
+
+    it("keeps the untrusted-content defaults", () => {
+      expect(defaultAnnotationsFor("sitemap_filter").untrustedContentHint).toBe(false);
+      for (const t of ["rss_feed", "dom_extract", "http_json", "http_get"]) {
+        expect(defaultAnnotationsFor(t).untrustedContentHint, t).toBe(true);
+      }
+    });
+
+    it("treats an unknown executor type as writable, untrusted and consequential", () => {
+      expect(defaultAnnotationsFor("something_else")).toEqual({
+        readOnlyHint: false,
+        untrustedContentHint: true,
+        consequentialHint: true,
+      });
+    });
+  });
+});
+
+describe("tool and form names reserved by Cloudflare WebMCP Labs", () => {
+  const FORM = (name: string): string => `${MINIMAL}
+
+[[forms]]
+name        = "${name}"
+description = "A form."
+selector    = "form#contact"
+`;
+  const TOOL = (name: string): string => MINIMAL.replace('name        = "search_pages"', `name        = "${name}"`);
+
+  it("lists them in one exported constant", () => {
+    expect([...CLOUDFLARE_WEBMCP_LABS_TOOL_NAMES]).toEqual(["scan_images_c2pa", "inspect_image_c2pa"]);
+  });
+
+  it.each(["scan_images_c2pa", "inspect_image_c2pa"])("rejects a [[tools]] named %s", async (name) => {
+    const err = await runBuild(await writeToml(`res-tool-${name}.toml`, TOOL(name))).catch((e: Error) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toContain(name);
+    expect((err as Error).message).toContain("Cloudflare WebMCP Labs");
+    expect((err as Error).message).toContain("[[tools]]");
+  });
+
+  it.each(["scan_images_c2pa", "inspect_image_c2pa"])("rejects a [[forms]] named %s", async (name) => {
+    const err = await runBuild(await writeToml(`res-form-${name}.toml`, FORM(name))).catch((e: Error) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toContain(name);
+    expect((err as Error).message).toContain("Cloudflare WebMCP Labs");
+    expect((err as Error).message).toContain("[[forms]]");
+  });
+
+  it("accepts names that only contain a reserved name", async () => {
+    const { files } = await runBuild(await writeToml("res-near.toml", TOOL("scan_images_c2pa_report")));
+    expect(toolsIn(files["bootstrap.js"]!)[0]!.name).toBe("scan_images_c2pa_report");
+    await expect(runBuild(await writeToml("res-near-form.toml", FORM("my_scan_images_c2pa")))).resolves.toBeDefined();
+  });
+});
+
+describe("landing: {{bootstrap_block}}", () => {
+  const bootstrapTag = (landing: string): string | undefined =>
+    landing.match(/<script[^>]*bootstrap\.[^>]*><\/script>/)?.[0];
+
+  it("loads the bootstrap root-relative with the same integrity attributes the Worker injects", async () => {
+    const { files } = await runBuild(await writeToml("lb-sri.toml", MINIMAL));
+    const asset = exportedConst(files["config.ts"]!, "BOOTSTRAP_ASSET") as string;
+    const sri = exportedConst(files["config.ts"]!, "BOOTSTRAP_SRI") as string;
+    expect(sri).toMatch(/^sha384-/);
+    expect(bootstrapTag(files["landing.html"]!)).toBe(
+      `<script src="/_webmcp/${asset}" defer integrity="${sri}" crossorigin="anonymous"></script>`,
+    );
+    expect(files["landing.html"]!.split(asset)).toHaveLength(2);
+  });
+
+  it("omits integrity and crossorigin when [features].subresource_integrity is off", async () => {
+    const off = `${MINIMAL}\n\n[features]\nsubresource_integrity = false\n`;
+    const { files } = await runBuild(await writeToml("lb-nosri.toml", off));
+    const asset = exportedConst(files["config.ts"]!, "BOOTSTRAP_ASSET") as string;
+    expect(bootstrapTag(files["landing.html"]!)).toBe(`<script src="/_webmcp/${asset}" defer></script>`);
+  });
+
+  it("follows [paths].namespace and escapes it for the attribute", async () => {
+    const { files } = await runBuild(await writeToml("lb-ns.toml", `${MINIMAL}\n[paths]\nnamespace = "/a&b"\n`));
+    const asset = exportedConst(files["config.ts"]!, "BOOTSTRAP_ASSET") as string;
+    expect(bootstrapTag(files["landing.html"]!)).toContain(`src="/a&amp;b/${asset}"`);
+  });
+
+  it("is the very asset the manifest advertises, with the SRI of the bytes served at it", async () => {
+    const { files } = await runBuild(await writeToml("lb-same.toml", MINIMAL));
+    const manifest = JSON.parse(files["manifest.json"]!);
+    const tag = bootstrapTag(files["landing.html"]!)!;
+    expect(manifest.links.bootstrap.endsWith(tag.match(/src="([^"]+)"/)![1]!)).toBe(true);
+    const expected = `sha384-${createHash("sha384").update(files["bootstrap.js"]!, "utf8").digest("base64")}`;
+    expect(tag).toContain(`integrity="${expected}"`);
+  });
+
+  it("builds a custom template that has no placeholder, and then loads no bootstrap", async () => {
+    await writeToml("custom-plain.html", "<html><body>{{site_name}}</body></html>");
+    const toml = `${MINIMAL}\n[webmcp_landing]\ntemplate = "custom-plain.html"\n`;
+    const { files } = await runBuild(await writeToml("lb-custom.toml", toml));
+    expect(files["landing.html"]).toBe("<html><body>Example Co.</body></html>");
+  });
+
+  it("fills the placeholder in a custom template", async () => {
+    await writeToml("custom-block.html", "<body>{{bootstrap_block}}|{{ bootstrap_block }}</body>");
+    const toml = `${MINIMAL}\n[webmcp_landing]\ntemplate = "custom-block.html"\n`;
+    const { files } = await runBuild(await writeToml("lb-custom2.toml", toml));
+    expect(files["landing.html"]!.split("<script src=")).toHaveLength(3);
+    expect(files["landing.html"]).not.toContain("{{");
+  });
+
+  it("still refuses an unknown placeholder", async () => {
+    await writeToml("custom-typo.html", "<body>{{bootstrap_blok}}</body>");
+    const toml = `${MINIMAL}\n[webmcp_landing]\ntemplate = "custom-typo.html"\n`;
+    await expect(runBuild(await writeToml("lb-typo.toml", toml))).rejects.toThrow(/unknown placeholder/);
+  });
+});
+
+describe("landing: diagnostic and copy", () => {
+  it("probes document.modelContext getTools, executeTool and ontoolchange, and keeps the navigator probes", async () => {
+    const { files } = await runBuild(await writeToml("ld-probes.toml", MINIMAL));
+    const landing = files["landing.html"]!;
+    expect(landing).toContain("typeof document.modelContext.getTools");
+    expect(landing).toContain("typeof document.modelContext.executeTool");
+    expect(landing).toContain("'ontoolchange' in document.modelContext");
+    expect(landing).toContain("navigator.modelContext (deprecated alias)");
+    expect(landing).toContain("navigator.modelContextTesting");
+    expect(landing).toContain("typeof navigator.modelContextTesting.listTools");
+    expect(landing).toContain("typeof navigator.modelContextTesting.executeTool");
+  });
+
+  it("lists the registered tool names with textContent, never innerHTML", async () => {
+    const { files } = await runBuild(await writeToml("ld-textcontent.toml", MINIMAL));
+    const script = inlineScripts(files["landing.html"]!).join("\n");
+    expect(script).toContain("getTools()");
+    expect(script).not.toContain("innerHTML");
+  });
+
+  it("says WebMCP reaches Chrome through the origin trial from Chrome 149, behind a flag otherwise, and names Kitesurf", async () => {
+    const { files } = await runBuild(await writeToml("ld-copy.toml", MINIMAL));
+    const text = files["landing.html"]!.replace(/<[^>]+>/g, "");
+    expect(text).toMatch(/origin trial/i);
+    expect(text).toContain("Chrome 149");
+    expect(text).toContain("chrome://flags/#enable-webmcp-testing");
+    expect(text).toContain("Kitesurf");
+    // The old claim that WebMCP is flags-only must be gone.
+    expect(text).not.toContain("As of mid-2026");
+    expect(text).not.toMatch(/flags only|only behind|behind a flag in Chrome and Edge/i);
   });
 });

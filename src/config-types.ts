@@ -159,14 +159,21 @@ const ToolRateLimit = z
  *     boolean untrustedContentHint = false;
  *   };
  *
+ * Chrome's imperative API also reads `consequentialHint` (a call the user may not be
+ * able to take back); the executors cf-webmcp ships never are, but a publisher can
+ * say so for a tool that is. `debugging` (Chrome 156+) is not exposed.
+ *
  * Snake-case in TOML; emitted as camelCase in the bootstrap registerTool call.
  * Per-tool overrides take precedence over the executor-type defaults applied
- * in scripts/build-config.ts.
+ * in scripts/build-config.ts. None of the fields has a schema default: an omitted
+ * field stays out of the parsed config (and out of CONFIG_HASH), and the build
+ * resolves it from the executor type.
  */
 const ToolAnnotations = z
   .object({
     read_only_hint: z.boolean().optional(),
     untrusted_content_hint: z.boolean().optional(),
+    consequential_hint: z.boolean().optional(),
   })
   .partial();
 

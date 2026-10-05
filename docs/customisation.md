@@ -33,8 +33,17 @@ The build script does a literal `{{name}}` substitution. No conditionals, no loo
 | `{{tool_list}}` | Pre-rendered `<li>` items | One per tool. Each is `<li><code>name</code> - description</li>`. **Not** HTML-escaped (it is already safe HTML). |
 | `{{widget_block}}` | The widget mount + script tag | Empty string if `[features].fallback_widget = false`. **Not** HTML-escaped. |
 | `{{widget_enabled_js}}` | Literal `"true"` or `"false"` | For inlining into a JS expression. |
+| `{{bootstrap_block}}` | The bootstrap `<script>` tag | `<script src="/_webmcp/bootstrap.<hash>.js" defer integrity="sha384-..." crossorigin="anonymous"></script>`. The `src` is root-relative and follows `[paths].namespace`; `integrity` and `crossorigin` are present only while `[features].subresource_integrity` is on. **Not** HTML-escaped (it is already safe HTML). |
 
 Unknown placeholders cause a build error so typos surface early.
+
+### The bootstrap on the landing page
+
+The Worker injects the bootstrap into pages it proxies from your origin. It does not inject it into the landing page, which the Worker serves itself. `{{bootstrap_block}}` is how the landing page loads it: the page then registers this site's tools on `document.modelContext`, so the "Connected" state is true of the page the visitor is looking at, and its diagnostic can list the names `getTools()` returns.
+
+The default template includes it. A custom template without the placeholder builds as before and loads no bootstrap: the page can still tell a visitor whether their browser exposes WebMCP, but registers no tools itself. Put `{{bootstrap_block}}` anywhere in the `<body>`; the script is `defer`red, so it runs after the page has been parsed whatever its position.
+
+The diagnostic in the default template probes `document.modelContext` (`registerTool`, `getTools`, `executeTool` and `'ontoolchange' in document.modelContext`), the deprecated `navigator.modelContext` alias and `navigator.modelContextTesting`, and lists the tool names `getTools()` reports once the page has loaded. A custom template that wants the same list should insert the names with `textContent`, never as HTML.
 
 ## What your template must keep
 
@@ -72,6 +81,7 @@ If you want **none** of the runtime branching (e.g. you are building a static "t
 <h2>Tools available</h2>
 <ul>{{tool_list}}</ul>
 
+{{bootstrap_block}}
 <script>
 (function () {
   var mc = ('modelContext' in document) ? document.modelContext : navigator.modelContext;

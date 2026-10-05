@@ -986,6 +986,9 @@
                   },
                   "untrusted_content_hint": {
                     "type": "boolean"
+                  },
+                  "consequential_hint": {
+                    "type": "boolean"
                   }
                 },
                 "additionalProperties": false
