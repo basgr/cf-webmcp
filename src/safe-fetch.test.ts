@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { fetchWithManualRedirects, logRedirectFailure, MAX_REDIRECT_HOPS } from "./safe-fetch";
+import { fetchWithManualRedirects, isAbortError, logRedirectFailure, MAX_REDIRECT_HOPS } from "./safe-fetch";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -232,6 +232,38 @@ describe("fetchWithManualRedirects", () => {
     expect(second![1].headers["user-agent"]).toBe("test-agent");
   });
 
+  it("drops every Fetch request-body header (content-encoding, -language, -location, -type, and content-length) when a 303 turns a POST into a GET", async () => {
+    const fetchMock = stubFetch({
+      "https://example.com/a": () => redirect(303, "/b"),
+      "https://example.com/b": () => new Response("ok", { status: 200 }),
+    });
+
+    await fetchWithManualRedirects(
+      new URL("https://example.com/a"),
+      { method: "POST", body: "{}" },
+      {
+        ...base,
+        headers: {
+          ...base.headers,
+          "Content-Type": "application/json",
+          "Content-Language": "de",
+          "content-location": "/orders/1",
+          "content-encoding": "identity",
+          "content-length": "2",
+        },
+      },
+    );
+
+    const [first, second] = fetchMock.mock.calls;
+    for (const name of ["content-type", "content-language", "content-location", "content-encoding", "content-length"]) {
+      expect(first![1].headers[name]).toBeDefined();
+      expect(second![1].headers[name]).toBeUndefined();
+    }
+    // Headers that do not describe the body stay.
+    expect(second![1].headers["user-agent"]).toBe("test-agent");
+    expect(second![1].headers["accept"]).toBe("text/plain");
+  });
+
   it("keeps content-type and the body when a 307/308 replays the request", async () => {
     const fetchMock = stubFetch({
       "https://example.com/a": () => redirect(308, "/b"),
@@ -327,6 +359,34 @@ describe("fetchWithManualRedirects", () => {
     }
   });
 
+  it("leaves credentials out of the reported target of an off-list redirect", async () => {
+    stubFetch({ "https://example.com/a": () => redirect(302, "https://user:pass@evil.example/x?q=1#f") });
+
+    const r = await fetchWithManualRedirects(new URL("https://example.com/a"), {}, base);
+
+    expect(r).toMatchObject({
+      ok: false,
+      failure: { kind: "off_list", redirected: true, target: "https://evil.example/x?q=1#f" },
+    });
+    expect(JSON.stringify(r)).not.toMatch(/user|pass/);
+  });
+
+  describe("method case", () => {
+    async function sentMethod(method: string): Promise<string | undefined> {
+      const fetchMock = stubFetch({ "https://example.com/a": () => new Response("ok", { status: 200 }) });
+      await fetchWithManualRedirects(new URL("https://example.com/a"), { method }, base);
+      return fetchMock.mock.calls[0]![1].method;
+    }
+
+    it.each(["get", "Post", "put", "DELETE", "options", "head"])("normalises %s like fetch does", async (method) => {
+      expect(await sentMethod(method)).toBe(method.toUpperCase());
+    });
+
+    it.each(["patch", "Patch", "purge", "MKCOL"])("leaves %s as given: fetch does not normalise it", async (method) => {
+      expect(await sentMethod(method)).toBe(method);
+    });
+  });
+
   it("honours a custom maxHops", async () => {
     const fetchMock = stubFetch({ "https://example.com/a": () => redirect(302, "/a") });
 
@@ -382,5 +442,84 @@ describe("logRedirectFailure", () => {
       location: nasty,
     });
     spy.mockRestore();
+  });
+
+  function logged(failure: Parameters<typeof logRedirectFailure>[2]): { line: string; detail: Record<string, unknown> } {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    logRedirectFailure("proxy", new URL("https://example.com/robots.txt"), failure);
+    const line = spy.mock.calls[0]![0] as string;
+    spy.mockRestore();
+    return { line, detail: JSON.parse(line.slice(line.indexOf("{"))) };
+  }
+
+  it("logs an off-list target as origin and path only: no query, fragment or credentials", () => {
+    const { line, detail } = logged({
+      kind: "off_list",
+      origin: "https://evil.example",
+      redirected: true,
+      status: 301,
+      target: "https://evil.example/x/y?sig=abc&token=def#frag",
+    });
+
+    expect(line).not.toContain("sig=");
+    expect(line).not.toContain("token=");
+    expect(line).not.toContain("frag");
+    expect(detail).toEqual({
+      start: "https://example.com/robots.txt",
+      kind: "off_list",
+      origin: "https://evil.example",
+      redirected: true,
+      status: 301,
+      target: "https://evil.example/x/y",
+    });
+  });
+
+  it.each([
+    ["http://:notaport?sig=abc", "http://:notaport"],
+    ["http://:notaport#sig=abc", "http://:notaport"],
+    ["http://:notaport/a#frag?x=1", "http://:notaport/a"],
+    ["http://:notaport/no-query", "http://:notaport/no-query"],
+  ])("cuts a malformed location %s at its first ? or # (logged as %s)", (location, expected) => {
+    const { line, detail } = logged({ kind: "malformed_location", location });
+
+    expect(line).not.toContain("sig=");
+    expect(line).not.toContain("x=1");
+    expect(detail.location).toBe(expected);
+  });
+
+  it("still truncates a long malformed location to 200 characters", () => {
+    const { detail } = logged({ kind: "malformed_location", location: "http://" + "z".repeat(500) });
+
+    expect(detail.location).toBe(("http://" + "z".repeat(500)).slice(0, 200));
+  });
+
+  it("passes the other failure kinds through unchanged", () => {
+    expect(logged({ kind: "too_many_redirects", maxHops: 5 }).detail).toEqual({
+      start: "https://example.com/robots.txt",
+      kind: "too_many_redirects",
+      maxHops: 5,
+    });
+    expect(logged({ kind: "unsupported_scheme", protocol: "blob:", redirected: true }).detail).toEqual({
+      start: "https://example.com/robots.txt",
+      kind: "unsupported_scheme",
+      protocol: "blob:",
+      redirected: true,
+    });
+  });
+});
+
+describe("isAbortError", () => {
+  it("recognises an AbortError by name, whatever carries it", () => {
+    expect(isAbortError(Object.assign(new Error("aborted"), { name: "AbortError" }))).toBe(true);
+    const controller = new AbortController();
+    controller.abort();
+    expect(isAbortError(controller.signal.reason)).toBe(true);
+  });
+
+  it("rejects everything else, including null and undefined", () => {
+    expect(isAbortError(new TypeError("Network connection lost."))).toBe(false);
+    expect(isAbortError(null)).toBe(false);
+    expect(isAbortError(undefined)).toBe(false);
+    expect(isAbortError("AbortError")).toBe(false);
   });
 });

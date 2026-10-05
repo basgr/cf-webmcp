@@ -188,6 +188,28 @@ describe("aiCatalogResponse (merge)", () => {
     }
   });
 
+  it.each([
+    { name: "a relayed redirect", response: () => new Response(null, { status: 301, headers: { location: "https://www.example.com/x" } }) },
+    { name: "a 403", response: () => new Response("no", { status: 403 }) },
+    { name: "a 500", response: () => new Response("boom", { status: 500 }) },
+    { name: "a 502 from the proxy helper", response: () => new Response("origin request failed", { status: 502 }) },
+    { name: "a 504 from the proxy helper", response: () => new Response("origin did not answer in time", { status: 504 }) },
+  ])("serves the generated document, not the origin answer, after $name", async ({ response }) => {
+    const res = await aiCatalogResponse(req, cfgMerge, SYNTH_ONE, async () => response());
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toBe("application/ai-catalog+json");
+    expect(await res.text()).toBe(SYNTH_ONE);
+  });
+
+  it("relays a 200 that is not JSON unchanged, with noindex", async () => {
+    const res = await aiCatalogResponse(req, cfgMerge, SYNTH_ONE, async () =>
+      new Response("<html>hi</html>", { status: 200, headers: { "content-type": "text/html" } }));
+    expect(res.status).toBe(200);
+    expect(res.headers.get("x-robots-tag")).toBe("noindex");
+    expect(res.headers.get("content-type")).toBe("text/html");
+    expect(await res.text()).toBe("<html>hi</html>");
+  });
+
   it("relays a non-JSON origin response with noindex added", async () => {
     const res = await aiCatalogResponse(req, cfgMerge, SYNTH_ONE, async () =>
       new Response("<html></html>", { status: 200, headers: { "content-type": "text/html" } }));

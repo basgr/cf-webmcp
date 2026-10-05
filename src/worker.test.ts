@@ -585,6 +585,19 @@ describe("proxyToOrigin redirects (llms.txt, robots.txt, agents.md and the other
       expect(llms.headers.get("location")).toBe("https://cdn.example.org:8443/llms.txt");
     });
 
+    it("leaves userinfo out of the relayed Location and keeps path, query and fragment", async () => {
+      stubOrigin({
+        "https://example.com/robots.txt": () => redirectTo(301, "https://user:pass@evil.example/x?q=1#f"),
+      });
+      const handler = createHandler(makeDeps());
+
+      const res = await call(handler, "https://example.com/robots.txt", undefined, tokenEnv);
+
+      expect(res.status).toBe(301);
+      expect(res.headers.get("location")).toBe("https://evil.example/x?q=1#f");
+      expect(JSON.stringify([...res.headers])).not.toMatch(/user|pass/);
+    });
+
     it("relays the status and Location of the hop that left the list, after following an allowed hop", async () => {
       const fetchMock = stubOrigin({
         "https://example.com/robots.txt": () => redirectTo(301, "https://cdn.example.com/robots.txt"),
@@ -660,7 +673,9 @@ describe("proxyToOrigin redirects (llms.txt, robots.txt, agents.md and the other
       await expect502(res, "origin returned an unusable redirect location");
       const line = errorLog.mock.calls[0]![0] as string;
       expect(line.startsWith("cf-webmcp: proxy refused an origin redirect: ")).toBe(true);
-      expect(line).toContain("http://:notaport?q=secret");
+      // The log keeps the value up to its query, and no further.
+      expect(line).toContain("http://:notaport");
+      expect(line).not.toContain("q=secret");
     });
 
     it("a blob: Location whose origin looks allowed: nothing is requested for it", async () => {

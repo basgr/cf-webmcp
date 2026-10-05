@@ -29,8 +29,7 @@ import { agentSkillsResponse, agentSkillsRedirect } from "./routes/agent-skills"
 import { agentSkillsIndexResponse } from "./routes/agent-skills-index";
 import { buildLinkHeader, mergeLinkHeader } from "./link-header";
 import { formsForPath, safeInject, shouldInject } from "./injection/html-rewriter";
-import { isAbortError } from "./executors/common";
-import { fetchWithManualRedirects, logRedirectFailure, type RedirectFailure } from "./safe-fetch";
+import { fetchWithManualRedirects, isAbortError, logRedirectFailure, type RedirectFailure } from "./safe-fetch";
 
 /**
  * One deadline for a whole proxyToOrigin redirect chain, up to the moment the final

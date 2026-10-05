@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
-import { resolveUrl, originFetch, mapOriginStatus, readWithLimit } from "./common";
+import { resolveUrl, originFetch, mapOriginStatus, readWithLimit, isAbortError } from "./common";
+import { isAbortError as isAbortErrorFromSafeFetch } from "../safe-fetch";
 
 const ctx = {
   allowedOrigins: ["https://example.com"],
@@ -204,7 +205,7 @@ describe("originFetch redirects", () => {
       origin: "https://intranet.corp.example:8443",
       redirected: true,
       status: 302,
-      target: "https://intranet.corp.example:8443/admin?token=abc",
+      target: "https://intranet.corp.example:8443/admin",
     });
   });
 
@@ -598,6 +599,12 @@ describe("readWithLimit abort handling", () => {
       }),
     );
     await expect(readWithLimit(broken, 10)).rejects.toThrow("socket reset");
+  });
+});
+
+describe("isAbortError", () => {
+  it("is the one from safe-fetch, re-exported for the executors", () => {
+    expect(isAbortError).toBe(isAbortErrorFromSafeFetch);
   });
 });
 

@@ -29,10 +29,22 @@
 
 export const MAX_REDIRECT_HOPS = 5;
 
+/** Did this fetch (or body read) end because its AbortSignal fired? */
+export function isAbortError(e: unknown): boolean {
+  return (e as { name?: string } | null)?.name === "AbortError";
+}
+
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 
-/** Request-body headers that must not outlive the body when a redirect turns the request into a GET. */
-const BODY_HEADERS = ["content-type", "content-length", "content-encoding"];
+/**
+ * Headers that must not outlive the body when a redirect turns the request into a GET:
+ * the Fetch spec's request-body-header names (Content-Encoding, Content-Language,
+ * Content-Location, Content-Type) plus Content-Length.
+ */
+const BODY_HEADERS = ["content-encoding", "content-language", "content-length", "content-location", "content-type"];
+
+/** The only methods fetch() upper-cases; any other method keeps the case it was given. */
+const NORMALISED_METHODS = new Set(["DELETE", "GET", "HEAD", "OPTIONS", "POST", "PUT"]);
 
 /** How much of an unparseable Location is reported (in the log, never to a client). */
 const MAX_REPORTED_LOCATION = 200;
@@ -42,8 +54,9 @@ export type RedirectFailure =
   | { kind: "off_list"; origin: string; redirected: false }
   /**
    * A redirect pointed off the list. `status` is the status of the redirect response that
-   * pointed there and `target` the Location resolved to an absolute http(s) URL, so a caller
-   * can relay the redirect itself. Nothing was requested at `target`.
+   * pointed there and `target` the Location resolved to an absolute http(s) URL (userinfo
+   * removed, query and fragment kept), so a caller can relay the redirect itself. Nothing was
+   * requested at `target`.
    */
   | { kind: "off_list"; origin: string; redirected: true; status: number; target: string }
   /** The target is not an http(s) URL (blob:, data:, javascript:, ftp:, ...). `protocol` includes the colon. */
@@ -97,9 +110,23 @@ function isHttp(url: URL): boolean {
   return url.protocol === "http:" || url.protocol === "https:";
 }
 
+/** The URL as an absolute string without userinfo, which is the origin's to send but not ours to repeat. */
+function withoutCredentials(url: URL): string {
+  const copy = new URL(url.href);
+  copy.username = "";
+  copy.password = "";
+  return copy.href;
+}
+
 /** Release the connection behind a response we are not going to read. */
 function discard(res: Response): void {
   res.body?.cancel().catch(() => {});
+}
+
+/** Upper-case a method the way fetch() does: DELETE, GET, HEAD, OPTIONS, POST and PUT only, matched case-insensitively. */
+function normaliseMethod(method: string): string {
+  const upper = method.toUpperCase();
+  return NORMALISED_METHODS.has(upper) ? upper : method;
 }
 
 /** Does a redirect with this status turn a request with this method into a bodyless GET? (Fetch spec, HTTP-redirect fetch.) */
@@ -118,7 +145,7 @@ export async function fetchWithManualRedirects(
   const maxHops = opts.maxHops ?? MAX_REDIRECT_HOPS;
 
   let current = url;
-  let method = (init.method ?? "GET").toUpperCase();
+  let method = normaliseMethod(init.method ?? "GET");
   let body = init.body;
   const plainHeaders = new Headers(opts.headers);
   let redirects = 0;
@@ -133,7 +160,7 @@ export async function fetchWithManualRedirects(
         ok: false,
         failure:
           redirects > 0
-            ? { kind: "off_list", origin: current.origin, redirected: true, status: viaStatus, target: current.href }
+            ? { kind: "off_list", origin: current.origin, redirected: true, status: viaStatus, target: withoutCredentials(current) }
             : { kind: "off_list", origin: current.origin, redirected: false },
       };
     }
@@ -180,10 +207,28 @@ export async function fetchWithManualRedirects(
  * Write the detail of a refused redirect to the Worker log as ONE line: a fixed
  * prefix and a JSON object (so control characters in a hostile Location are
  * escaped), no stack. The caller's client-facing message stays generic; this line
- * is where an operator finds the host or value that was refused. The start URL is
- * cut to origin and path so a query string never reaches the log.
+ * is where an operator finds the host or value that was refused.
+ *
+ * No query string or fragment reaches the log: the start URL and an off-list target
+ * are cut to origin and path, and an unparseable Location is cut at its first `?` or
+ * `#` (and at 200 characters). A secret in a path would still show, so treat the log
+ * as operator-only.
  */
 export function logRedirectFailure(via: "executor" | "proxy", start: URL, failure: RedirectFailure): void {
   const where = isHttp(start) ? start.origin + start.pathname : start.protocol;
-  console.error(`cf-webmcp: ${via} refused an origin redirect: ${JSON.stringify({ start: where, ...failure })}`);
+  console.error(`cf-webmcp: ${via} refused an origin redirect: ${JSON.stringify({ start: where, ...loggable(failure) })}`);
+}
+
+function loggable(failure: RedirectFailure): RedirectFailure {
+  if (failure.kind === "off_list" && failure.redirected) {
+    // target is a URL we built ourselves, so it parses.
+    const target = new URL(failure.target);
+    return { ...failure, target: target.origin + target.pathname };
+  }
+  if (failure.kind === "malformed_location") {
+    const cut = failure.location.search(/[?#]/);
+    const kept = cut === -1 ? failure.location : failure.location.slice(0, cut);
+    return { ...failure, location: kept.slice(0, MAX_REPORTED_LOCATION) };
+  }
+  return failure;
 }

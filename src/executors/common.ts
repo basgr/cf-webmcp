@@ -16,7 +16,10 @@
 
 import { compileTemplate } from "../mini-language";
 import { err, type ErrorPayload } from "../envelope";
-import { fetchWithManualRedirects, logRedirectFailure, type RedirectFailure } from "../safe-fetch";
+import { fetchWithManualRedirects, isAbortError, logRedirectFailure, type RedirectFailure } from "../safe-fetch";
+
+// Lives in safe-fetch (the handler needs it too); re-exported for the executors.
+export { isAbortError };
 
 const VERSION = "1.0";
 
@@ -37,10 +40,6 @@ export interface ExecutorContext {
 
 export function timeoutError(timeoutMs: number): ErrorPayload {
   return { code: "timeout", message: `origin request timed out after ${timeoutMs}ms`, retriable: true };
-}
-
-export function isAbortError(e: unknown): boolean {
-  return (e as { name?: string } | null)?.name === "AbortError";
 }
 
 export interface ResolveOptions {
