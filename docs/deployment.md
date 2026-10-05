@@ -114,7 +114,8 @@ After deploy, hit `https://yourdomain.com/_webmcp/health` to confirm the Worker 
 
 - **Never put internal/RFC1918 IPs in `allowed_origins`.** Values like `http://10.0.0.5`, `http://192.168.1.1`, or `http://169.254.169.254` would let the Worker reach private services that the publisher has accidentally exposed to Cloudflare's network. CF Workers does not expose its own metadata service, but a publisher's own private infra is fair game from inside the Worker. Stick to publicly-reachable HTTPS origins.
 - **Use one origin per deployment.** `allowed_origins` is a defence-in-depth measure, not a multi-tenant feature. If you genuinely need multiple origins (e.g. CDN + API on different hosts), list all of them; otherwise keep it to one.
-- **The Worker double-checks the post-redirect URL.** If your origin 301s to a host outside `allowed_origins`, the Worker refuses to relay the response. This is intentional and prevents an open-redirect at origin from defeating the allow-list. If you have a legitimate cross-host redirect, add the target to `allowed_origins`.
+- **The Worker checks every redirect target before it requests it.** For its own fetches to origin (tool executors, and the merge and passthrough routes such as `/llms.txt`, `/robots.txt` and `/.well-known/agents.md`) the Worker does not let the runtime follow redirects. It reads each `Location`, resolves it against the current URL and compares the target's origin with `allowed_origins`; it follows at most 5 redirects. A target outside the list is never requested, so the `cf-webmcp-bypass` and `cf-webmcp-deploy-token` headers go only to listed origins, on every hop, and an open redirect at origin cannot leak the deploy token. A refused redirect makes an executor call return an `invalid_input` error, and makes a merge or passthrough route answer 502 with `X-Robots-Tag: noindex`; a chain longer than 5 redirects is refused the same way. If you have a legitimate cross-host redirect, add the target to `allowed_origins`.
+- **Redirects on proxied pages are not followed by the Worker.** For ordinary page requests the Worker passes an origin 3xx to the visitor's browser unchanged and adds no deploy token to that request.
 
 ## Subresource Integrity (SRI) on the injected bootstrap
 
@@ -137,7 +138,7 @@ SRI does not defend against prompt-injection content embedded in TOML descriptio
 Some Cloudflare products (Bot Management, custom WAF rules, rate-limiting) will see executor calls and origin fetches as bot traffic and may block them. The Worker sends:
 
 - `User-Agent: cf-webmcp/<version>` on origin fetches
-- `cf-webmcp-bypass: 1` and `cf-webmcp-deploy-token: <token>` headers
+- `cf-webmcp-bypass: 1` and `cf-webmcp-deploy-token: <token>` headers, only on requests to hosts in `allowed_origins` (redirect targets included)
 
 Configure your WAF / Bot Management to allow requests with these headers. Otherwise tool calls will return `origin_4xx` or `rate_limited` envelope errors.
 

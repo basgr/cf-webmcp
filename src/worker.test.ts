@@ -478,3 +478,141 @@ describe("content-addressed widget", () => {
     expect(present.head).toHaveBeenCalledWith(WIDGET_ASSET);
   });
 });
+
+describe("proxyToOrigin redirects (llms.txt, agents.md and the other merge routes)", () => {
+  const tokenEnv: Env = { ...env, CF_WEBMCP_DEPLOY_TOKEN: "deploy-token-x" };
+  const twoHosts = {
+    origin: { base_url: "https://example.com", allowed_origins: ["https://example.com", "https://cdn.example.com"] },
+  };
+
+  function redirectTo(status: number, location: string): Response {
+    return new Response(null, { status, headers: { location } });
+  }
+
+  function textResponse(body: string): Response {
+    return new Response(body, { status: 200, headers: { "content-type": "text/plain; charset=utf-8" } });
+  }
+
+  /** The URL of every fetch call, in order. */
+  function urlsOf(mock: ReturnType<typeof stubOrigin>): string[] {
+    return mock.mock.calls.map((c) => (typeof c[0] === "string" ? c[0] : String(c[0])));
+  }
+
+  it("does not send the deploy token to an off-list redirect target: 502 with noindex, nothing requested there", async () => {
+    const fetchMock = stubOrigin({
+      "https://example.com/llms.txt": () => redirectTo(302, "https://evil.example/llms.txt"),
+      "https://evil.example/llms.txt": () => textResponse("should never be fetched"),
+    });
+    const handler = createHandler(makeDeps());
+
+    const res = await call(handler, "https://example.com/llms.txt", undefined, tokenEnv);
+
+    expect(res.status).toBe(502);
+    expect(res.headers.get("x-robots-tag")).toBe("noindex");
+    expect(res.headers.get("content-type")).toBe("text/plain; charset=utf-8");
+    const body = await res.text();
+    expect(body).toBe("origin redirected to https://evil.example which is not in allowed_origins");
+    expect(body).not.toContain("deploy-token-x");
+    expect(urlsOf(fetchMock)).toEqual(["https://example.com/llms.txt"]);
+  });
+
+  it("answers 502 with noindex on a /.well-known route too", async () => {
+    const fetchMock = stubOrigin({
+      "https://example.com/.well-known/agents.md": () => redirectTo(301, "https://evil.example/agents.md"),
+    });
+    const handler = createHandler(makeDeps());
+
+    const res = await call(handler, "https://example.com/.well-known/agents.md", undefined, tokenEnv);
+
+    expect(res.status).toBe(502);
+    expect(res.headers.get("x-robots-tag")).toBe("noindex");
+    expect(urlsOf(fetchMock)).toEqual(["https://example.com/.well-known/agents.md"]);
+  });
+
+  it("follows a redirect to another allowed origin, sends the token to both, and merges the final body", async () => {
+    const fetchMock = stubOrigin({
+      "https://example.com/llms.txt": () => redirectTo(301, "https://cdn.example.com/llms.txt"),
+      "https://cdn.example.com/llms.txt": () => textResponse("# Publisher llms.txt\n"),
+    });
+    const handler = createHandler(makeDeps(twoHosts));
+
+    const res = await call(handler, "https://example.com/llms.txt", undefined, tokenEnv);
+
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).toContain("# Publisher llms.txt");
+    expect(body).toContain("cf-webmcp:begin");
+    expect(urlsOf(fetchMock)).toEqual(["https://example.com/llms.txt", "https://cdn.example.com/llms.txt"]);
+    for (const [, init] of fetchMock.mock.calls) {
+      expect(init?.redirect).toBe("manual");
+      const headers = init?.headers as Record<string, string>;
+      expect(headers["cf-webmcp-bypass"]).toBe("1");
+      expect(headers["cf-webmcp-deploy-token"]).toBe("deploy-token-x");
+    }
+  });
+
+  it("re-checks every hop: an allowed hop that redirects off-list never reaches the off-list host", async () => {
+    const fetchMock = stubOrigin({
+      "https://example.com/robots.txt": () => redirectTo(302, "https://cdn.example.com/robots.txt"),
+      "https://cdn.example.com/robots.txt": () => redirectTo(302, "https://evil.example/robots.txt"),
+    });
+    const handler = createHandler(makeDeps(twoHosts));
+
+    const res = await call(handler, "https://example.com/robots.txt", undefined, tokenEnv);
+
+    expect(res.status).toBe(502);
+    expect(res.headers.get("x-robots-tag")).toBe("noindex");
+    expect(urlsOf(fetchMock)).toEqual(["https://example.com/robots.txt", "https://cdn.example.com/robots.txt"]);
+  });
+
+  it("answers 502 with noindex after more than 5 redirects, without echoing any URL", async () => {
+    const routes: Record<string, Canned> = {};
+    for (let i = 0; i < 6; i++) {
+      routes[i === 0 ? "https://example.com/llms.txt" : `https://example.com/h${i}`] = () =>
+        redirectTo(302, `/h${i + 1}`);
+    }
+    const fetchMock = stubOrigin(routes);
+    const handler = createHandler(makeDeps());
+
+    const res = await call(handler, "https://example.com/llms.txt", undefined, tokenEnv);
+
+    expect(res.status).toBe(502);
+    expect(res.headers.get("x-robots-tag")).toBe("noindex");
+    expect(await res.text()).toBe("origin redirected too many times");
+    expect(fetchMock).toHaveBeenCalledTimes(6);
+  });
+
+  it("answers 502 with noindex on an unparseable Location, without echoing it", async () => {
+    stubOrigin({ "https://example.com/llms.txt": () => redirectTo(302, "http://:notaport") });
+    const handler = createHandler(makeDeps());
+
+    const res = await call(handler, "https://example.com/llms.txt", undefined, tokenEnv);
+
+    expect(res.status).toBe(502);
+    expect(res.headers.get("x-robots-tag")).toBe("noindex");
+    expect(await res.text()).toBe("origin returned a malformed redirect location");
+  });
+
+  it("answers 502 with noindex, and sends nothing, when base_url itself is not in allowed_origins", async () => {
+    const fetchMock = stubOrigin({});
+    const handler = createHandler(
+      makeDeps({ origin: { base_url: "https://other.example", allowed_origins: ["https://example.com"] } }),
+    );
+
+    const res = await call(handler, "https://example.com/llms.txt", undefined, tokenEnv);
+
+    expect(res.status).toBe(502);
+    expect(res.headers.get("x-robots-tag")).toBe("noindex");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("still relays an origin 404 and merges (no redirect involved)", async () => {
+    stubOrigin({ "https://example.com/llms.txt": () => new Response("nope", { status: 404 }) });
+    const handler = createHandler(makeDeps());
+
+    const res = await call(handler, "https://example.com/llms.txt", undefined, tokenEnv);
+
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain("cf-webmcp:begin");
+  });
+});

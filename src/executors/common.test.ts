@@ -132,6 +132,323 @@ describe("originFetch with a run-wide signal", () => {
   });
 });
 
+/** A scripted 3xx response. */
+function redirect(status: number, location: string): Response {
+  return new Response(null, { status, headers: { location } });
+}
+
+type FetchInit = Omit<RequestInit, "headers"> & { headers: Record<string, string> };
+
+/** Stub fetch with one handler per exact URL; anything else answers 599. Returns the mock. */
+function stubFetch(routes: Record<string, (init: FetchInit) => Response | Promise<Response>>) {
+  const mock = vi.fn(async (url: string, init: FetchInit) => {
+    const route = routes[url];
+    if (!route) return new Response(`unscripted ${url}`, { status: 599 });
+    return route(init);
+  });
+  vi.stubGlobal("fetch", mock);
+  return mock;
+}
+
+function calledUrls(mock: ReturnType<typeof stubFetch>): string[] {
+  return mock.mock.calls.map((c) => c[0]);
+}
+
+const twoHostCtx = { ...ctx, allowedOrigins: ["https://example.com", "https://cdn.example.com"] };
+
+describe("originFetch redirects", () => {
+  it("never sends a request to an off-list redirect target, and returns invalid_input", async () => {
+    const fetchMock = stubFetch({
+      "https://example.com/a": () => redirect(302, "https://evil.example/steal"),
+      "https://evil.example/steal": () => new Response("should never be fetched", { status: 200 }),
+    });
+
+    const r = await originFetch(ctx, new URL("https://example.com/a"));
+
+    if (r instanceof Response) throw new Error("expected error");
+    expect(r.error.code).toBe("invalid_input");
+    expect(r.error.retriable).toBe(false);
+    expect(r.error.message).toBe(
+      "origin redirected to https://evil.example which is not in allowed_origins; refused to follow",
+    );
+    expect(r.error.message).not.toContain(ctx.deployToken);
+    expect(calledUrls(fetchMock)).toEqual(["https://example.com/a"]);
+  });
+
+  it("uses redirect: manual on every hop", async () => {
+    const fetchMock = stubFetch({
+      "https://example.com/a": () => redirect(301, "https://cdn.example.com/b"),
+      "https://cdn.example.com/b": () => new Response("done", { status: 200 }),
+    });
+
+    await originFetch(twoHostCtx, new URL("https://example.com/a"));
+
+    expect(fetchMock.mock.calls.map((c) => c[1].redirect)).toEqual(["manual", "manual"]);
+  });
+
+  it("follows A to an allowed A2, sends the token to both, and returns the final body", async () => {
+    const fetchMock = stubFetch({
+      "https://example.com/a": () => redirect(301, "https://cdn.example.com/b"),
+      "https://cdn.example.com/b": () => new Response("final body", { status: 200 }),
+    });
+
+    const r = await originFetch(twoHostCtx, new URL("https://example.com/a"));
+
+    if (!(r instanceof Response)) throw new Error(JSON.stringify(r));
+    expect(r.status).toBe(200);
+    expect(await r.text()).toBe("final body");
+    expect(calledUrls(fetchMock)).toEqual(["https://example.com/a", "https://cdn.example.com/b"]);
+    for (const [, init] of fetchMock.mock.calls) {
+      expect(init.headers["cf-webmcp-bypass"]).toBe("1");
+      expect(init.headers["cf-webmcp-deploy-token"]).toBe("deploy-token-x");
+    }
+  });
+
+  it("resolves a relative Location against the current URL", async () => {
+    const fetchMock = stubFetch({
+      "https://example.com/dir/a": () => redirect(302, "../new?x=1"),
+      "https://example.com/new?x=1": () => new Response("ok", { status: 200 }),
+    });
+
+    const r = await originFetch(ctx, new URL("https://example.com/dir/a"));
+
+    expect(r).toBeInstanceOf(Response);
+    expect(calledUrls(fetchMock)).toEqual(["https://example.com/dir/a", "https://example.com/new?x=1"]);
+  });
+
+  it("refuses a protocol-relative Location that resolves off-list", async () => {
+    const fetchMock = stubFetch({
+      "https://example.com/a": () => redirect(302, "//evil.example/x"),
+    });
+
+    const r = await originFetch(ctx, new URL("https://example.com/a"));
+
+    if (r instanceof Response) throw new Error("expected error");
+    expect(r.error.code).toBe("invalid_input");
+    expect(r.error.message).toContain("https://evil.example");
+    expect(calledUrls(fetchMock)).toEqual(["https://example.com/a"]);
+  });
+
+  it("re-checks the allow-list on every hop: A to allowed A2 to off-list B never reaches B", async () => {
+    const fetchMock = stubFetch({
+      "https://example.com/a": () => redirect(302, "https://cdn.example.com/b"),
+      "https://cdn.example.com/b": () => redirect(302, "https://evil.example/c"),
+    });
+
+    const r = await originFetch(twoHostCtx, new URL("https://example.com/a"));
+
+    if (r instanceof Response) throw new Error("expected error");
+    expect(r.error.code).toBe("invalid_input");
+    expect(calledUrls(fetchMock)).toEqual(["https://example.com/a", "https://cdn.example.com/b"]);
+  });
+
+  it("follows exactly 5 redirects", async () => {
+    const routes: Record<string, () => Response> = {};
+    for (let i = 0; i < 5; i++) routes[`https://example.com/h${i}`] = () => redirect(302, `/h${i + 1}`);
+    routes["https://example.com/h5"] = () => new Response("end", { status: 200 });
+    const fetchMock = stubFetch(routes);
+
+    const r = await originFetch(ctx, new URL("https://example.com/h0"));
+
+    if (!(r instanceof Response)) throw new Error(JSON.stringify(r));
+    expect(await r.text()).toBe("end");
+    expect(fetchMock).toHaveBeenCalledTimes(6);
+  });
+
+  it("gives up on the 6th redirect with an internal, non-retriable error and does not request a 7th URL", async () => {
+    const routes: Record<string, () => Response> = {};
+    for (let i = 0; i < 6; i++) routes[`https://example.com/h${i}`] = () => redirect(302, `/h${i + 1}`);
+    routes["https://example.com/h6"] = () => new Response("end", { status: 200 });
+    const fetchMock = stubFetch(routes);
+
+    const r = await originFetch(ctx, new URL("https://example.com/h0"));
+
+    if (r instanceof Response) throw new Error("expected error");
+    expect(r.error).toEqual({ code: "internal", message: "too many redirects (more than 5)", retriable: false });
+    expect(fetchMock).toHaveBeenCalledTimes(6);
+    expect(calledUrls(fetchMock)).not.toContain("https://example.com/h6");
+  });
+
+  it("gives up on a redirect loop", async () => {
+    const fetchMock = stubFetch({ "https://example.com/loop": () => redirect(302, "/loop") });
+
+    const r = await originFetch(ctx, new URL("https://example.com/loop"));
+
+    if (r instanceof Response) throw new Error("expected error");
+    expect(r.error.code).toBe("internal");
+    expect(fetchMock).toHaveBeenCalledTimes(6);
+  });
+
+  it("switches to GET and drops the body on a 303", async () => {
+    const fetchMock = stubFetch({
+      "https://example.com/a": () => redirect(303, "/b"),
+      "https://example.com/b": () => new Response("ok", { status: 200 }),
+    });
+
+    await originFetch(ctx, new URL("https://example.com/a"), { method: "POST", body: '{"q":1}' });
+
+    const [first, second] = fetchMock.mock.calls;
+    expect(first![1].method).toBe("POST");
+    expect(first![1].body).toBe('{"q":1}');
+    expect(second![1].method).toBe("GET");
+    expect(second![1].body).toBeUndefined();
+  });
+
+  it.each([301, 302])("switches to GET and drops the body on a %i", async (status) => {
+    const fetchMock = stubFetch({
+      "https://example.com/a": () => redirect(status, "/b"),
+      "https://example.com/b": () => new Response("ok", { status: 200 }),
+    });
+
+    await originFetch(ctx, new URL("https://example.com/a"), { method: "POST", body: "payload" });
+
+    const second = fetchMock.mock.calls[1]!;
+    expect(second[1].method).toBe("GET");
+    expect(second[1].body).toBeUndefined();
+  });
+
+  it.each([307, 308])("replays the method and the buffered body on a %i", async (status) => {
+    const fetchMock = stubFetch({
+      "https://example.com/a": () => redirect(status, "https://cdn.example.com/b"),
+      "https://cdn.example.com/b": () => new Response("ok", { status: 200 }),
+    });
+
+    await originFetch(twoHostCtx, new URL("https://example.com/a"), { method: "POST", body: '{"q":"x"}' });
+
+    const [first, second] = fetchMock.mock.calls;
+    expect(second![1].method).toBe("POST");
+    expect(second![1].body).toBe('{"q":"x"}');
+    expect(second![1].body).toBe(first![1].body);
+  });
+
+  it("returns a redirect status without a Location header as the final response", async () => {
+    stubFetch({ "https://example.com/a": () => new Response(null, { status: 302 }) });
+
+    const r = await originFetch(ctx, new URL("https://example.com/a"));
+
+    if (!(r instanceof Response)) throw new Error(JSON.stringify(r));
+    expect(r.status).toBe(302);
+    expect(mapOriginStatus(r.status)?.code).toBe("internal");
+  });
+
+  it("maps an unparseable Location to a non-retriable internal error that quotes a truncated value", async () => {
+    const bad = "http://" + "x".repeat(300) + ":notaport";
+    const fetchMock = stubFetch({ "https://example.com/a": () => redirect(302, bad) });
+
+    const r = await originFetch(ctx, new URL("https://example.com/a"));
+
+    if (r instanceof Response) throw new Error("expected error");
+    expect(r.error.code).toBe("internal");
+    expect(r.error.retriable).toBe(false);
+    expect(r.error.message).toContain('"http://xxxx');
+    expect(r.error.message).not.toContain("x".repeat(250));
+    expect(r.error.message.length).toBeLessThan(300);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("refuses a redirect to a non-http scheme without requesting it", async () => {
+    const fetchMock = stubFetch({ "https://example.com/a": () => redirect(302, "javascript:alert(1)") });
+
+    const r = await originFetch(ctx, new URL("https://example.com/a"));
+
+    if (r instanceof Response) throw new Error("expected error");
+    expect(r.error.code).toBe("invalid_input");
+    expect(r.error.message).toContain("not in allowed_origins");
+    expect(calledUrls(fetchMock)).toEqual(["https://example.com/a"]);
+  });
+
+  it("cancels the body of an intermediate redirect response before following it", async () => {
+    let cancelled = false;
+    stubFetch({
+      "https://example.com/a": () =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(c) {
+              c.enqueue(new TextEncoder().encode("redirect page"));
+            },
+            cancel() {
+              cancelled = true;
+            },
+          }),
+          { status: 302, headers: { location: "/b" } },
+        ),
+      "https://example.com/b": () => new Response("ok", { status: 200 }),
+    });
+
+    const r = await originFetch(ctx, new URL("https://example.com/a"));
+
+    expect(r).toBeInstanceOf(Response);
+    expect(cancelled).toBe(true);
+  });
+
+  it("does not send the token headers when no deploy token is configured", async () => {
+    const fetchMock = stubFetch({
+      "https://example.com/a": () => redirect(302, "/b"),
+      "https://example.com/b": () => new Response("ok", { status: 200 }),
+    });
+
+    await originFetch({ ...ctx, deployToken: "" }, new URL("https://example.com/a"));
+
+    for (const [, init] of fetchMock.mock.calls) {
+      expect(init.headers["cf-webmcp-bypass"]).toBeUndefined();
+      expect(init.headers["cf-webmcp-deploy-token"]).toBeUndefined();
+    }
+  });
+});
+
+describe("originFetch deadline across redirect hops", () => {
+  function abortable(init: FetchInit): Promise<Response> {
+    return new Promise((_, reject) => {
+      init.signal!.addEventListener("abort", () =>
+        reject(Object.assign(new Error("aborted"), { name: "AbortError" })),
+      );
+    });
+  }
+
+  it("uses the run-wide signal for every hop, and a stall on hop 2 times out", async () => {
+    const controller = new AbortController();
+    const fetchMock = stubFetch({
+      "https://example.com/a": () => redirect(302, "/b"),
+      "https://example.com/b": abortable,
+    });
+
+    const pending = originFetch({ ...ctx, timeoutMs: 20, signal: controller.signal }, new URL("https://example.com/a"));
+    setTimeout(() => controller.abort(), 20);
+    const r = await pending;
+
+    if (r instanceof Response) throw new Error("expected error");
+    expect(r.error.code).toBe("timeout");
+    expect(fetchMock.mock.calls.map((c) => c[1].signal)).toEqual([controller.signal, controller.signal]);
+  });
+
+  it("without a run-wide signal, one local timer covers the whole chain", async () => {
+    vi.useFakeTimers();
+    try {
+      stubFetch({
+        // Hop 1 answers after 20ms, hop 2 stalls until aborted.
+        "https://example.com/a": () => new Promise((resolve) => setTimeout(() => resolve(redirect(302, "/b")), 20)),
+        "https://example.com/b": abortable,
+      });
+
+      const pending = originFetch({ ...ctx, timeoutMs: 30 }, new URL("https://example.com/a"));
+      let result: Awaited<typeof pending> | undefined;
+      void pending.then((r) => {
+        result = r;
+      });
+
+      await vi.advanceTimersByTimeAsync(20); // hop 1 answers, hop 2 starts
+      expect(result).toBeUndefined();
+      // A per-hop timer would give hop 2 a fresh 30ms and still be pending at t=30.
+      await vi.advanceTimersByTimeAsync(10);
+
+      if (result === undefined || result instanceof Response) throw new Error("expected a timeout at t=30");
+      expect(result.error.code).toBe("timeout");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe("readWithLimit abort handling", () => {
   function stalling(first = "partial") {
     return new Response(

@@ -29,6 +29,7 @@ import { agentSkillsResponse, agentSkillsRedirect } from "./routes/agent-skills"
 import { agentSkillsIndexResponse } from "./routes/agent-skills-index";
 import { buildLinkHeader, mergeLinkHeader } from "./link-header";
 import { formsForPath, safeInject, shouldInject } from "./injection/html-rewriter";
+import { fetchWithManualRedirects, type RedirectFailure } from "./safe-fetch";
 
 export interface Env {
   CF_WEBMCP_ASSETS: R2Bucket;
@@ -157,43 +158,57 @@ export function createHandler(deps: HandlerDeps): Required<Pick<ExportedHandler<
     return response;
   }
 
+  /**
+   * GET a path on origin for the merge/passthrough routes (llms.txt, robots.txt,
+   * agents.md, the catalogs). Redirects are followed here, not by the runtime, so
+   * every hop is checked against allowed_origins before it is requested and the
+   * deploy token only ever goes to a listed origin. A failure is a 502.
+   */
   async function proxyToOrigin(url: URL, env: Env): Promise<Response> {
     const target = new URL(url.pathname + url.search, config.origin.base_url);
-    const headers = new Headers();
-    headers.set("user-agent", "cf-webmcp/1.0");
+    const secretHeaders: Record<string, string> = {};
     if (env.CF_WEBMCP_DEPLOY_TOKEN) {
-      headers.set("cf-webmcp-bypass", "1");
-      headers.set("cf-webmcp-deploy-token", env.CF_WEBMCP_DEPLOY_TOKEN);
+      secretHeaders["cf-webmcp-bypass"] = "1";
+      secretHeaders["cf-webmcp-deploy-token"] = env.CF_WEBMCP_DEPLOY_TOKEN;
     }
-    const res = await fetch(target.toString(), { method: "GET", headers, redirect: "follow" });
-    // Defense in depth: refuse to relay content from any host outside the
-    // configured allow-list, even if origin redirected us there.
-    if (res.url) {
-      try {
-        const finalOrigin = new URL(res.url).origin;
-        const allowed = config.origin.allowed_origins.map((u) => new URL(u).origin);
-        if (!allowed.includes(finalOrigin)) {
-          return new Response(
-            `origin redirected to ${finalOrigin} which is not in allowed_origins`,
-            {
-              status: 502,
-              headers: {
-                "content-type": "text/plain; charset=utf-8",
-                // proxyToOrigin is invoked from routes under /.well-known/*; tag
-                // the SSRF-rejection body too so it never gets indexed.
-                "x-robots-tag": "noindex",
-              },
-            },
-          );
-        }
-      } catch {
-        return new Response("origin returned malformed final URL", {
-          status: 502,
-          headers: { "x-robots-tag": "noindex" },
-        });
-      }
+    const result = await fetchWithManualRedirects(
+      target,
+      { method: "GET" },
+      {
+        allowedOrigins: config.origin.allowed_origins,
+        headers: { "user-agent": "cf-webmcp/1.0" },
+        secretHeaders,
+      },
+    );
+    return result.ok ? result.response : proxyFailure(result.failure);
+  }
+
+  /**
+   * The 502 for a refused or unfollowable origin redirect. proxyToOrigin serves
+   * routes under /.well-known/* (and llms.txt, robots.txt); the body is an error,
+   * so it always carries noindex, even on the two apex routes whose success
+   * responses are exempt. Only an origin (never a path, query or raw Location)
+   * is echoed, and never the deploy token.
+   */
+  function proxyFailure(failure: RedirectFailure): Response {
+    let message: string;
+    switch (failure.kind) {
+      case "off_list":
+        message = failure.redirected
+          ? `origin redirected to ${failure.origin} which is not in allowed_origins`
+          : `origin ${failure.origin} is not in allowed_origins`;
+        break;
+      case "too_many_redirects":
+        message = "origin redirected too many times";
+        break;
+      case "malformed_location":
+        message = "origin returned a malformed redirect location";
+        break;
     }
-    return res;
+    return new Response(message, {
+      status: 502,
+      headers: { "content-type": "text/plain; charset=utf-8", "x-robots-tag": "noindex" },
+    });
   }
 
   async function proxyAndMaybeInject(request: Request, env: Env): Promise<Response> {

@@ -6,13 +6,17 @@
  *   - Reject any resolved URL outside [origin].allowed_origins.
  *   - Strip visitor cookies, set a stable User-Agent, attach the deploy-token
  *     bypass header so the publisher's Bot Management can allow our traffic.
- *   - Time-bound the fetch, and (via the run-wide signal) the body reads after it.
+ *   - Follow redirects by hand (src/safe-fetch.ts): every hop is checked against
+ *     allowed_origins before it is requested, so the deploy token never goes to a
+ *     host outside the list.
+ *   - Time-bound the fetch chain, and (via the run-wide signal) the body reads after it.
  *   - Bound body reads by size (readWithLimit).
  *   - Map response codes / network errors to the envelope error codes.
  */
 
 import { compileTemplate } from "../mini-language";
 import { err, type ErrorPayload } from "../envelope";
+import { fetchWithManualRedirects, type RedirectFailure } from "../safe-fetch";
 
 const VERSION = "1.0";
 
@@ -81,18 +85,49 @@ export function resolveUrl(
 export interface OriginFetchOptions {
   method?: string;
   acceptHeader?: string;
-  /** Bypass header value (typically `1`); the deploy_token goes in a separate header. */
+  /**
+   * Request body, already buffered. Kept as a string so a 307/308 redirect can
+   * replay it; a 301/302/303 redirect drops it and continues as a GET.
+   */
+  body?: string;
+  /** Set to false to send neither the bypass nor the deploy-token header. */
   bypassEnabled?: boolean;
+}
+
+/** Envelope error for a refused or unfollowable redirect. Never echoes the token or a raw Location. */
+function redirectFailureError(failure: RedirectFailure): ErrorPayload {
+  switch (failure.kind) {
+    case "off_list":
+      return {
+        code: "invalid_input",
+        message: failure.redirected
+          ? `origin redirected to ${failure.origin} which is not in allowed_origins; refused to follow`
+          : `origin ${failure.origin} is not in allowed_origins`,
+        retriable: false,
+      };
+    case "too_many_redirects":
+      return { code: "internal", message: `too many redirects (more than ${failure.maxHops})`, retriable: false };
+    case "malformed_location":
+      return {
+        code: "internal",
+        message: `origin returned a malformed redirect Location: ${JSON.stringify(failure.location)}`,
+        retriable: false,
+      };
+  }
 }
 
 /**
  * Fetch a URL on the publisher's origin with safe defaults.
  *   - No visitor cookies. credentials: omit. headers stripped to minimum.
  *   - Stable UA.
- *   - bypass header set if enabled.
+ *   - bypass and deploy-token headers set if enabled and a token is configured.
+ *   - Redirects are followed here, not by the runtime: at most 5 hops, each target
+ *     checked against ctx.allowedOrigins before any request is made to it, and the
+ *     token headers attached per hop. An off-list target is refused (invalid_input)
+ *     without a request, so the token cannot leak through an open redirect.
  *   - Timeout via ctx.signal when the caller supplies one (it then also covers the
- *     body reads that follow), otherwise via a local AbortController that only
- *     covers the fetch itself.
+ *     body reads that follow), otherwise via ONE local AbortController and timer
+ *     that covers the whole redirect chain but not the body reads.
  */
 export async function originFetch(
   ctx: ExecutorContext,
@@ -107,41 +142,19 @@ export async function originFetch(
     "user-agent": `cf-webmcp/${VERSION}`,
   };
   if (opts.acceptHeader) headers["accept"] = opts.acceptHeader;
+  const secretHeaders: Record<string, string> = {};
   if (opts.bypassEnabled !== false && ctx.deployToken) {
-    headers["cf-webmcp-bypass"] = "1";
-    headers["cf-webmcp-deploy-token"] = ctx.deployToken;
+    secretHeaders["cf-webmcp-bypass"] = "1";
+    secretHeaders["cf-webmcp-deploy-token"] = ctx.deployToken;
   }
 
   try {
-    const res = await fetch(url.toString(), {
-      method: opts.method ?? "GET",
-      headers,
-      redirect: "follow",
-      signal,
-    });
-    // Defense in depth: even though the initial URL passed the allow-list
-    // check, an origin can 301/302 us to a different host. Verify the final
-    // post-redirect URL is still in the allow-list. Refuse to return the
-    // response if it points off-list.
-    if (res.url) {
-      let finalOrigin: string;
-      try {
-        finalOrigin = new URL(res.url).origin;
-      } catch {
-        return { ok: false, error: { code: "internal", message: `origin returned malformed final URL ${res.url}`, retriable: false } };
-      }
-      if (!ctx.allowedOrigins.includes(finalOrigin)) {
-        return {
-          ok: false,
-          error: {
-            code: "invalid_input",
-            message: `origin redirected to ${finalOrigin} which is not in allowed_origins; refused to follow`,
-            retriable: false,
-          },
-        };
-      }
-    }
-    return res;
+    const result = await fetchWithManualRedirects(
+      url,
+      { method: opts.method ?? "GET", body: opts.body },
+      { allowedOrigins: ctx.allowedOrigins, headers, secretHeaders, signal },
+    );
+    return result.ok ? result.response : { ok: false, error: redirectFailureError(result.failure) };
   } catch (e) {
     return isAbortError(e)
       ? { ok: false, error: timeoutError(ctx.timeoutMs) }
