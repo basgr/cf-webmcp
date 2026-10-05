@@ -814,6 +814,20 @@ describe("the fallback widget init script", () => {
     expect(String(run.warnings[0]![0])).toContain("cf-webmcp");
   });
 
+  it("hands console.warn an error only when there is one, so no literal undefined is printed", () => {
+    for (const webmcp of ["absent", "no-mount"] as const) {
+      const run = runWidgetInit(landingWidgetOn, { webmcp });
+      run.load();
+      expect(run.warnings, webmcp).toHaveLength(1);
+      expect(run.warnings[0], webmcp).toHaveLength(1);
+      expect(String(run.warnings[0]![0])).not.toContain("undefined");
+    }
+    const threw = runWidgetInit(landingWidgetOn, { webmcp: "constructor-throws" });
+    threw.load();
+    expect(threw.warnings[0]).toHaveLength(2);
+    expect(String(threw.warnings[0]![1])).toContain("widget constructor boom");
+  });
+
   it("does not construct anything when the widget script did not load", () => {
     const run = runWidgetInit(landingWidgetOn, { webmcp: "absent" });
     run.load();

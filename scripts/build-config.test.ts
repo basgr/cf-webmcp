@@ -897,7 +897,10 @@ describe("landing: the fallback widget is started and registers this site's tool
     expect(widgetInit(html)).toBeUndefined();
     expect(html).not.toContain("@jason.today/webmcp");
     expect(html).toContain("var widgetEnabled = false;");
-    expect(warn.mock.calls.map((c) => String(c[0])).filter((m) => /widget/i.test(m))).toEqual([]);
+    // Only the opt-in notice for the unset key, nothing about the pin.
+    expect(warn.mock.calls.map((c) => String(c[0])).filter((m) => /widget/i.test(m))).toEqual([
+      expect.stringContaining("fallback_widget is not set"),
+    ]);
   });
 
   it("starts the widget only if its script ran: a typeof WebMCP guard, then new WebMCP(", async () => {
@@ -938,7 +941,8 @@ describe("landing: the fallback widget is started and registers this site's tool
       const html = files["landing.html"]!;
       const code = codeBlocks(html);
       expect(code).toContain(`npx -y @jason.today/webmcp@${npm} --foreground`);
-      expect(code).toContain(`claude mcp add webmcp -- npx -y @jason.today/webmcp@${npm} --mcp`);
+      // User scope: Claude Code's default (local) scope loads a server only in the project it was added in.
+      expect(code).toContain(`claude mcp add --scope user webmcp -- npx -y @jason.today/webmcp@${npm} --mcp`);
       expect(code).toContain(`npx -y @jason.today/webmcp@${npm} --new`);
       const specs = html.match(/@jason\.today\/webmcp@[^\s"&<]*/g) ?? [];
       expect(specs.length).toBeGreaterThanOrEqual(4);
@@ -953,12 +957,16 @@ describe("landing: the fallback widget is started and registers this site's tool
     const html = files["landing.html"]!;
     expect(html).not.toMatch(/"mcpServers"/);
     expect(html).toContain("&quot;mcpServers&quot;");
-    const json = codeBlocks(html).find((c) => c.includes("mcpServers"));
+    const json = codeBlocks(html).find((c) => c.includes('"mcpServers"'));
     expect(JSON.parse(json!)).toEqual({
       mcpServers: { webmcp: { command: "npx", args: ["-y", "@jason.today/webmcp@0.1.13", "--mcp"] } },
     });
     expect(html).toContain("<code>claude_desktop_config.json</code>");
     expect(html).toContain("<code>~/.cursor/mcp.json</code>");
+    // A visitor who already has MCP servers merges one key; the snippet is the whole file for a new one.
+    const text = html.replace(/<[^>]+>/g, "").replace(/\s+/g, " ");
+    expect(text).toContain("add the webmcp entry inside mcpServers; if the file does not exist, create it with this content:");
+    expect(text).toContain("Cursor: the same webmcp entry inside mcpServers in ~/.cursor/mcp.json.");
   });
 
   it("tells the visitor to keep the bridge running first, restart the client, and what to do when tools are missing", async () => {
@@ -974,6 +982,11 @@ describe("landing: the fallback widget is started and registers this site's tool
     expect(text).toContain("The bridge must already be running when the client starts.");
     expect(text).toContain(
       "If your client shows no tools from this site, check that the terminal from step 1 is still open, then restart the MCP client. After restarting your computer, repeat step 1 before you open the client.",
+    );
+    // The bridge's own words when a daemon is already up (src/websocket-server.js:1431), e.g. one the
+    // client's side forked on macOS or Linux because the client started first.
+    expect(text).toContain(
+      "If step 1 says the server is already running, the bridge is running in the background; restart the MCP client.",
     );
   });
 
@@ -1100,6 +1113,50 @@ describe("landing: the fallback widget is started and registers this site's tool
       const messages = warn.mock.calls.map((c) => String(c[0]));
       expect(messages.some((m) => /version/i.test(m) && m.includes('"main"') && /update-widget/.test(m))).toBe(true);
     });
+  });
+});
+
+describe("a notice for a config that does not set fallback_widget (the v0.6.0 default flip)", () => {
+  const NOTICE =
+    "[build-config] fallback_widget is not set; since v0.6.0 it defaults to false (the desktop-bridge widget is opt-in). Set it explicitly to silence this notice.";
+  const notices = (warn: { mock: { calls: unknown[][] } }): string[] =>
+    warn.mock.calls.map((c) => String(c[0])).filter((m) => m.includes("fallback_widget is not set"));
+
+  it("prints it once when the TOML does not set the key", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    await runBuild(await writeToml("n-absent.toml", MINIMAL));
+    expect(notices(warn)).toEqual([NOTICE]);
+  });
+
+  it.each([true, false])("is quiet when the TOML sets fallback_widget = %s", async (value) => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    await runBuild(await writeToml(`n-${value}.toml`, `${MINIMAL}\n[features]\nfallback_widget = ${value}\n`));
+    expect(notices(warn)).toEqual([]);
+  });
+
+  it("is quiet when only the parent TOML sets the key (inherits)", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    await writeToml("n-parent.toml", `${MINIMAL}\n[features]\nfallback_widget = false\n`);
+    const child = await writeToml("n-child.toml", `inherits = "n-parent.toml"\n\n[site]\ndomain = "example.com"\nname   = "Child Co."\n`);
+    await runBuild(child);
+    expect(notices(warn)).toEqual([]);
+  });
+
+  it("prints it when the child's own [features] table replaces the parent's without the key", async () => {
+    // inherits replaces a whole top-level table, so the parent's key is not in the resolved config.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    await writeToml("n-parent2.toml", `${MINIMAL}\n[features]\nfallback_widget = true\n`);
+    const child = await writeToml("n-child2.toml", `inherits = "n-parent2.toml"\n\n[features]\nllms_txt = true\n`);
+    await runBuild(child);
+    expect(notices(warn)).toEqual([NOTICE]);
+  });
+
+  it("leaves CONFIG_HASH alone: no key and an explicit false build the same config", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const absent = await runBuild(await writeToml("n-hash-a.toml", MINIMAL));
+    const hashAbsent = exportedConst(absent.files["config.ts"]!, "CONFIG_HASH");
+    const explicit = await runBuild(await writeToml("n-hash-b.toml", `${MINIMAL}\n[features]\nfallback_widget = false\n`));
+    expect(exportedConst(explicit.files["config.ts"]!, "CONFIG_HASH")).toBe(hashAbsent);
   });
 });
 

@@ -692,10 +692,10 @@ function buildWidgetBlock(config: Config, widgetUrl: string, sri: string | null,
     `        Press Ctrl+C in that terminal to stop it. The first time you run the bridge on a computer, stop it with Ctrl+C as soon as it has started and run the same command again: the first run creates the bridge's settings in ${code("~/.webmcp")} but does not use them yet.</li>`,
     `      <li>Add the bridge to your MCP client, then restart the client (quit it fully and open it again). The bridge must already be running when the client starts.`,
     `        <ul>`,
-    `          <li>Claude Desktop: add this entry to ${code("claude_desktop_config.json")} (macOS: ${code("~/Library/Application Support/Claude/")}, Windows: ${code("%APPDATA%\\Claude\\")}):`,
+    `          <li>Claude Desktop: in ${code("claude_desktop_config.json")} (macOS: ${code("~/Library/Application Support/Claude/")}, Windows: ${code("%APPDATA%\\Claude\\")}), add the ${code("webmcp")} entry inside ${code("mcpServers")}; if the file does not exist, create it with this content:`,
     `            <pre>${code(clientEntry)}</pre></li>`,
-    `          <li>Cursor: the same entry in ${code("~/.cursor/mcp.json")}.</li>`,
-    `          <li>Claude Code: ${code(`claude mcp add webmcp -- npx -y ${spec} --mcp`)}</li>`,
+    `          <li>Cursor: the same ${code("webmcp")} entry inside ${code("mcpServers")} in ${code("~/.cursor/mcp.json")}.</li>`,
+    `          <li>Claude Code: ${code(`claude mcp add --scope user webmcp -- npx -y ${spec} --mcp`)}</li>`,
     `          <li>Other MCP clients: add a local server that runs ${code(`npx -y ${spec} --mcp`)}, where the client's documentation says.</li>`,
     `        </ul>`,
     `      </li>`,
@@ -703,7 +703,7 @@ function buildWidgetBlock(config: Config, widgetUrl: string, sri: string | null,
     `      <li id="webmcp-widget-step" hidden>Click the blue square in the bottom right corner of this page, paste the token and press Connect. Keep this tab open. The widget disconnects after ${minutes} minutes without mouse or keyboard activity on this page; to reconnect, get a new token and repeat this step.</li>`,
     `    </ol>`,
     `    <p id="webmcp-widget-error" role="status" hidden></p>`,
-    `    <p>If your client shows no tools from this site, check that the terminal from step 1 is still open, then restart the MCP client. After restarting your computer, repeat step 1 before you open the client.</p>`,
+    `    <p>If your client shows no tools from this site, check that the terminal from step 1 is still open, then restart the MCP client. After restarting your computer, repeat step 1 before you open the client. If step 1 says the server is already running, the bridge is running in the background; restart the MCP client.</p>`,
     `    <script src="${escapeHtml(widgetUrl)}" defer${sriAttrs}></script>`,
     `    <script>`,
     buildWidgetInit(config),
@@ -744,9 +744,12 @@ function buildWidgetInit(config: Config): string {
   return `(function () {
   // cf-webmcp: starts the fallback widget and registers this site's tools with it.
 ${EXEC_CLIENT_JS}
+  // The error goes to the console only when there is one: a missing argument would print as "undefined".
   function warn(what, e) {
     try {
-      if (typeof console !== 'undefined' && console.warn) console.warn('cf-webmcp: fallback widget: ' + what, e);
+      if (typeof console === 'undefined' || !console.warn) return;
+      if (e === undefined) console.warn('cf-webmcp: fallback widget: ' + what);
+      else console.warn('cf-webmcp: fallback widget: ' + what, e);
     } catch (err) {}
   }
   // The pairing block's step that points at the widget, hidden until the widget is there.
@@ -1492,6 +1495,28 @@ function checkOriginTrial(config: Config, now: Date): void {
   }
 }
 
+/**
+ * v0.6.0 made the desktop-bridge widget opt-in ([features].fallback_widget defaults to false), so
+ * a config written for an earlier release that relied on the old default loses the pairing flow
+ * on upgrade. Say so whenever the resolved TOML (after `inherits`, before the schema fills in
+ * defaults) has no fallback_widget key. A notice only: the parsed config, and so CONFIG_HASH, is
+ * the same with the key absent or set to false.
+ */
+function noticeUnsetFallbackWidget(raw: Record<string, unknown>): void {
+  const features = raw["features"];
+  const isSet =
+    typeof features === "object" &&
+    features !== null &&
+    !Array.isArray(features) &&
+    Object.prototype.hasOwnProperty.call(features, "fallback_widget");
+  if (isSet) return;
+  // eslint-disable-next-line no-console
+  console.warn(
+    "[build-config] fallback_widget is not set; since v0.6.0 it defaults to false (the desktop-bridge widget is opt-in). " +
+      "Set it explicitly to silence this notice.",
+  );
+}
+
 export async function buildConfig(opts: BuildOptions): Promise<void> {
   const baseDir = path.dirname(opts.tomlPath);
   const rawIn = await readToml(opts.tomlPath);
@@ -1505,6 +1530,7 @@ export async function buildConfig(opts: BuildOptions): Promise<void> {
     throw new Error(`[build-config] config validation failed:\n${issues}`);
   }
   const config = parsed.data;
+  noticeUnsetFallbackWidget(merged);
 
   // Compile every url_template to surface mini-language errors at build time,
   // and check allow-list.

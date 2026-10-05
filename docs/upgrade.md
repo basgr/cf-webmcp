@@ -1,5 +1,10 @@
 # Upgrades and versioning
 
+## v0.6.0 (in progress)
+
+- **`fallback_widget` now defaults to `false`.** The desktop-bridge widget is opt-in. A TOML that does not set the key loses the pairing flow on upgrade: the landing shows the "Not connected" state and the widget route answers 404. The build prints a notice for such a TOML. To keep the widget, set `fallback_widget = true` under `[features]`, run `npm run upload-widget` before deploying, and read [Known limits of the desktop bridge](deployment.md#known-limits-of-the-desktop-bridge). The default, WordPress and WooCommerce templates set it to `true` explicitly.
+- **`{{widget_block}}` now carries the pairing steps.** It renders the "Pairing required" heading, the bridge commands and the widget scripts. A custom landing template copied from the old default must drop its own pairing heading and CLI line, or it renders them twice (see the `{{widget_block}}` row in [`docs/customisation.md`](customisation.md)).
+
 ## v0.5.1: landing runtime fix, docs overhaul, hardening
 
 Patch release, no config changes required.
