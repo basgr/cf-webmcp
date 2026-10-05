@@ -24,6 +24,8 @@ export interface CompiledTemplate {
    * (resolveUrl in src/executors/common.ts), after the URL parser has normalised the path.
    */
   pathPrefix: string | null;
+  /** Every placeholder in template order: its name, its operator, and whether it sits in the query (or fragment). */
+  slots: ReadonlyArray<{ name: string; operator: Placeholder["operator"]; isQuery: boolean }>;
 }
 
 interface Placeholder {
@@ -137,7 +139,13 @@ export function compileTemplate(template: string): CompiledTemplate {
     return result;
   };
 
-  return { raw: template, resolver, params, pathPrefix: staticPathPrefix(template) };
+  return {
+    raw: template,
+    resolver,
+    params,
+    pathPrefix: staticPathPrefix(template),
+    slots: placeholders.map((p) => ({ name: p.name, operator: p.operator, isQuery: p.isQuery })),
+  };
 }
 
 /**

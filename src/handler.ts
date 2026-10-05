@@ -33,6 +33,7 @@ import { configLinkOptions, formsForPath, isExcludedPath, safeInject, shouldInje
 import { fetchWithManualRedirects, isAbortError, logRedirectFailure, type RedirectFailure } from "./safe-fetch";
 import { widgetEnabled } from "./widget-state";
 import { userAgent } from "./user-agent";
+import { redactResponse } from "./redact";
 
 /**
  * One deadline for a whole proxyToOrigin redirect chain, up to the moment the final
@@ -160,28 +161,39 @@ export function createHandler(deps: HandlerDeps): Required<Pick<ExportedHandler<
             bucket: env.CF_WEBMCP_ASSETS,
             envToken: env.CF_WEBMCP_HEALTH_TOKEN,
           });
+        // The merge routes pass origin's text and headers on, and origin got the deploy token
+        // with the fetch: withoutToken takes it out of whatever they answer (src/redact.ts).
         case "llms_txt":
-          return llmsTxtResponse(request, config, (u) => proxyToOrigin(u, env), meta.LLMS_TXT_TOKEN_HINTS, widget);
+          return withoutToken(
+            env,
+            llmsTxtResponse(request, config, (u) => proxyToOrigin(u, env), meta.LLMS_TXT_TOKEN_HINTS, widget),
+          );
         case "robots_txt":
-          return robotsTxtResponse(request, config, (u) => proxyToOrigin(u, env));
+          return withoutToken(env, robotsTxtResponse(request, config, (u) => proxyToOrigin(u, env)));
         case "agents_md":
-          return agentsMdResponse(
-            request,
-            config,
-            (u) => proxyToOrigin(u, env),
-            widget,
-            healthAnswersWithoutToken(config, env.CF_WEBMCP_HEALTH_TOKEN),
+          return withoutToken(
+            env,
+            agentsMdResponse(
+              request,
+              config,
+              (u) => proxyToOrigin(u, env),
+              widget,
+              healthAnswersWithoutToken(config, env.CF_WEBMCP_HEALTH_TOKEN),
+            ),
           );
         case "agents_md_redirect":
           return agentsMdRedirect(config);
         case "api_catalog":
-          return apiCatalogResponse(request, config, (u) => proxyToOrigin(u, env));
+          return withoutToken(env, apiCatalogResponse(request, config, (u) => proxyToOrigin(u, env)));
         case "ards_catalog":
-          return aiCatalogResponse(request, config, assets.aiCatalogJson, (u) => proxyToOrigin(u, env), meta.ARD_ETAG);
+          return withoutToken(
+            env,
+            aiCatalogResponse(request, config, assets.aiCatalogJson, (u) => proxyToOrigin(u, env), meta.ARD_ETAG),
+          );
         case "ards_catalog_redirect":
           return ardRedirect(config);
         case "agent_skills":
-          return agentSkillsResponse(request, config, (u) => proxyToOrigin(u, env), widget);
+          return withoutToken(env, agentSkillsResponse(request, config, (u) => proxyToOrigin(u, env), widget));
         case "agent_skills_redirect":
           return agentSkillsRedirect(config);
         case "agent_skills_index":
@@ -191,6 +203,11 @@ export function createHandler(deps: HandlerDeps): Required<Pick<ExportedHandler<
       }
     },
   };
+
+  /** A merge route's answer with the deploy token taken out of its headers and body (redactResponse). */
+  async function withoutToken(env: Env, answer: Promise<Response>): Promise<Response> {
+    return redactResponse(await answer, env.CF_WEBMCP_DEPLOY_TOKEN ?? "");
+  }
 
   function handleHeadable(request: Request, response: Response): Response {
     if (request.method === "HEAD") {

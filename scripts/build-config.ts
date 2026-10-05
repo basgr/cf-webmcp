@@ -1606,6 +1606,51 @@ export function globPatternWarnings(config: Config): string[] {
 }
 
 /**
+ * A url_template whose first placeholder is in the path and has nothing fixed in front of it but
+ * the origin (its static path prefix is `/`, as in `https://example.com{{path}}`): a caller then
+ * chooses the whole path, so the tool can request any path on the origin, and every request
+ * carries the deploy-token headers. An origin endpoint that echoes request headers would answer
+ * with the token. The Worker replaces the token in tool output (src/redact.ts), but only as
+ * written or JSON-escaped, so the build suggests narrowing the template. A placeholder whose
+ * values the publisher fixed (a `map:` operator, or an `enum` on its input property) cannot
+ * choose any path, so it gets no warning; docs/security.md says so. Advice only; the build goes
+ * on. One warning per tool.
+ */
+export function rootTemplateWarnings(config: Config): string[] {
+  const out: string[] = [];
+  for (const tool of config.tools) {
+    const executor = tool.executor;
+    if (executor.type !== "dom_extract" && executor.type !== "http_json" && executor.type !== "http_get") continue;
+    const template = executor.url_template;
+    const compiled = compileTemplate(template);
+    // Once a placeholder sits in the query, so do all after it: the first one decides.
+    const first = compiled.slots[0];
+    if (compiled.pathPrefix !== "/" || first === undefined || first.isQuery || first.operator === "map") continue;
+    const property = tool.input_schema.properties[first.name] as { enum?: unknown[] } | undefined;
+    if (Array.isArray(property?.enum) && property.enum.length > 0) continue;
+    // The origin the template names before its first placeholder, when it names one outright.
+    const authority = /^([A-Za-z][A-Za-z0-9+.-]*:\/\/[^/?#{}]+)\/?$/.exec(template.slice(0, template.indexOf("{{")));
+    let origin: string | null = null;
+    try {
+      origin = authority ? new URL(authority[1]!).origin : null;
+    } catch {
+      origin = null;
+    }
+    const where = origin ?? "the origins it can reach";
+    const example = origin ? `, such as ${origin}/docs/{{${first.name}}}` : "";
+    out.push(
+      `[build-config] tool "${tool.name}" (${executor.type}) can request any path on ${where}: its url_template ` +
+        `${JSON.stringify(template)} has nothing fixed between the origin and {{${first.name}}}, so a caller chooses the whole path, ` +
+        `and with CF_WEBMCP_DEPLOY_TOKEN set every such request carries the deploy-token headers. An origin endpoint that echoes ` +
+        `request headers would answer with the token; the Worker replaces it in tool output with [redacted], but only as written or ` +
+        `JSON-escaped. If the tool only needs ` +
+        `part of the site, narrow the template to a fixed path prefix${example}.`,
+    );
+  }
+  return out;
+}
+
+/**
  * A `[tools.cache]` on a POST http_json tool that does not turn caching on: the tool is not
  * cached unless s_maxage is greater than 0 (src/tool-cache.ts), so a table with a max_age, swr or
  * sie but no s_maxage is ignored. Say so once per tool. An explicit `s_maxage = 0` is not
@@ -2025,6 +2070,7 @@ export async function buildConfig(opts: BuildOptions): Promise<void> {
     ...declaredInputWarnings(config),
     ...deadConfigWarnings(config),
     ...globPatternWarnings(config),
+    ...rootTemplateWarnings(config),
   ]) {
     // eslint-disable-next-line no-console
     console.warn(warning);

@@ -25,6 +25,7 @@ import { jsonResponse, err, type Envelope } from "../envelope";
 import { buildCacheControl, canonicalJson, makeCacheKey } from "../cache";
 import { checkGlobalRateLimit, checkPerToolRateLimit, clientIp } from "../rate-limit";
 import { cachesResults } from "../tool-cache";
+import { redactEnvelope } from "../redact";
 
 export interface ExecOptions {
   domain: string;
@@ -144,7 +145,9 @@ async function execAnswer(
     timeoutMs: opts.timeoutMs ?? DEFAULT_TIMEOUT_MS,
   };
 
-  const envelope = await runWithDeadline(ctx, tool as ToolConfig, input);
+  // The deploy token went to origin with the fetch; an origin that echoes request headers must
+  // not hand it to the caller (src/redact.ts). Redacted before it is answered or cached.
+  const envelope = redactEnvelope(await runWithDeadline(ctx, tool as ToolConfig, input), opts.deployToken);
 
   const ttl = tool.cache ?? {};
   // A tool that does not use the cache says so to everything downstream as well: no-store.

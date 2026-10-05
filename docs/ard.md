@@ -168,7 +168,7 @@ ai_catalog_sie      = 86400
    - **A 404 at both paths**: origin has no manifest. The generated document, as in `synthesize` mode, with the normal `Cache-Control`.
    - **Any other answer** (a redirect relayed by the Worker because it leaves `allowed_origins`, a 4xx such as 410, a 5xx, the Worker's own 502 or 504), and **a body that fails while it is read**: origin failed. The generated document stands in, with `Cache-Control: public, max-age=60, s-maxage=60`, so origin's own document is back within a minute once origin is.
 
-A relayed document is origin's response as it came: the same bytes (a byte order mark included) and the same headers, with `X-Robots-Tag: noindex` added and nothing else; no `Content-Type` is added where origin sent none. Merged output is canonicalised: 2-space indent, object keys sorted, trailing newline. Merging our own output again gives the same bytes.
+A relayed document is origin's response as it came: the same bytes (a byte order mark included) and the same headers, with `X-Robots-Tag: noindex` added and nothing else but the removal of the deploy token (see [Merge routes and the 1 MiB cap](deployment.md#merge-routes-and-the-1-mib-cap)); no `Content-Type` is added where origin sent none. Merged output is canonicalised: 2-space indent, object keys sorted, trailing newline. Merging our own output again gives the same bytes.
 
 ## Advertisements
 

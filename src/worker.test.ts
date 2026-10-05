@@ -2594,3 +2594,198 @@ describe("exec: error messages name no host and carry no runtime text", () => {
     expect(errors.mock.calls.map((c) => String(c[0])).join("\n")).toContain(runtimeMessage);
   });
 });
+
+describe("the deploy token never comes back to the caller", () => {
+  const TOKEN = "SECRET-DEPLOY-TOKEN-0123456789abcdef";
+  const tokenEnv: Env = { ...env, CF_WEBMCP_DEPLOY_TOKEN: TOKEN };
+  /** A backslash-u escape for every character: how a JSON serializer that escapes everything writes the token. */
+  const unicodeEscaped = [...TOKEN].map((c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`).join("");
+
+  /** An origin that answers by path, with the token header it received at hand (an echo endpoint). */
+  function echoOrigin(answers: Record<string, (token: string) => Response>) {
+    const seen: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const req = new Request(input as RequestInfo, init);
+        seen.push(req.url);
+        const answer = answers[new URL(req.url).pathname];
+        if (!answer) return new Response("not found", { status: 404 });
+        return answer(req.headers.get("cf-webmcp-deploy-token") ?? "");
+      }),
+    );
+    return seen;
+  }
+
+  async function exec(deps: ReturnType<typeof makeDeps>, tool: string, input: Record<string, unknown>, e: Env = tokenEnv) {
+    const res = await call(
+      createHandler(deps),
+      `https://example.com/_webmcp/exec/${tool}`,
+      { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input) },
+      e,
+    );
+    return { status: res.status, body: await res.text() };
+  }
+
+  const tools = makeDeps({
+    tools: [
+      {
+        name: "echo_get",
+        description: "d",
+        input_schema: { type: "object", properties: { path: { type: "string" } } },
+        executor: { type: "http_get", url_template: "https://example.com{{path}}" },
+      },
+      { name: "echo_json", description: "d", executor: { type: "http_json", url_template: "https://example.com/api/echo" } },
+      { name: "echo_dom", description: "d", executor: { type: "dom_extract", url_template: "https://example.com/page", selector: "main" } },
+      { name: "echo_rss", description: "d", executor: { type: "rss_feed", feed_url: "https://example.com/feed.xml" } },
+      {
+        name: "echo_sitemap",
+        description: "d",
+        input_schema: { type: "object", properties: { query: { type: "string" } } },
+        executor: { type: "sitemap_filter", sitemap_url: "https://example.com/sitemap.xml" },
+      },
+    ],
+  });
+
+  const origin = () =>
+    echoOrigin({
+      "/echo": (t) => new Response(`cf-webmcp-deploy-token: ${t}\n`, { headers: { "content-type": "text/plain" } }),
+      "/echo.json": (t) =>
+        new Response(JSON.stringify({ headers: { "cf-webmcp-deploy-token": t } }), { headers: { "content-type": "application/json" } }),
+      "/api/echo": (t) =>
+        new Response(`{"plain":"${t}","escaped":"${t === TOKEN ? unicodeEscaped : t}"}`, { headers: { "content-type": "application/json" } }),
+      "/page": (t) => new Response(`<html><body><main>token ${t} end</main></body></html>`, { headers: { "content-type": "text/html" } }),
+      "/feed.xml": (t) =>
+        new Response(`<rss><channel><item><title>${t}</title><link>https://example.com/p?t=${t}</link></item></channel></rss>`, {
+          headers: { "content-type": "application/rss+xml" },
+        }),
+      "/sitemap.xml": (t) =>
+        new Response(`<urlset><url><loc>https://example.com/p?t=${t}</loc></url></urlset>`, { headers: { "content-type": "application/xml" } }),
+    });
+
+  it.each([
+    ["http_get, a text body", "echo_get", { path: "/echo" }],
+    ["http_get, a JSON body", "echo_get", { path: "/echo.json" }],
+    ["http_json, the token as written and unicode-escaped", "echo_json", {}],
+    ["dom_extract", "echo_dom", {}],
+    ["rss_feed", "echo_rss", {}],
+    ["sitemap_filter", "echo_sitemap", { query: "example" }],
+  ])("%s: the token in origin's answer is replaced by [redacted]", async (_label, tool, input) => {
+    const seen = origin();
+
+    const { status, body } = await exec(tools, tool, input);
+
+    expect(seen.length).toBe(1);
+    expect(status).toBe(200);
+    expect(body).not.toContain(TOKEN);
+    expect(body).not.toContain(unicodeEscaped);
+    expect(body).toContain("[redacted]");
+  });
+
+  it("http_json: an escaped token is decoded by the parse and caught in the answer", async () => {
+    origin();
+    const deps = makeDeps({
+      tools: [{ name: "echo_json_decoded", description: "d", executor: { type: "http_json", url_template: "https://example.com/api/echo" } }],
+    });
+    const { body } = await exec(deps, "echo_json_decoded", {});
+    expect(JSON.parse(body).data).toEqual({ plain: "[redacted]", escaped: "[redacted]" });
+  });
+
+  it("with no token set nothing is replaced", async () => {
+    origin();
+    const noToken = makeDeps({
+      tools: [
+        {
+          name: "echo_get_no_token",
+          description: "d",
+          input_schema: { type: "object", properties: { path: { type: "string" } } },
+          executor: { type: "http_get", url_template: "https://example.com{{path}}" },
+        },
+      ],
+    });
+    const { body } = await exec(noToken, "echo_get_no_token", { path: "/echo" }, env);
+    expect(JSON.parse(body).data.body).toBe("cf-webmcp-deploy-token: \n");
+  });
+
+  it("llms.txt in merge mode: the token in origin's file and in its headers does not come back", async () => {
+    echoOrigin({
+      "/llms.txt": (t) => new Response(`# Site\nEchoed: ${t}\n`, { headers: { "content-type": "text/plain", "x-echo": t } }),
+    });
+    const res = await call(createHandler(makeDeps({ llms_txt: { mode: "merge" } })), "https://example.com/llms.txt", undefined, tokenEnv);
+    const body = await res.text();
+
+    expect(res.status).toBe(200);
+    expect(body).toContain("Echoed: [redacted]");
+    expect(body).toContain("cf-webmcp:begin");
+    expect(body).not.toContain(TOKEN);
+    expect([...res.headers.values()].join("\n")).not.toContain(TOKEN);
+  });
+
+  it("agents.md in merge mode: the same", async () => {
+    echoOrigin({
+      "/.well-known/agents.md": (t) => new Response(`# Agents\n${t}\n`, { headers: { "content-type": "text/markdown", "x-echo": t } }),
+    });
+    const res = await call(
+      createHandler(makeDeps({ agents_md: { mode: "merge" } })),
+      "https://example.com/.well-known/agents.md",
+      undefined,
+      tokenEnv,
+    );
+    const body = await res.text();
+
+    expect(body).toContain("# Agents\n[redacted]");
+    expect(body).not.toContain(TOKEN);
+    expect(res.headers.get("x-echo")).toBeNull();
+    expect(res.headers.get("x-robots-tag")).toBe("noindex");
+  });
+
+  it("an origin answer a merge route relays as it came (a 500 debug page that lists the request headers)", async () => {
+    echoOrigin({
+      "/robots.txt": (t) =>
+        new Response(`<html><body><pre>HTTP_CF_WEBMCP_DEPLOY_TOKEN = ${t}</pre></body></html>`, {
+          status: 500,
+          headers: { "content-type": "text/html", "x-debug-token": t },
+        }),
+    });
+    const res = await call(createHandler(makeDeps()), "https://example.com/robots.txt", undefined, tokenEnv);
+    const body = await res.text();
+
+    expect(res.status).toBe(500);
+    expect(body).toContain("HTTP_CF_WEBMCP_DEPLOY_TOKEN = [redacted]");
+    expect(body).not.toContain(TOKEN);
+    expect(res.headers.get("x-debug-token")).toBeNull();
+    expect(res.headers.get("content-type")).toBe("text/html");
+  });
+
+  it("a file over the 1 MiB merge cap, relayed as a stream: the token in its tail is replaced, the rest arrives whole", async () => {
+    const filler = "x".repeat(1024 * 1024 + 10);
+    echoOrigin({
+      "/llms.txt": (t) => {
+        const text = `${filler}\ntoken=${t}\nend\n`;
+        return new Response(text, { headers: { "content-type": "text/plain", "content-length": String(text.length) } });
+      },
+    });
+    const res = await call(createHandler(makeDeps({ llms_txt: { mode: "merge" } })), "https://example.com/llms.txt", undefined, tokenEnv);
+    const body = await res.text();
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-length")).toBeNull();
+    expect(body).toBe(`${filler}\ntoken=[redacted]\nend\n`);
+    expect(body).not.toContain("cf-webmcp:begin");
+  });
+
+  it("the API catalog in merge mode: a token origin wrote with JSON escapes is caught after the merge decodes it", async () => {
+    echoOrigin({
+      "/.well-known/api-catalog": () =>
+        new Response(`{"linkset":[{"anchor":"https://example.com/${unicodeEscaped}"}]}`, {
+          headers: { "content-type": "application/linkset+json" },
+        }),
+    });
+    const res = await call(createHandler(makeDeps()), "https://example.com/.well-known/api-catalog", undefined, tokenEnv);
+    const body = await res.text();
+
+    expect(res.status).toBe(200);
+    expect(body).toContain("https://example.com/[redacted]");
+    expect(body).not.toContain(TOKEN);
+  });
+});

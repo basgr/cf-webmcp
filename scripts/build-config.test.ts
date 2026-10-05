@@ -3045,3 +3045,82 @@ paths       = ${patterns}
     expect(globWarnings()).toEqual([]);
   });
 });
+
+describe("a url_template whose first path placeholder sits at the root gets a warning: any origin path is reachable with the deploy token", () => {
+  const rootWarnings = () =>
+    (console.warn as unknown as { mock: { calls: unknown[][] } }).mock.calls
+      .map((c) => String(c[0]))
+      .filter((m) => m.includes("any path on"));
+  const PATH_PROPERTY = '[tools.input_schema.properties.path]\n    type = "string"';
+  const withTool = (template: string, executor = "http_get", property = PATH_PROPERTY) => `${MINIMAL}
+[[tools]]
+name        = "get_page"
+description = "Fetch a page."
+
+  [tools.input_schema]
+  type = "object"
+
+    ${property}
+
+  [tools.executor]
+  type         = "${executor}"
+  url_template = ${JSON.stringify(template)}
+`;
+
+  it.each([
+    ["no slash before the placeholder", "https://example.com{{path}}", "http_get"],
+    ["a slash before the placeholder", "https://example.com/{{path}}", "http_get"],
+    ["a suffix after the placeholder", "https://example.com/{{path}}.json", "http_json"],
+    ["a default", "https://example.com/{{path|default:index}}", "dom_extract"],
+  ])("warns for %s, naming the tool and the placeholder, as advice, and still builds", async (_label, template, executor) => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { files } = await runBuild(await writeToml("root-warn.toml", withTool(template, executor)));
+
+    expect(files).toHaveProperty("config.ts");
+    const warnings = rootWarnings();
+    expect(warnings).toHaveLength(1);
+    const text = warnings[0]!;
+    expect(text).toMatch(/^\[build-config\] tool "get_page" \(/);
+    expect(text).toContain(`(${executor})`);
+    expect(text).toContain("{{path}}");
+    expect(text).toContain("any path on https://example.com");
+    expect(text).toContain("deploy-token headers");
+    expect(text).toContain("[redacted]");
+    expect(text).toMatch(/narrow the template to a fixed path prefix/i);
+  });
+
+  it("suggests a prefix on the template's own origin", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    await runBuild(await writeToml("root-suggest.toml", withTool("https://example.com{{path}}")));
+    expect(rootWarnings()[0]).toContain("https://example.com/docs/{{path}}");
+  });
+
+  it.each([
+    ["a fixed path prefix", "https://example.com/blog/{{path}}", PATH_PROPERTY],
+    ["a placeholder in the query only", "https://example.com/?q={{path}}", PATH_PROPERTY],
+    ["a map: placeholder (the publisher's own values)", "https://example.com/{{path|map:a=docs,b=blog}}", PATH_PROPERTY],
+    ["an enum property (the publisher's own values)", "https://example.com/{{path}}", `${PATH_PROPERTY}\n    enum = ["docs", "blog"]`],
+  ])("is silent for %s", async (_label, template, property) => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    await runBuild(await writeToml("root-quiet.toml", withTool(template, "http_get", property)));
+    expect(rootWarnings()).toEqual([]);
+  });
+
+  it("warns for the default and example-site templates (get_page on purpose) and not for WordPress or WooCommerce, which all build", async () => {
+    const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+    const seen: Record<string, number> = {};
+    for (const rel of ["templates/default.toml", "templates/example-site/webmcp.toml", "templates/wordpress.toml", "templates/woocommerce.toml"]) {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      await fs.rm(path.join(tmpDir, "out"), { recursive: true, force: true });
+      await expect(runBuild(path.join(repo, rel))).resolves.toBeDefined();
+      seen[rel] = rootWarnings().length;
+      warn.mockRestore();
+    }
+    expect(seen).toEqual({
+      "templates/default.toml": 1,
+      "templates/example-site/webmcp.toml": 1,
+      "templates/wordpress.toml": 0,
+      "templates/woocommerce.toml": 0,
+    });
+  });
+});
