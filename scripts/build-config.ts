@@ -418,20 +418,27 @@ function buildBootstrap(config: Config, configHash: string): string {
   var controllers = [];
   // The names this script has registered, kept for the whole page and not only
   // for this run: the script can run more than once on a page (a second tag,
-  // Turbo / htmx / pjax re-running body scripts, a build from before an upgrade
-  // next to one after it), and a second registration of a name kills the
-  // renderer. A non-enumerable property under a constant key, first on the host
-  // object, else on document; only if neither can hold one is it local to this
-  // run. Looked up at the moment of registering, so it also covers a getTools()
-  // answer that was taken before another run registered.
-  function existingRegistry(holder) {
+  // Turbo / htmx / pjax re-running body scripts, two builds from this version on
+  // such as a cached bootstrap next to a fresh one), and a second registration of
+  // a name kills the renderer. A non-enumerable property under a constant key,
+  // first on the host object, else on document; only if neither holder has the
+  // key and neither can take it is it local to this run. Looked up at the moment
+  // of registering, so it also covers a getTools() answer that was taken before
+  // another run registered. The page's own scripts can set the key first, to
+  // anything: see registerAll for what happens then.
+  function inspectHolder(holder) {
+    var state = { registry: null, taken: false };
     try {
       if (holder && Object.prototype.hasOwnProperty.call(holder, REGISTRY_KEY)) {
+        state.taken = true;
         var found = holder[REGISTRY_KEY];
-        if (found && typeof found === 'object') return found;
+        if (found && typeof found === 'object') state.registry = found;
       }
-    } catch (e) {}
-    return null;
+    } catch (e) {
+      // Cannot even ask: the holder is hostile. Treat the key as held by the page.
+      state.taken = true;
+    }
+    return state;
   }
   function newRegistry(holder) {
     try {
@@ -445,26 +452,55 @@ function buildBootstrap(config: Config, configHash: string): string {
   }
   var holders = [ctx];
   if (typeof document !== 'undefined') holders.push(document);
+  var states = [];
   var registered = null;
+  var taken = false;
   var h;
-  for (h = 0; h < holders.length && !registered; h++) registered = existingRegistry(holders[h]);
-  for (h = 0; h < holders.length && !registered; h++) registered = newRegistry(holders[h]);
-  if (!registered) registered = Object.create(null);
+  for (h = 0; h < holders.length; h++) {
+    states.push(inspectHolder(holders[h]));
+    if (states[h].taken) taken = true;
+    if (!registered && states[h].registry) registered = states[h].registry;
+  }
+  // A holder whose key the page already holds is left alone (not redefined).
+  for (h = 0; h < holders.length && !registered; h++) {
+    if (!states[h].taken) registered = newRegistry(holders[h]);
+  }
+  if (!registered) {
+    // A key the page holds, with no registry we can use behind it, is the page's
+    // decision. An empty frozen object keeps no record, so no registration is
+    // ever kept (see registerAll) and none is made: registering without a record
+    // is how a second run kills the renderer. A run-local object is only for
+    // the case where no holder has the key at all and none could take it.
+    registered = taken ? Object.freeze(Object.create(null)) : Object.create(null);
+  }
   var done = false;
   function warnFailed(name, e) {
-    if (typeof console !== 'undefined' && console.warn) {
-      console.warn('cf-webmcp: failed to register tool', name, e);
-    }
+    try {
+      if (typeof console !== 'undefined' && console.warn) {
+        console.warn('cf-webmcp: failed to register tool', name, e);
+      }
+    } catch (err) {}
   }
   // Registers every tool whose name is not in "known". Runs once: every path
   // below (getTools missing, throwing, rejecting, resolving) ends here, and the
-  // flag makes a second arrival a no-op.
+  // flag makes a second arrival a no-op. Nothing in here may throw: it also runs
+  // from the timer and from promise handlers.
   function registerAll(known) {
     if (done) return;
     done = true;
     TOOLS.forEach(function (t) {
-      if (known[t.name] || registered[t.name]) return;
-      registered[t.name] = true;
+      // Check the name, record it, and register only if the record reads back as
+      // kept. The registry can be an object the page controls: one that throws,
+      // is frozen, or drops writes. Then the tool is not registered, because a
+      // registration with no record is one a later run cannot see.
+      var skip = true;
+      try {
+        if (!known[t.name] && !registered[t.name]) {
+          registered[t.name] = true;
+          skip = registered[t.name] !== true;
+        }
+      } catch (e) {}
+      if (skip) return;
       try {
         var toolDef = {
           name: t.name,
@@ -512,9 +548,15 @@ function buildBootstrap(config: Config, configHash: string): string {
     // after the timeout, register against the [toolname] set alone. The done flag
     // makes a getTools() answer that comes later a no-op.
     var timer = null;
-    if (typeof setTimeout === 'function') timer = setTimeout(registerFromDeclared, GETTOOLS_TIMEOUT_MS);
+    try {
+      if (typeof setTimeout === 'function') timer = setTimeout(registerFromDeclared, GETTOOLS_TIMEOUT_MS);
+    } catch (e) {
+      timer = null;
+    }
     var stopTimer = function () {
-      if (timer !== null && typeof clearTimeout === 'function') clearTimeout(timer);
+      try {
+        if (timer !== null && typeof clearTimeout === 'function') clearTimeout(timer);
+      } catch (e) {}
       timer = null;
     };
     pending.then(function (list) {

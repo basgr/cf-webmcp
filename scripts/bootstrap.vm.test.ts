@@ -117,8 +117,60 @@ interface Options {
   location?: { origin: string; protocol: string; host: string };
   /** Make the places the page-wide registry would live unusable, one more step each. */
   lockdown?: "ctx-sealed" | "ctx-define-throws" | "ctx-key-taken" | "ctx-and-document-sealed";
-  /** Provide setTimeout and clearTimeout, as fakes the test fires by hand (default true). */
-  timers?: boolean;
+  /**
+   * Provide setTimeout and clearTimeout, as fakes the test fires by hand (default true).
+   * "throw" provides setTimeout and clearTimeout functions that throw when called.
+   */
+  timers?: boolean | "throw";
+  /**
+   * A registry the page set before the script ran, under the registry key, on the host object
+   * (and, for "string-on-both", on document too), as a non-configurable property the script
+   * cannot replace:
+   * - "getter-throws": an object whose read of one name (list_posts) throws;
+   * - "proxy-throws": a Proxy that throws on every get and set;
+   * - "frozen": a frozen empty object;
+   * - "setter-drops": a Proxy that reports success for a write and keeps nothing;
+   * - "string-on-both": a string, which is no registry, on the host object and on document.
+   */
+  preset?: "getter-throws" | "proxy-throws" | "frozen" | "setter-drops" | "string-on-both";
+  /** console.warn and console.info throw. */
+  consoleThrows?: boolean;
+}
+
+type Preset = NonNullable<Options["preset"]>;
+
+function presetValue(kind: Preset): unknown {
+  switch (kind) {
+    case "getter-throws": {
+      const registry = Object.create(null) as Record<string, unknown>;
+      Object.defineProperty(registry, "list_posts", {
+        enumerable: true,
+        configurable: true,
+        get() {
+          throw new Error("hostile getter");
+        },
+      });
+      return registry;
+    }
+    case "proxy-throws":
+      return new Proxy(
+        {},
+        {
+          get() {
+            throw new Error("hostile get");
+          },
+          set() {
+            throw new Error("hostile set");
+          },
+        },
+      );
+    case "frozen":
+      return Object.freeze({});
+    case "setter-drops":
+      return new Proxy({}, { set: () => true });
+    case "string-on-both":
+      return "blocked by the page";
+  }
 }
 
 interface RegisterCall {
@@ -281,6 +333,22 @@ function createPage(o: Options = {}): Page {
     if (o.lockdown === "ctx-key-taken") {
       Object.defineProperty(mc, REGISTRY_KEY, { value: "taken", enumerable: false, configurable: false, writable: false });
     }
+    if (o.preset !== undefined) {
+      Object.defineProperty(mc, REGISTRY_KEY, {
+        value: presetValue(o.preset),
+        enumerable: false,
+        configurable: false,
+        writable: false,
+      });
+      if (o.preset === "string-on-both") {
+        Object.defineProperty(doc, REGISTRY_KEY, {
+          value: presetValue(o.preset),
+          enumerable: false,
+          configurable: false,
+          writable: false,
+        });
+      }
+    }
     modelContext = mc;
     doc["modelContext"] =
       o.lockdown === "ctx-define-throws"
@@ -307,8 +375,14 @@ function createPage(o: Options = {}): Page {
     document: doc,
     navigator: nav,
     console: {
-      warn: (...args: unknown[]) => void run.warns.push(args),
-      info: (...args: unknown[]) => void run.infos.push(args),
+      warn: (...args: unknown[]) => {
+        if (o.consoleThrows) throw new Error("console.warn refused");
+        run.warns.push(args);
+      },
+      info: (...args: unknown[]) => {
+        if (o.consoleThrows) throw new Error("console.info refused");
+        run.infos.push(args);
+      },
     },
     fetch: (url: string, init: Record<string, unknown>) => {
       run.fetchCalls.push({ url, init });
@@ -317,7 +391,14 @@ function createPage(o: Options = {}): Page {
     AbortController,
   });
   if (o.location !== undefined) context["location"] = o.location;
-  if (o.timers !== false) {
+  if (o.timers === "throw") {
+    context["setTimeout"] = (): number => {
+      throw new Error("setTimeout refused");
+    };
+    context["clearTimeout"] = (): void => {
+      throw new Error("clearTimeout refused");
+    };
+  } else if (o.timers !== false) {
     context["setTimeout"] = (fn: () => void, ms: number): number => {
       const t: Timer = { id: run.timers.length + 1, fn, ms, cleared: false, fired: false };
       run.timers.push(t);
@@ -690,6 +771,113 @@ describe("generated bootstrap in a vm: the page-wide registry", () => {
     await flush();
     expect(page.run.duplicates).toEqual([]);
     expect(page.run.registerCalls).toHaveLength(3);
+  });
+});
+
+describe("generated bootstrap in a vm: a registry the page set first", () => {
+  // A script of the page's own can define the registry key before ours runs, as a property we
+  // cannot replace. Whatever it put there, our script must neither throw nor register a name a
+  // second time. Where the registry is unusable (it cannot hold a write), the page has in effect
+  // told us not to register, and nothing is registered.
+  const hostile: Array<[label: string, preset: Preset, registeredByTwoRuns: string[]]> = [
+    ["an object with a getter that throws for one name", "getter-throws", ["search_pages", "get_page"]],
+    ["a Proxy that throws on get and set", "proxy-throws", []],
+    ["a frozen object", "frozen", []],
+    ["an object whose setter drops the write", "setter-drops", []],
+    ["a non-object on the host object and on document", "string-on-both", []],
+  ];
+
+  it.each(hostile)(
+    "%s: two runs, nothing thrown, no duplicate, no unhandled rejection",
+    async (_label, preset, expected) => {
+      const page = createPage({ getTools: "absent", preset });
+      const seen = await watchUnhandled(async () => {
+        expect(() => page.runScript(bootstrap)).not.toThrow();
+        expect(() => page.runScript(bootstrap)).not.toThrow();
+        await flush();
+      });
+      expect(seen).toEqual([]);
+      expect(page.run.duplicates).toEqual([]);
+      expect(names(page.run)).toEqual(expected);
+      expect(page.run.warns).toEqual([]);
+    },
+  );
+
+  it.each(hostile)(
+    "%s: nothing escapes the timer callback when getTools never settles, and a late answer adds nothing",
+    async (_label, preset, expected) => {
+      const page = createPage({ getTools: "never", preset });
+      const seen = await watchUnhandled(async () => {
+        expect(() => page.runScript(bootstrap)).not.toThrow();
+        expect(() => page.runScript(bootstrap)).not.toThrow();
+        expect(() => page.run.fireTimers()).not.toThrow();
+        for (const settle of page.run.settleGetTools) settle([]);
+        await flush();
+      });
+      expect(seen).toEqual([]);
+      expect(page.run.duplicates).toEqual([]);
+      expect(names(page.run)).toEqual(expected);
+    },
+  );
+
+  it.each(hostile)(
+    "%s: nothing escapes the getTools path either, whether it resolves or rejects",
+    async (_label, preset, expected) => {
+      for (const getTools of ["resolve", "reject", "throw"] as const) {
+        const page = createPage({ getTools, preset, reported: [] });
+        const seen = await watchUnhandled(async () => {
+          expect(() => page.runScript(bootstrap)).not.toThrow();
+          expect(() => page.runScript(bootstrap)).not.toThrow();
+          await flush();
+        });
+        expect(seen, getTools).toEqual([]);
+        expect(page.run.duplicates, getTools).toEqual([]);
+        expect(names(page.run), getTools).toEqual(expected);
+      }
+    },
+  );
+
+  it("uses a registry the page set when it is a plain writable object, and then a second run adds nothing", async () => {
+    const page = createPage({ getTools: "absent" });
+    const mine = Object.create(null);
+    Object.defineProperty(page.modelContext!, REGISTRY_KEY, { value: mine, enumerable: false, configurable: false });
+    page.runScript(bootstrap);
+    page.runScript(bootstrap);
+    await flush();
+    expect(names(page.run)).toEqual(["search_pages", "list_posts", "get_page"]);
+    expect(Object.keys(mine).sort()).toEqual(["get_page", "list_posts", "search_pages"]);
+    expect(page.run.duplicates).toEqual([]);
+  });
+
+  it("still registers when only the host object holds a bad value and document is free (falls to the document)", async () => {
+    const page = createPage({ getTools: "absent", lockdown: "ctx-key-taken" });
+    page.runScript(bootstrap);
+    page.runScript(bootstrap);
+    await flush();
+    expect(names(page.run)).toEqual(["search_pages", "list_posts", "get_page"]);
+    expect(page.run.duplicates).toEqual([]);
+  });
+
+  it("does not let a console that throws stop the registration or escape the script", async () => {
+    const page = createPage({ getTools: "absent", consoleThrows: true, throwRegister: ["search_pages"], rejectRegister: ["list_posts"], bridge: true });
+    const seen = await watchUnhandled(async () => {
+      expect(() => page.runScript(bootstrap)).not.toThrow();
+      await flush();
+    });
+    expect(seen).toEqual([]);
+    expect(names(page.run)).toEqual(["search_pages", "list_posts", "get_page"]);
+  });
+
+  it("does not let a setTimeout or clearTimeout that throws stop the registration", async () => {
+    const resolving = createPage({ getTools: "resolve", timers: "throw" });
+    expect(() => resolving.runScript(bootstrap)).not.toThrow();
+    await flush();
+    expect(names(resolving.run)).toEqual(["list_posts", "get_page"]);
+
+    const rejecting = createPage({ getTools: "reject", timers: "throw" });
+    expect(() => rejecting.runScript(bootstrap)).not.toThrow();
+    await flush();
+    expect(names(rejecting.run)).toEqual(["search_pages", "list_posts", "get_page"]);
   });
 });
 
