@@ -2577,13 +2577,13 @@ describe("landing: diagnostic and copy", () => {
     );
   });
 
-  it("tells the Connected visitor that Chrome 149 exposes the deprecated navigator.modelContext alias", async () => {
+  it("tells the Connected visitor that Chrome 146 to 149 expose the deprecated navigator.modelContext alias", async () => {
     const { files } = await runBuild(await writeToml("ld-connected.toml", MINIMAL));
     const html = files["landing.html"]!;
     const callout = html.slice(html.indexOf('id="state-native"'), html.indexOf('id="state-pair"')).replace(/<[^>]+>/g, "");
     expect(callout).toContain("document.modelContext");
     expect(callout).toContain("navigator.modelContext");
-    expect(callout).toContain("Chrome 149");
+    expect(callout).toContain("Chrome 146 to 149");
   });
 });
 

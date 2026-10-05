@@ -44,7 +44,7 @@ A token that origin already sends on the response is not added a second time, an
 
 In route-only mode the Worker sees only its own paths, so only the landing page carries the tokens. To turn WebMCP on for your other pages, have origin send the `Origin-Trial` header.
 
-Chrome ignores a token it cannot use without saying so. The build decodes each token with a parser modelled on Chrome's (`TrialToken::Extract`) and fails when a token:
+A token that does not fit the page does nothing, and the page gets no error. The build decodes each token with a parser modelled on Chrome's (`TrialToken::Extract`) and fails when a token:
 
 - is malformed;
 - is a third-party token (one issued for a script embedded on other sites; we do not expect Chrome to accept it as a header on a page of the origin it names);
@@ -75,7 +75,7 @@ Without a token, Chrome turns WebMCP on only behind a flag. Use it for local dev
 2. Set the flag to **Enabled**.
 3. Relaunch Chrome.
 
-The screenshot below is from Chrome 148, where the flag also exposed `navigator.modelContextTesting`, the consumer side (`listTools()`, `executeTool(name, jsonArgs)`), and a second flag, `chrome://flags/#devtools-webmcp-support`, added a WebMCP panel to DevTools. cf-webmcp needs neither. Flag names and labels can change between releases.
+The screenshot below is from Chrome 148. There the testing flag's description names the API "and its associated testing interfaces", and a second flag enables "WebMCP support in DevTools". cf-webmcp needs neither. Flag names and labels can change between releases.
 
 ![Chrome flag panel with WebMCP for testing and WebMCP support in DevTools both set to Enabled](images/chrome-flags-webmcp.png)
 
