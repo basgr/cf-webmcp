@@ -6,7 +6,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createHandler, PROXY_ORIGIN_TIMEOUT_MS, type Env } from "./handler";
+import { createHandler, originTarget, PROXY_ORIGIN_TIMEOUT_MS, type Env } from "./handler";
 import { makeDeps, type ConfigOverrides } from "./test-support/config";
 import { expiryInDays, makeOriginTrialToken } from "./test-support/origin-trial";
 
@@ -160,6 +160,140 @@ describe("worker proxy", () => {
 
     expect(body).toMatch(/<p>hi<script[^>]+\/_webmcp\/bootstrap\.test\.js[^>]*><\/script>$/);
     expect(body).toContain('<link rel="webmcp"');
+  });
+});
+
+describe("proxy: a request path never names the host the Worker fetches", () => {
+  interface Seen {
+    url: string;
+    method: string;
+    cookie: string | null;
+    authorization: string | null;
+    body: string | null;
+  }
+
+  /** Record every fetch the Worker makes, whatever its URL, and answer each with an HTML page. */
+  function recordFetches(): Seen[] {
+    const seen: Seen[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const req = new Request(input as RequestInfo, init);
+        seen.push({
+          url: req.url,
+          method: req.method,
+          cookie: req.headers.get("cookie"),
+          authorization: req.headers.get("authorization"),
+          body: req.method === "GET" || req.method === "HEAD" ? null : await req.text(),
+        });
+        return htmlResponse("<html><head></head><body>origin page</body></html>");
+      }),
+    );
+    return seen;
+  }
+
+  const visitorHeaders = { cookie: "session=victim", authorization: "Bearer visitor", accept: "text/html" };
+
+  // Each of these parses to a pathname that starts with "//": resolved against base_url as a
+  // relative reference, it would be a protocol-relative URL naming attacker.example.
+  it.each([
+    "//attacker.example/login",
+    "//attacker.example",
+    "///attacker.example/x",
+    "/\\attacker.example/x",
+    "/.//attacker.example/x",
+    "/..//attacker.example/x",
+    "/%2F%2Fattacker.example/x",
+  ])("GET %s goes to the configured origin with the visitor's path, never to attacker.example", async (path) => {
+    const seen = recordFetches();
+    const handler = createHandler(makeDeps());
+
+    const url = `https://example.com${path}`;
+    const res = await call(handler, url, { headers: visitorHeaders });
+    await res.text();
+
+    if (res.status === 400) {
+      expect(seen).toEqual([]);
+      return;
+    }
+    expect(seen).toHaveLength(1);
+    const target = new URL(seen[0]!.url);
+    expect(target.origin).toBe("https://example.com");
+    expect(target.pathname).toBe(new URL(url).pathname);
+  });
+
+  it("a POST with a body to //attacker.example/collect sends the body and the visitor's headers to the configured origin only", async () => {
+    const seen = recordFetches();
+    const handler = createHandler(makeDeps());
+
+    const res = await call(handler, "https://example.com//attacker.example/collect", {
+      method: "POST",
+      body: "secret=1",
+      headers: { ...visitorHeaders, "content-type": "application/x-www-form-urlencoded" },
+    });
+    await res.text();
+
+    if (res.status === 400) {
+      expect(seen).toEqual([]);
+      return;
+    }
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toEqual({
+      url: "https://example.com//attacker.example/collect",
+      method: "POST",
+      cookie: "session=victim",
+      authorization: "Bearer visitor",
+      body: "secret=1",
+    });
+  });
+
+  it.each([
+    ["an ordinary path", "/blog/post", "https://example.com/blog/post"],
+    ["a path with // in the middle", "/a//b", "https://example.com/a//b"],
+    ["a query string", "/search?q=a%20b&page=2", "https://example.com/search?q=a%20b&page=2"],
+    ["a query string that holds //", "/r?next=//attacker.example/x", "https://example.com/r?next=//attacker.example/x"],
+  ])("leaves %s as it was", async (_label, path, expected) => {
+    const seen = recordFetches();
+    const handler = createHandler(makeDeps());
+
+    const res = await call(handler, `https://example.com${path}`, { headers: visitorHeaders });
+
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain("origin page");
+    expect(seen.map((s) => s.url)).toEqual([expected]);
+    expect(seen[0]!.cookie).toBe("session=victim");
+  });
+
+  it("uses only the origin of a base_url that carries a path, as before: the path is not a prefix", async () => {
+    const seen = recordFetches();
+    const handler = createHandler(
+      makeDeps({ origin: { base_url: "https://origin.example.com/blog/", allowed_origins: ["https://origin.example.com"] } }),
+    );
+
+    await (await call(handler, "https://example.com/about?x=1")).text();
+    await (await call(handler, "https://example.com//attacker.example/x")).text();
+
+    expect(seen.map((s) => s.url)).toEqual([
+      "https://origin.example.com/about?x=1",
+      "https://origin.example.com//attacker.example/x",
+    ]);
+  });
+});
+
+describe("originTarget: the URL on the configured origin for a request's path and query", () => {
+  it("keeps the path and query, and the origin of base_url, whatever the path starts with", () => {
+    expect(originTarget("https://example.com", { pathname: "/a//b", search: "?q=1" })?.href).toBe("https://example.com/a//b?q=1");
+    expect(originTarget("https://example.com", { pathname: "//attacker.example/x", search: "" })?.href).toBe(
+      "https://example.com//attacker.example/x",
+    );
+    expect(originTarget("https://EXAMPLE.com:443/blog/", { pathname: "/x", search: "" })?.href).toBe("https://example.com/x");
+  });
+
+  it("is null for a path that would leave the origin, so nothing is fetched", () => {
+    // A pathname the URL parser never produces for an http(s) request; the guard is the backstop.
+    expect(originTarget("https://example.com", { pathname: "@attacker.example/x", search: "" })).toBeNull();
+    expect(originTarget("https://example.com", { pathname: ".attacker.example/x", search: "" })).toBeNull();
+    expect(originTarget("https://example.com", { pathname: ":8443/x", search: "" })).toBeNull();
   });
 });
 

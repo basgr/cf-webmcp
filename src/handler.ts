@@ -209,7 +209,8 @@ export function createHandler(deps: HandlerDeps): Required<Pick<ExportedHandler<
    * robots.txt routes remove that noindex before they answer (see proxyFailure).
    */
   async function proxyToOrigin(url: URL, env: Env): Promise<Response> {
-    const target = new URL(url.pathname + url.search, config.origin.base_url);
+    const target = originTarget(config.origin.base_url, url);
+    if (target === null) return plainError(400, "bad request path");
     const secretHeaders: Record<string, string> = {};
     if (env.CF_WEBMCP_DEPLOY_TOKEN) {
       secretHeaders["cf-webmcp-bypass"] = "1";
@@ -293,7 +294,10 @@ export function createHandler(deps: HandlerDeps): Required<Pick<ExportedHandler<
 
   async function proxyAndMaybeInject(request: Request, env: Env): Promise<Response> {
     const reqUrl = new URL(request.url);
-    const target = new URL(reqUrl.pathname + reqUrl.search, config.origin.base_url);
+    // Never fetched, and none of the visitor's headers or body sent, when the path would name
+    // another host (see originTarget).
+    const target = originTarget(config.origin.base_url, reqUrl);
+    if (target === null) return plainError(400, "bad request path");
     const suffix = `-${meta.INJECTION_HASH}`;
 
     // A rewritten page carries origin's ETag with `suffix` inside the quotes (see
@@ -400,6 +404,30 @@ export function createHandler(deps: HandlerDeps): Required<Pick<ExportedHandler<
     editValidators?.(headers);
     return new Response(response.body, { status: response.status, headers });
   }
+}
+
+/**
+ * The URL on the configured origin for a request's path and query: the origin of `baseUrl`
+ * (scheme, host and port; a path in base_url is not used, as it never was) followed by the
+ * pathname and search exactly as the request's URL parser wrote them. Null when the result
+ * is not on that origin, so the caller fetches nothing.
+ *
+ * The path is concatenated, never resolved against base_url as a relative reference: a
+ * pathname that starts with "//" (from //host/x, /\host/x, /.//host/x or /..//host/x) is a
+ * protocol-relative reference, which names its own host, so `new URL(pathname, base)` would
+ * send the visitor's request, cookies and body to whatever host the path names. Behind an
+ * http(s) origin a pathname always starts with "/", so the check after the concatenation
+ * never fails for a real request; it is the backstop that keeps this so.
+ */
+export function originTarget(baseUrl: string, path: { pathname: string; search: string }): URL | null {
+  const origin = new URL(baseUrl).origin;
+  let target: URL;
+  try {
+    target = new URL(origin + path.pathname + path.search);
+  } catch {
+    return null;
+  }
+  return target.origin === origin ? target : null;
 }
 
 /** An entity tag (RFC 9110 section 8.8.3): weak or strong, and the opaque tag without its quotes. */
