@@ -15,7 +15,8 @@
  *              go to origin as the JSON body (content-type application/json): `{}` for a tool
  *              that declares none. Anything else the caller sent (validation tolerates unknown
  *              properties) stays out of the body, a `__proto__` entry included. The URL is
- *              resolved from the whole input. A 307 or 308 replays the body; a 301, 302 or 303
+ *              resolved from the same input, which the exec route has already cut down to the
+ *              declared properties (src/routes/exec.ts). A 307 or 308 replays the body; a 301, 302 or 303
  *              turns the follow-up into a bodyless GET (src/safe-fetch.ts). The exec route does
  *              not cache a POST tool unless [tools.cache] sets a positive s_maxage
  *              (src/routes/exec.ts).

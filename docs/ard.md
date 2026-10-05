@@ -17,7 +17,7 @@ ARD defines a discovery envelope for "agentic resources": anything an AI agent c
 
 cf-webmcp implements the **publisher half only**: one manifest with one entry derived from the site's Agent Skill. No registry API, no trust manifest, no DNS records.
 
-References: [ards-project/ard-spec](https://github.com/ards-project/ard-spec) (`spec/ard.md`, v0.91), [agenticresourcediscovery.org](https://agenticresourcediscovery.org/).
+References: [ards-project/ard-spec](https://github.com/ards-project/ard-spec) (`spec/ard.md`, v0.91; cf-webmcp follows the spec as of commit `aa3e598bb7`, which carries no release tag), [agenticresourcediscovery.org](https://agenticresourcediscovery.org/).
 
 ## Paths: `ard.json` and the predecessor `ai-catalog.json`
 
@@ -74,11 +74,11 @@ Keys are sorted and the output is byte-stable for one config.
 - **`type`** is `[ai_catalog].skill_type`, by default `application/ai-skill+md`, the type of the skill entry example in v0.91 section 4.4 (see [the spec notes](#what-the-spec-fixes-and-what-it-leaves-open)).
 - **`url`** is the absolute URL of the SKILL.md.
 - **`displayName`** is `[site].name`, the human-readable name, not the slug.
-
-A single trailing dot on the host is dropped from both identifiers. With the feature on, a `[site].public_url` that is not an absolute `http` or `https` URL (`localhost:8787`, `example.com`), or a port outside 1 to 65535, fails the build with an error that names the field and the value. ARD v0.91 wants the publisher to be a fully qualified domain name: when `[site].domain` is `localhost`, an IP address, a single label or has an empty label, the build prints a warning and builds the manifest anyway. A name under `.localhost` (`agent.localhost`) is the URN naming guide's own placeholder for local work and gets no warning.
 - **`description`** is `[agent_skills].description`, else `[site].description`; omitted when both are empty.
 - **`capabilities`** lists the `[[tools]]` and `[[forms]]` names.
 - **`representativeQueries`** and **`tags`** come from `[ai_catalog]` and are omitted when empty. ARD recommends two to five queries; registries build their search index from them.
+
+A single trailing dot on the host is dropped from both identifiers. With the feature on, a `[site].domain` whose port is outside 1 to 65535 fails the build with an error that names the field and the value. (A `[site].public_url` that is not an `http` or `https` origin, such as `localhost:8787` or `example.com`, fails validation for every config.) ARD v0.91 wants the publisher to be a fully qualified domain name: when `[site].domain` is `localhost`, an IP address, a single label or has an empty label, the build prints a warning and builds the manifest anyway. A name under `.localhost` (`agent.localhost`) is the URN naming guide's own placeholder for local work and gets no warning.
 
 With `[features].agent_skills = false` the manifest has `"entries": []`, and the build prints a warning.
 

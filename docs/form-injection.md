@@ -13,7 +13,7 @@ For each `[[forms]]` block that matches the current request path, the Worker sta
 - **`toolautosubmit`** on the matched `<form>` element (only when `autosubmit = true`)
 - **`toolparamdescription`** on each matched input/select/textarea inside the form
 
-Browsers that implement the W3C draft (Chromium with the flag) parse these attributes during HTML parse and expose the form as an agent-callable tool via the WebMCP runtime (`document.modelContext`) automatically. No JS work on the publisher side.
+Browsers that implement the declarative part of the W3C draft (Chrome with WebMCP on and Cloudflare Kitesurf; see [`docs/browser-support.md`](browser-support.md)) parse these attributes during HTML parse and expose the form as an agent-callable tool via the WebMCP runtime (`document.modelContext`) automatically. No JS work on the publisher side.
 
 ## Config
 
@@ -60,7 +60,7 @@ The selectors must work in Cloudflare HTMLRewriter, which supports a subset of C
 - Descendant (space) and child (`>`) combinators. The form selector and each param selector are joined with a descendant combinator: `form#contact input[name=email]`. A param selector may start with `>` to mean a direct child: `> input[name=email]`.
 - `:nth-child()` and `:nth-of-type()` with `an+b`, `odd`, `even` or a number (no `of S` clause), `:first-child` and `:first-of-type` (no argument), and `:not(...)` with a non-empty argument
 
-Not supported: the sibling combinators `+` and `~`, pseudo-elements (`::before`), `:has()`, every other pseudo-class (`:hover`, `:last-child`, `:is()`), comma lists, comments, namespaces (`svg|rect`) and backslash escapes. Quoted attribute values may contain any of these characters (`[action="/a,b"]` is fine), except backslashes and line breaks. Where you would escape a character in an identifier, match the attribute instead: `[class~="sm:flex"]` for a Tailwind class, `[id="123"]` for an id that starts with a digit. A selector may be at most 1024 characters and 64 compounds long.
+Not supported: the sibling combinators `+` and `~`, pseudo-elements (`::before`), `:has()`, every other pseudo-class (`:hover`, `:last-child`, `:is()`), comma lists, comments, namespaces (`svg|rect`) and backslash escapes. Quoted attribute values may contain any of these characters (`[action="/a,b"]` is fine), except backslashes and line breaks. Where you would escape a character in an identifier, match the attribute instead: `[class~="sm:flex"]` for a Tailwind class, `[id="123"]` for an id that starts with a digit. A selector may be at most 1024 characters and 64 compounds long. Every compound counts toward the 64, also those inside `:not()` and in each entry of a list (`:not(.a, .b)` holds two, and so does a `dom_extract` list such as `main, article`), and `:not()` may nest at most 16 deep. The form selector and each param selector are checked on their own.
 
 The build checks every selector against exactly this list and fails with a message naming the problem, so a typo is caught when you build rather than on live pages. The check is deliberately strict: it accepts only what Cloudflare's HTMLRewriter is known to take. It is a safeguard, not a guarantee; if a selector still gets past it and HTMLRewriter rejects it at request time, the Worker skips only that form (or that one param), logs a line naming it, and injects everything else on the page as usual. If your form does not have a stable id/class/attribute, the easiest fix is to add one on the origin side.
 
@@ -96,7 +96,7 @@ This applies attribute-by-attribute: if the form has `toolname="foo"` but no `to
 A WebMCP tool name may be registered only once per page. Registering the same name twice - for example a `[[tools]]` entry and a `[[forms]]` block that share a name, both landing on the same page - kills the Chrome renderer (`bad_message` 345, `RFHI_WEBMCP_REGISTER_DUPLICATE_TOOL_NAME`), a Mojo IPC validation kill that no `try/catch` can trap. cf-webmcp guards this on both ends:
 
 - **Build refuses collisions.** The build fails if a name is duplicated within `[[tools]]`, duplicated within `[[forms]]`, or shared between the two. Pick distinct names.
-- **Bootstrap de-dupes hand-stamps.** The injected script skips registering any tool whose name is already on the page as a `<form toolname>` (including names you hand-stamped in origin HTML, which the build cannot see). The declarative form wins; the bootstrap stands down for that name. It also skips a name that `getTools()` lists, when the browser has it (if `getTools()` has not answered after 1500 ms it goes by the `<form toolname>` elements alone), and a name that an earlier run of the script on the same page registered. A name another script registers after these checks is not seen.
+- **Bootstrap de-dupes hand-stamps.** The injected script skips registering any tool whose name is already on the page as a `<form toolname>` (including names you hand-stamped in origin HTML, which the build cannot see). The declarative form wins; the bootstrap stands down for that name. It also skips a name that `getTools()` lists, when the browser has it (if `getTools()` has not answered after 1500 ms it registers without that answer, still skipping the `toolname` elements and its own earlier registrations), and a name that an earlier run of the script on the same page registered. A name another script registers after these checks is not seen.
 
 ## Side effects: `SubmitEvent.agentInvoked` and `SubmitEvent.respondWith`
 
@@ -157,7 +157,7 @@ After deploy, visit a page that has a form-injection block applied to it and vie
 curl -s https://yourdomain.com/contact | grep -i 'toolname'
 ```
 
-You should see the injected `toolname`, `tooldescription`, and optional `toolautosubmit` on the form element, and `toolparamdescription` on each matched input. Then test the runtime path with the diagnostic disclosure on `/mcp` - if `Connected` state is shown, your tools (including the form-injected ones) are visible to `navigator.modelContextTesting.listTools()`.
+You should see the injected `toolname`, `tooldescription`, and optional `toolautosubmit` on the form element, and `toolparamdescription` on each matched input. Then open that page in a browser with WebMCP on. Where the browser exposes the consumer side, `navigator.modelContextTesting.listTools()` lists the page's tools (the testing flag and Browser Run lab sessions expose it, see [`docs/browser-support.md`](browser-support.md)). The diagnostic on `/mcp` cannot show form tools: it lists the tools registered on the landing page itself, and forms are stamped only on the origin pages they match.
 
 ## What this is not
 

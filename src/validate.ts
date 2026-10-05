@@ -38,10 +38,12 @@ export interface DeclaredProperties {
 /**
  * The properties of a validated input that the tool's schema declares, in a fresh object: own
  * entries of `input` whose name is an own key of `schema.properties`. validateInput tolerates
- * unknown properties (the URL template may read them), so this is what may leave the Worker
- * as a body: an undeclared property, and a `__proto__`, `constructor` or `toString` entry, never
- * does. Such a name cannot be declared (the build refuses it), and `__proto__` is skipped here
- * too, so it cannot become the prototype of the result.
+ * unknown properties, so the exec route passes its result through this before the executor, the
+ * URL template or the cache key sees it, and the http_json executor builds a POST body with it
+ * again. An undeclared property never leaves the Worker, a name every object inherits
+ * (`constructor`, `toString`) included. `__proto__` and `constructor` cannot be declared (the
+ * build refuses them), and `__proto__` is skipped here too, so it cannot become the prototype
+ * of the result.
  */
 export function declaredProperties(schema: DeclaredProperties, input: Record<string, unknown>): Record<string, unknown> {
   const declared = schema.properties ?? {};

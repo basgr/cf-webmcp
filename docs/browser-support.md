@@ -1,95 +1,121 @@
 # Browser support
 
-WebMCP is the W3C draft proposed by the Microsoft and Google authors at `webmachinelearning/webmcp`. As of mid-2026, no browser ships it on by default. Chrome and Edge expose it behind feature flags. Firefox and Safari do not ship it yet.
+WebMCP is the W3C draft at [`webmachinelearning/webmcp`](https://github.com/webmachinelearning/webmcp). A page registers tools with the browser's WebMCP runtime at `document.modelContext`. cf-webmcp's injected bootstrap does that for the `[[tools]]` in your TOML, and a browser that implements the declarative part of the draft turns the form attributes stamped from `[[forms]]` into tools of its own.
 
-This means: a visitor who lands on a `cf-webmcp`-equipped site in a default-configured browser sees the **disabled** state (or the **pair** state if the site enables the fallback widget). The browser-native flow only fires when the visitor has opted in via the flags below.
+Where it runs, as of October 2026:
 
-This will change. Once Chrome promotes the API to a stable channel and Edge follows, the flags disappear and the producer API just works. Track upstream at [`webmachinelearning/webmcp`](https://github.com/webmachinelearning/webmcp).
+| Runtime | How WebMCP is turned on |
+|---------|-------------------------|
+| Chrome 149 and later | The WebMCP origin trial: the site sends a trial token, the visitor does nothing. See [The Chrome origin trial](#the-chrome-origin-trial). |
+| Chrome without a token | The flag `chrome://flags/#enable-webmcp-testing`, for local development and testing. See [Local development: the flag](#local-development-the-flag). |
+| Cloudflare Kitesurf | Supports `document.modelContext` and runs declarative form tools. See [Cloudflare Kitesurf and Browser Run](#cloudflare-kitesurf-and-browser-run). |
+| Cloudflare Browser Run lab sessions | Expose `navigator.modelContextTesting`, the consumer side. |
 
-## Required flags (Chrome / Edge / Chromium)
+We have not checked other browsers. A visitor whose browser has no WebMCP runtime sees the landing page's "Not connected" state, or "Pairing required" when the site has the fallback widget on (see [Visitors without WebMCP](#visitors-without-webmcp)).
 
-Open `chrome://flags` (or `edge://flags`) and enable:
+## The API the bootstrap uses
 
-### `#enable-webmcp-testing`
+- `document.modelContext.registerTool(definition, { signal })` registers a tool. The bootstrap passes one `AbortController` signal per tool; from Chrome 153, aborting it unregisters the tool. Older builds ignore the second argument.
+- `document.modelContext.getTools()` lists the registered tools, and a `toolchange` event on `document.modelContext` fires when the list changes. A name registered twice kills the Chrome renderer, so the bootstrap skips every name already on the page: the `toolname` of an element (a stamped `<form>`, say), a name `getTools()` lists, or a name an earlier run of the bootstrap registered. If `getTools()` has not answered after 1500 ms, it registers without that answer, still skipping the other two kinds.
+- Each tool carries the annotations `readOnlyHint`, `untrustedContentHint` and `consequentialHint`, from `[tools.annotations]` or the executor type's defaults. Chrome also reads `debugging` (from Chrome 156); cf-webmcp does not set it.
+- Chrome 146 to 149 expose the API as `navigator.modelContext`, now a deprecated alias. The bootstrap and the landing page use `document.modelContext` when it can register tools and fall back to the alias.
 
-Direct link: [`chrome://flags/#enable-webmcp-testing`](chrome://flags/#enable-webmcp-testing)
+## The Chrome origin trial
 
-Description in the flag UI: *"Enables the WebMCP API and its associated testing interfaces."*
+From Chrome 149, Chrome turns WebMCP on for a page whose HTML response carries a valid token for the WebMCP trial in an `Origin-Trial` header. The visitor sets nothing.
 
-Verified behaviour on Chrome 148:
-- Exposes the producer API at `navigator.modelContext`. Pages can call `registerTool({ ... })` on it to register tools. **Chrome 150+ moved the producer API to `document.modelContext`** and kept `navigator.modelContext` as a deprecated alias whose accessor logs a console warning; the cf-webmcp bootstrap probes `document` first and falls back to the alias, so both generations work.
-- Exposes `navigator.modelContextTesting` (consumer API). Headless agents like Cloudflare Browser Run, devtools-driven testing, and similar contexts call `listTools()` / `executeTool(name, jsonArgs)` on this.
+1. Register for the WebMCP trial with your site's origin at the [Chrome Origin Trials console](https://developer.chrome.com/origintrials/). Sign-up opened on 9 June 2026. The console issues a token.
+2. Put the token in your TOML:
 
-This is the **load-bearing flag**. Without it, the `cf-webmcp` bootstrapper finds no `registerTool` method and the `/mcp` page falls back to the pair or disabled state.
+   ```toml
+   [origin_trial]
+   tokens = ["<token from the Chrome Origin Trials console>"]
+   ```
 
-### `#devtools-webmcp-support`
+3. Build and deploy. `/_webmcp/health` lists each token's feature and expiry under `origin_trials`, never the token itself.
 
-Direct link: [`chrome://flags/#devtools-webmcp-support`](chrome://flags/#devtools-webmcp-support)
+The Worker sends each token as its own `Origin-Trial` header on:
 
-Description: *"Enables WebMCP support in DevTools."*
+- every proxied `200` whose `Content-Type` is `text/html`, whether or not the page is injected into (an excluded path, `inject_html = false` and a non-UTF-8 page get it too);
+- a `304` that answers a page load (a GET or HEAD whose `Sec-Fetch-Dest` is `document`, `iframe` or `frame`, or whose `Accept` names `text/html`), because Chrome merges a 304's headers into the copy it has cached;
+- the landing page (not its redirect).
 
-Adds a WebMCP panel to Chrome DevTools so you can inspect registered tools and execute them manually. Not required for `cf-webmcp` to function, but useful when developing or debugging tool definitions on a page.
+A token that origin already sends on the response is not added a second time, and no other response carries the header. The tokens are part of `INJECTION_HASH`, so changing them changes the `ETag` of rewritten pages and browsers fetch those pages again.
 
-## How to enable
+Chrome ignores a token it cannot use without saying so, so the build checks each token the way Chrome reads it, and fails when a token:
 
-1. Open `chrome://flags?search=mcp` (or `edge://flags?search=mcp`).
-2. Find **WebMCP for testing** in the list and set the dropdown to **Enabled**.
-3. Optionally enable **WebMCP support in DevTools** for inspection tools.
-4. Click **Relaunch** to restart the browser.
+- is malformed;
+- is a third-party token (Chrome does not accept one in a header on a first-party page);
+- was issued for another origin than the site's (`[site].public_url`, else `https://<[site].domain>`), unless it is a subdomain token for a parent of the site's host;
+- has expired;
+- is listed twice.
 
-After relaunch, your `cf-webmcp` `/mcp` page should show the green **Connected** callout in its diagnostic, and your registered tools are available via the producer API (`document.modelContext`, or the deprecated `navigator.modelContext` alias on 146-149) and `navigator.modelContextTesting`.
+A token that expires within 30 days builds with a warning. The signature is not checked; that is Chrome's job. Build messages name a token by its first few characters only.
+
+### Apex and www
+
+The build checks every token against one origin, the site's, while a Worker that serves both `example.com` and `www.example.com` sends the same tokens on both hosts. A token for `www.example.com` alone fails the build when the site origin is `https://example.com`, and a token for the apex alone fails it when the site origin is `https://www.example.com`. Register the trial once, for `https://example.com` with subdomains matched (the token's `isSubdomain`). That one token passes the build whichever host is the site origin, and Chrome accepts it on both hosts.
+
+### A development TOML that inherits production
+
+`inherits` copies every top-level block the child does not set, `[origin_trial]` included. When the development TOML points `[site]` at localhost (`public_url = "http://localhost:8787"`), the production tokens are for another origin and fail the build. Set an empty list in the development TOML and use the flag below in your local Chrome:
+
+```toml
+[origin_trial]
+tokens = []
+```
+
+## Local development: the flag
+
+Without a token, Chrome turns WebMCP on only behind a flag. Use it for local development and testing:
+
+1. Open `chrome://flags/#enable-webmcp-testing`.
+2. Set **WebMCP for testing** to **Enabled**.
+3. Click **Relaunch**.
+
+The flag also exposes `navigator.modelContextTesting`, the consumer side (`listTools()`, `executeTool(name, jsonArgs)`), which test harnesses and devtools-driven checks call. Optionally, `chrome://flags/#devtools-webmcp-support` adds a WebMCP panel to DevTools for inspecting and running the registered tools; cf-webmcp does not need it.
 
 ![Chrome flag panel with WebMCP for testing and WebMCP support in DevTools both set to Enabled](images/chrome-flags-webmcp.png)
 
-## Verifying the flag is on
+### Checking a page
 
-Open devtools console on any page and run:
+Run this in the DevTools console:
 
 ```js
 ({
   document_modelContext: 'modelContext' in document,
-  navigator_modelContext_deprecated: 'modelContext' in navigator,
-  registerTool_is_function: typeof (document.modelContext ?? navigator.modelContext)?.registerTool === 'function',
+  registerTool: typeof document.modelContext?.registerTool,
+  getTools: typeof document.modelContext?.getTools,
+  navigator_alias: 'modelContext' in navigator,
+  navigator_alias_registerTool: typeof navigator.modelContext?.registerTool,
   modelContextTesting: 'modelContextTesting' in navigator,
-  listTools_is_function: typeof navigator.modelContextTesting?.listTools === 'function',
 })
 ```
 
-With both flags enabled you should see `registerTool_is_function: true` and `listTools_is_function: true`. On Chrome 150+ `document_modelContext` is `true` (and the navigator alias usually also present); on 146-149 only `navigator_modelContext_deprecated` is `true`.
+`registerTool: "function"` means the page has the WebMCP runtime at `document.modelContext`. On Chrome 146 to 149 look at `navigator_alias_registerTool` instead (reading the alias logs a deprecation warning in the console). Where `getTools` is `"function"`, `await document.modelContext.getTools()` on a page the Worker injected into lists the tools the bootstrap registered. The landing page runs the same checks and shows them under **"Diagnostic: what this page detected"**.
 
-`registerTool_is_function: false` or `undefined` means the flag is not enabled in the current browser session (or has been reverted by a Chrome update / profile reset).
+## Cloudflare Kitesurf and Browser Run
 
-The same probe runs automatically on `/mcp` and prints its results in the **"Diagnostic: what this page detected"** disclosure at the bottom.
+- **Kitesurf**, Cloudflare's agent browser (part of Browser Run, in free beta), supports `document.modelContext`, so the bootstrap registers the site's tools there as it does in Chrome. Kitesurf also runs declarative form tools, so the attributes cf-webmcp stamps from `[[forms]]` work there too.
+- **Browser Run lab sessions** expose `navigator.modelContextTesting` for the consumer side: the agent that drives the session lists and calls the tools a page registered. See [Cloudflare's WebMCP docs for Browser Run](https://developers.cloudflare.com/browser-run/features/webmcp/).
 
-### Or use the WebMCP Inspector extension
+## The `tools` Permissions Policy
 
-The upstream `webmachinelearning/webmcp` project ships an **Inspector** browser extension. Once installed, it surfaces the tools a page has registered, the `<link rel="webmcp">` it advertises, and (where present) the manifest URL. Useful as a one-glance sanity check that your `cf-webmcp` deploy is doing what you expect, without writing a console probe. See the upstream repo for the install link and current limitations.
+WebMCP is controlled by the Permissions Policy feature `tools`, whose default allowlist is `self`: a page and its same-origin frames can use WebMCP, and a cross-origin frame only when the embedding page delegates it. A response header `Permissions-Policy: tools=()` turns WebMCP off for that page, and no tool registers there.
 
-## What if a visitor doesn't enable the flag
+cf-webmcp neither sets nor changes `Permissions-Policy`. A proxied page keeps the header origin sent, and the Worker's own responses, the landing page included, send none. If tools never appear on a page, check whether origin, a plugin or a response header rule at Cloudflare sends `tools=()`.
 
-That is what `fallback_widget = true` is for. The widget is opt-in (off by default) and has [known limits](deployment.md#known-limits-of-the-desktop-bridge). With the widget enabled:
+## Visitors without WebMCP
 
-- A native-flag visitor → green Connected. Tools auto-registered. No pairing.
-- A non-flag visitor with a desktop MCP client (Claude Desktop, Cursor, Claude Code, Windsurf) → blue Pairing required. They start the bridge in a terminal, add it to their MCP client, paste a token into the widget, and keep the terminal open while they use the tools.
-- A non-flag visitor without a desktop MCP client → red Not connected. No path to use the tools from this browser. They are not the audience.
+That is what `fallback_widget = true` is for. The widget is opt-in (off by default) and has [known limits](deployment.md#known-limits-of-the-desktop-bridge). The landing page shows one of three states:
 
-In short: until Chrome stable ships the WebMCP producer API (`document.modelContext.registerTool`), the pair path is how desktop MCP clients of visitors without the flag reach your tools. Switch `fallback_widget = true` on if those visitors matter to you and the bridge's limits suit them.
-
-## Other browsers
-
-- **Firefox.** No public flag yet. Mozilla's position on WebMCP is still pending as of mid-2026.
-- **Safari.** No public flag yet. WebKit has not announced an implementation timeline.
-- **Cloudflare Browser Run** lab sessions. WebMCP is on by default in lab sessions per [Cloudflare's WebMCP docs](https://developers.cloudflare.com/browser-run/features/webmcp/). Both the producer API and `navigator.modelContextTesting` are exposed without any flag flip.
-
-## Why the flag and not just ship it
-
-Browser APIs that other surfaces depend on (especially agent APIs that can call into the page) are gated for security review and shape-stability. Once an API ships unflagged, the browser is committed to its shape effectively forever. Flagged-only means the spec authors can still change the surface based on implementation feedback. Expect the flag to disappear when Chrome publishes a stable-channel release with the API on by default.
+- A browser with WebMCP (Chrome with the trial token or the flag, Kitesurf): green **Connected**. The default landing page registers the tools itself (a custom template does when it includes `{{bootstrap_block}}`); no pairing.
+- No WebMCP, the widget on (`fallback_widget = true` and a widget pinned in the build), and a desktop MCP client (Claude Desktop, Cursor, Claude Code, Windsurf): blue **Pairing required**. The visitor starts the bridge in a terminal with `--foreground`, adds it to their MCP client, pastes a pairing token into the widget, and keeps the terminal open while they use the tools. The widget disconnects after 30 minutes without mouse or keyboard activity on the page.
+- No WebMCP and no widget: red **Not connected**. There is no path to the tools from this browser.
 
 ## What this means for you as a publisher
 
-Until the flag is gone:
-
-- Consider `fallback_widget = true` if desktop-client visitors without the flag matter to you. It is opt-in: it needs `npm run upload-widget` before deploy and a bridge program on the visitor's computer, with [known limits](deployment.md#known-limits-of-the-desktop-bridge).
+- Register the WebMCP origin trial and put the token in `[origin_trial].tokens`. That is what turns WebMCP on for Chrome visitors.
+- Consider `fallback_widget = true` if desktop-client visitors without WebMCP matter to you. It needs `npm run update-widget` and `npm run upload-widget` before deploy and a bridge program on the visitor's computer, with [known limits](deployment.md#known-limits-of-the-desktop-bridge).
 - Run preflight before deploy so you know `/mcp` is uncontested on your domain.
-- Encourage technical visitors to enable the flag if they want the browser-native path (no token paste). The `/mcp` page's About section links here.
-- Test the three states yourself (flag on, flag off + widget on, flag off + widget off) before announcing publicly.
+- Test the states yourself (token or flag on, widget on, widget off) before announcing publicly.

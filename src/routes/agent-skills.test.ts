@@ -100,6 +100,20 @@ describe("agentSkillsResponse", () => {
     expect(body).toContain("https://example.com/.well-known/webmcp.json");
   });
 
+  it("names the runtime as document.modelContext, not the deprecated navigator alias", async () => {
+    const proxy = async () => new Response("", { status: 404 });
+    const res = await agentSkillsResponse(
+      new Request("https://example.com/.well-known/agent-skills/site/SKILL.md"),
+      makeConfig(),
+      proxy,
+    );
+    const body = await res.text();
+    expect(body).toContain(
+      "Browser-native agents register these automatically via `document.modelContext` when the WebMCP runtime is present.",
+    );
+    expect(body).not.toContain("navigator.modelContext");
+  });
+
   it("uses explicit name and description overrides when set", async () => {
     const proxy = async () => new Response("", { status: 404 });
     const config = makeConfig({

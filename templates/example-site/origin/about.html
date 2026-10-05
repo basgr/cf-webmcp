@@ -8,7 +8,7 @@
 <main>
   <h1>About</h1>
   <p>Example Site is a fixture used by <code>cf-webmcp</code> for local development. It exists so contributors can run the Worker end-to-end without pointing at a real public origin.</p>
-  <p>The Worker registered five tools on this site. Open your devtools and check <code>navigator.modelContext</code> if your browser supports WebMCP.</p>
+  <p>In a browser with WebMCP, the script the Worker injects into this page registers the site's tools on <code>document.modelContext</code>. Run <code>await document.modelContext.getTools()</code> in the devtools console to list them, or open <a href="/mcp">/mcp</a>.</p>
 </main>
 </body>
 </html>

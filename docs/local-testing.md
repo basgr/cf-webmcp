@@ -43,12 +43,12 @@ Builds the Worker config against `templates/example-site/webmcp.toml`, then star
 
 With both processes running:
 
-- `http://localhost:8787/` - proxied index.html with the bootstrapper injected. View source to see `<link rel="webmcp">` in `<head>` and `<script src="/_webmcp/bootstrap.<hash>.js" defer>` before `</body>`. Response also has a `Link: ...; rel="webmcp"` header.
+- `http://localhost:8787/` - proxied index.html with the bootstrapper injected. View source to see `<link rel="webmcp">` in `<head>` and `<script src="http://localhost:8787/_webmcp/bootstrap.<hash>.js" defer ...>` before `</body>`: the script's `src` is the origin of the request plus `/_webmcp/bootstrap.<hash>.js`. Response also has a `Link: ...; rel="webmcp"` header.
 - `http://localhost:8787/.well-known/webmcp` - the tool catalogue manifest.
 - `http://localhost:8787/mcp` - the auto-generated pairing/landing page.
 - `http://localhost:8787/_webmcp/bootstrap.<hash>.js` - the registration script that runs in agent-driven browsers. `<hash>` is derived from the script's own bytes (first 16 hex of its sha256); the full URL is in the manifest's `links.bootstrap`. Any other `bootstrap.<x>.js` path answers 404.
 - `http://localhost:8787/llms.txt` - merged version of the origin's llms.txt with the WebMCP block appended between markers.
-- `http://localhost:8787/robots.txt` - merged version with `Disallow: /_webmcp/exec/` added.
+- `http://localhost:8787/robots.txt` - merged version with `Disallow: /_webmcp/` added.
 - `http://localhost:8787/_webmcp/health` - operational health JSON.
 
 ## Call a tool
@@ -151,7 +151,7 @@ The bridge's websocket port defaults to 4797; the script passes free ones with `
 
 - **R2-backed widget with `npm run dev:worker`.** The example-site config ships with `fallback_widget = false`. The pairing end-to-end above switches it on in a temporary copy and puts the widget into local R2; to try it by hand, do the same: `npm run upload-widget -- --local`, then build from a copy of the config with `fallback_widget = true`.
 - **CF Analytics Engine metrics.** `/_webmcp/health` returns `null` for executor metrics in local dev.
-- **Bot Management bypass.** Headers are sent on origin fetches but the local origin has no WAF to bypass.
+- **WAF allow-listing.** The deploy-token headers go out on the Worker's origin fetches when `CF_WEBMCP_DEPLOY_TOKEN` is set, but the local origin has no WAF that reads them.
 
 ## Restart loop
 

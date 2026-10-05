@@ -163,8 +163,8 @@ export function buildFrontmatter(config: Config): string {
  * can compute the SHA-256 digest at build time for /.well-known/agent-skills/
  * index.json (Cloudflare Agent Skills Discovery RFC). Synthesize and replace
  * modes produce deterministic output from config; merge mode does not (origin
- * content is part of the served body), which is why the index handler returns
- * 404 when agent_skills.mode = "merge".
+ * content is part of the served body), which is why the index is not served in
+ * merge mode (skillsIndexServed in src/served.ts).
  *
  * `widget`: whether the desktop-bridge widget is on (widgetEnabled in src/widget-state.ts). The
  * build passes the answer it resolved from the widget pin and the handler the one it resolved
@@ -180,7 +180,7 @@ export function buildSkillBody(config: Config, widget: boolean = config.features
   const landingUrl = `${base}${config.webmcp_landing.path}`;
 
   const intro = [
-    `Browser-native agents register these automatically via \`navigator.modelContext\` when the WebMCP runtime is present.`,
+    `Browser-native agents register these automatically via \`document.modelContext\` when the WebMCP runtime is present.`,
   ];
   if (config.features.webmcp_landing) {
     intro.push(

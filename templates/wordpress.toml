@@ -69,6 +69,14 @@ mode = "merge"
 # representative_queries = ["find a product about X", "list recent posts"]
 # tags = ["shop"]
 
+# Chrome origin trial for WebMCP: the Worker sends each token as an
+# Origin-Trial header on HTML pages, so Chrome 149 and later turn WebMCP on
+# for visitors without a flag. A token must be issued for this site's origin
+# ([site].public_url, else https://<domain>); for apex plus www, register the
+# apex with isSubdomain. See docs/browser-support.md.
+# [origin_trial]
+# tokens = ["<token from the Chrome Origin Trials console>"]
+
 
 [agent_skills]
 path    = "/.well-known/agent-skills/site/SKILL.md"

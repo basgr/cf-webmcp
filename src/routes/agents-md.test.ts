@@ -119,6 +119,17 @@ describe("agentsMdResponse", () => {
     const text = await res.text();
     expect(text).toContain("`contact` (form): Send a contact message.");
   });
+
+  it("describes browser-native agents by the runtime, document.modelContext, with no flag or browser named", async () => {
+    const proxy = async () => new Response("", { status: 404 });
+    const res = await agentsMdResponse(new Request("https://example.com/.well-known/agents.md"), makeConfig(), proxy);
+    const text = await res.text();
+    expect(text).toContain(
+      "- **Browser-native agents** (a browser or agent browser with the WebMCP runtime): tools auto-register via `document.modelContext` when the page loads. No setup.",
+    );
+    expect(text).not.toContain("navigator.modelContext");
+    expect(text).not.toMatch(/flag|Chrome/i);
+  });
 });
 
 describe("agentsMdRedirect", () => {

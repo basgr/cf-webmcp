@@ -439,8 +439,10 @@ const AgentSkillHint = z.object({
  * cannot include origin content without runtime fetches) and replace is
  * functionally identical to synthesize for our one-skill case.
  *
- * When agent_skills.mode is "merge" the index handler returns 404 because
- * the build-time digest would not match the merged body served at runtime.
+ * The index is served only while [features].agent_skills is on in synthesize
+ * or replace mode (skillsIndexServed in src/served.ts). In merge mode the
+ * build-time digest would not match the merged body served at runtime, so the
+ * path is left to origin.
  */
 const AgentSkillsIndexBlock = z.object({
   path: PathString.default("/.well-known/agent-skills/index.json"),

@@ -10,20 +10,17 @@ In route-only mode, the Worker only sees requests on Worker-claimed paths.
 
 ## What the Worker logs
 
-By default, **nothing identifying**. The Worker logs only:
+By default, **nothing identifying**. The Worker logs nothing about visitors (no client IPs, cookies or request bodies, that is, executor input) and nothing for a request that goes as planned. It writes one error line when something goes wrong, which shows in `wrangler tail` (and in Workers Logs, if you turn them on):
 
-- `tool_name + status_code + duration_ms` per executor call (visible in Analytics Engine if bound).
-- Wrangler `logpush = false` by default; no full-request logs go to disk.
+- an origin redirect the Worker refused (on an executor) or could not follow (on a merge route; a redirect to an origin outside `allowed_origins` is relayed to the client there, not logged): the origin and path of the start URL and of a refused target, or a `Location` it could not use, cut at its first `?` or `#`;
+- a failed origin fetch on a merge route: the origin and path, and the error message;
+- an executor that threw: the tool name and the error message;
+- an `http_json` origin answer that is not valid JSON: the parser's message, which can quote the start of origin's body;
+- an HTML injection error, or a selector that HTMLRewriter rejected: the error message and the selector.
 
-Specifically the Worker does **not** log:
+A path can carry personal data (a value a caller put into a path placeholder, say), so treat the log as operator-only.
 
-- Request bodies (executor input).
-- Full URLs (which may contain personal data in query params).
-- Client IPs.
-- Cookies.
-- Response bodies.
-
-If you enable `logpush = true` in your `wrangler.toml`, you opt in to Cloudflare's standard request log shape. That includes URL and IP. Do not enable unless you understand the data flow.
+Logpush is off unless you set `logpush = true` in your `wrangler.toml`. That opts in to Cloudflare's standard request log shape, which includes URL and IP. Do not enable it unless you understand the data flow.
 
 ## What is forwarded to origin
 
@@ -32,14 +29,14 @@ Executor fetches to the publisher's origin **never forward visitor cookies**, an
 Executor fetches send:
 
 - `User-Agent: cf-webmcp/<version>` - stable, not derived from the agent's UA.
-- `cf-webmcp-bypass: 1`
-- `cf-webmcp-deploy-token: <token>` - so origin's Bot Management can allow our traffic.
+- `cf-webmcp-bypass: 1` and `cf-webmcp-deploy-token: <token>`, when the `CF_WEBMCP_DEPLOY_TOKEN` secret is set, and only to origins listed in `allowed_origins` - so origin's WAF or Bot Management can allow our traffic.
+- An `Accept` header naming what the executor reads (`http_get` sends none), and for an `http_json` POST tool `Content-Type: application/json` with a body made of the tool's declared input properties.
 
 That is it. No `Cookie`, no `Authorization`, no `Referer`, no `X-Forwarded-For`.
 
 ## Proxied HTML responses
 
-In full-proxy mode the Worker proxies non-Worker paths to origin. For HTML responses it injects two tags: a `<link rel="webmcp">` and a `<script src="https://<the host the visitor used>/_webmcp/bootstrap.<hash>.js" defer>`. Both stay on your own site: the script `src` is taken from the request, so it loads from `www`, `workers.dev` and preview hosts alike and a `<base href>` cannot move it, and the link points at the manifest on your configured site URL. The bootstrapper registers tools with the WebMCP runtime (`document.modelContext`, falling back to the deprecated `navigator.modelContext`) if available. It does **not**:
+In full-proxy mode the Worker proxies non-Worker paths to origin. For HTML responses it injects `<link>` tags to the discovery documents (`rel="webmcp"` and the others that are on) and a `<script src="https://<the host the visitor used>/_webmcp/bootstrap.<hash>.js" defer>`. Both stay on your own site: the script `src` is taken from the request, so it loads from `www`, `workers.dev` and preview hosts alike and a `<base href>` cannot move it, and the link points at the manifest on your configured site URL. The bootstrapper registers tools with the WebMCP runtime (`document.modelContext`, falling back to the deprecated `navigator.modelContext`) if available. It does **not**:
 
 - Set cookies.
 - Make network requests on page load.
@@ -66,4 +63,4 @@ If `[features].fallback_widget = true` (it is off by default), the widget JS fro
 
 ## Health endpoint
 
-`/_webmcp/health` exposes config hash, executor success/error counts, and preflight status. It does not expose request bodies, client data, or secrets. If you would rather not expose it publicly, set `[health].public = false` and `[health].token` to a secret.
+`/_webmcp/health` exposes the config hash, the build time, the last preflight result, whether the widget object is in R2, each origin-trial token's feature and expiry (never the token), and the tool names (their success and error counts are always `null`). It does not expose request bodies, client data, or secrets. If you would rather not expose it publicly, set a bearer token with the `CF_WEBMCP_HEALTH_TOKEN` secret (or `[health].token`): with a token set, a request without it gets `401`. `[health].public = false` with no token at all turns the endpoint off (`404`).

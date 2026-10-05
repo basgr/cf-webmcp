@@ -147,7 +147,7 @@ function buildBlock(config: Config, widget: boolean): string {
     ``,
     `### How agents connect`,
     ``,
-    `- **Browser-native agents** (Chrome with WebMCP flag enabled, Cloudflare Browser Run lab sessions): tools auto-register via \`navigator.modelContext\` when the page loads. No setup.`,
+    `- **Browser-native agents** (a browser or agent browser with the WebMCP runtime): tools auto-register via \`document.modelContext\` when the page loads. No setup.`,
   );
   // The landing page: a pairing page only while the widget is on; with it off the page lists
   // the tools and says whether the browser exposes WebMCP, and nothing here says to pair. With

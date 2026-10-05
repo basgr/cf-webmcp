@@ -22,7 +22,7 @@ For each request, the Worker does one of two things:
 | `/.well-known/agent-skills/index.json` | Cloudflare Agent Skills Discovery RFC v0.2.0 index with build-time SHA-256 digest |
 | `/llms.txt` | Origin's llms.txt with a WebMCP block merged in |
 | `/robots.txt` | Origin's robots.txt with `Disallow: /_webmcp/` merged in |
-| `/mcp` | Landing page: native-API, desktop-pairing, or disabled state |
+| `/mcp` | Landing page (GET and HEAD; a GET that asks for `text/event-stream` and every other method go to origin): native-API, desktop-pairing, or disabled state |
 | `/_webmcp/exec/<tool>` | Tool execution endpoint (POST) |
 | `/_webmcp/bootstrap.<hash>.js` | In-page tool registration script |
 | `/_webmcp/widget.<hash>.js` | Optional desktop-bridge widget |
@@ -30,10 +30,11 @@ For each request, the Worker does one of two things:
 
 **2. Otherwise, proxy to origin and modify the response on the way back.**
 
-- **HTTP `Link` header** added to every proxied response (HTML, PDF, image, JSON, anything). One entry per discovery surface that is on: `rel="webmcp"` to the manifest, `rel="api-catalog"` to the catalog, `rel="agent-skills"` to the SKILL.md. An agent doing a `HEAD` request finds all three without parsing a body. A surface that is switched off has no entry (and the header is left out when none is left).
+- **HTTP `Link` header** added to every proxied response (HTML, PDF, image, JSON, anything). One entry per discovery document that is served: `rel="webmcp"` to the manifest, `rel="api-catalog"` to the catalog, `rel="ard"` to the ARD manifest, `rel="agent-skills"` to the SKILL.md and `rel="describedby"` to llms.txt. An agent doing a `HEAD` request finds them without parsing a body. A surface that is switched off has no entry (and the header is left out when none is left).
+- **`Origin-Trial` headers** with the tokens from `[origin_trial]` on HTML pages (a `200`, or a `304` that answers a page load), so Chrome 149 and later turn WebMCP on for visitors. See [Browser support](docs/browser-support.md).
 - **On HTML responses only** (status 200, `text/html`, UTF-8, path not in `[injection].exclude_paths`), HTMLRewriter injects:
-  - matching `<link>` tags into `<head>` (`rel="webmcp"`, `rel="api-catalog"`, `rel="agent-skills"`),
-  - one `<script src="https://<the host the visitor used>/_webmcp/bootstrap.<hash>.js" defer>` before `</body>` that auto-registers the tools via the WebMCP runtime (`document.modelContext`, falling back to the deprecated `navigator.modelContext`). Registering a name twice kills the Chrome renderer, so the script skips any tool name already on the page: a `<form toolname>` element, a name `getTools()` lists, or a name an earlier run of the script registered (it keeps that record on the page, so a second run of the script adds nothing). If `getTools()` has not answered after 1500 ms it goes by the `<form toolname>` elements alone. A name another script registers after these checks is not seen,
+  - matching `<link>` tags into `<head>` (`rel="webmcp"`, `rel="api-catalog"`, `rel="ard"`, `rel="agent-skills"`, and `rel="describedby"` and `rel="alternate"` to llms.txt, each while its document is served),
+  - one `<script src="https://<the host the visitor used>/_webmcp/bootstrap.<hash>.js" defer>` before `</body>` that auto-registers the tools via the WebMCP runtime (`document.modelContext`, falling back to the deprecated `navigator.modelContext`). Registering a name twice kills the Chrome renderer, so the script skips any tool name already on the page: a `<form toolname>` element, a name `getTools()` lists, or a name an earlier run of the script registered (it keeps that record on the page, so a second run of the script adds nothing). If `getTools()` has not answered after 1500 ms it registers without that answer, still skipping the other two. A name another script registers after these checks is not seen,
   - W3C declarative form attributes (`toolname`, `tooldescription`, `toolparamdescription`, `toolautosubmit`) stamped onto matching `<form>` elements when a `[[forms]]` block matches the current path.
 
 Non-HTML responses (PDFs, images, JSON, CSS, JS, etc.) pass through with their body unchanged but with the `Link` header added.
@@ -95,9 +96,9 @@ Full reference docs live in [`docs/`](docs/):
 
 **Getting started**
 
-- [Deployment](docs/deployment.md) - full-proxy vs route-only modes, wrangler config, Bot Management bypass.
+- [Deployment](docs/deployment.md) - full-proxy vs route-only modes, wrangler config, the headers that let your origin's WAF allow-list the Worker's requests (the Worker has no bypass mode of its own), Cloudflare WebMCP Labs on the same zone.
 - [Local testing](docs/local-testing.md) - `wrangler dev` against the bundled `templates/example-site/` fixture.
-- [Browser support](docs/browser-support.md) - enabling the WebMCP flag in Chrome and verifying it.
+- [Browser support](docs/browser-support.md) - the Chrome origin trial, the flag for local development, Cloudflare Kitesurf and Browser Run, the `tools` Permissions Policy, and checking a page.
 
 **Configuration**
 
@@ -112,7 +113,7 @@ Full reference docs live in [`docs/`](docs/):
 
 - [Costs](docs/costs.md) - Workers, R2, and cache pricing under typical traffic.
 - [Privacy](docs/privacy.md) - what's logged, what's stripped from origin fetches, GDPR posture.
-- [Upgrade](docs/upgrade.md) - `schema_version` policy, tool-name immutability, breaking-change procedure.
+- [Upgrade](docs/upgrade.md) - what changed in each release and what to do about it, `schema_version` policy, tool-name immutability.
 - [Limitations](docs/limitations.md) - SPA story, multi-language sites, service workers, other known edges.
 
 **Project**
