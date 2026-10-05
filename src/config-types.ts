@@ -4,7 +4,7 @@
  */
 
 import { z } from "zod";
-import { ARD_PATH, ARD_PREDECESSOR_PATH } from "./ard";
+import { ARD_PATH, ARD_PREDECESSOR_PATH, SKILL_MEDIA_TYPE, SKILL_MEDIA_TYPES, SKILL_NAME_MAX } from "./ard";
 import { ORIGIN_TRIAL_TOKEN_RE } from "./origin-trial";
 import { checkSelector, type SelectorCheckOptions } from "./selector-grammar";
 
@@ -375,6 +375,13 @@ const AiCatalogBlock = z.object({
    */
   aliases: z.array(PathString).default([ARD_PREDECESSOR_PATH]),
   mode: z.enum(["synthesize", "merge", "passthrough"]).default("synthesize"),
+  /**
+   * Entry `type` of the skill. The default is the only skill type ARD v0.91
+   * names (section 4.4); the ARD conformance tool reports it as non-standard and
+   * lists text/markdown; profile="urn:air:agent-skills"; the AI Catalog
+   * specification lists application/agent-skills+md. See docs/ard.md.
+   */
+  skill_type: z.enum(SKILL_MEDIA_TYPES).default(SKILL_MEDIA_TYPE),
   /** Override host.identifier (defaults to did:web:<domain> when empty). */
   host_identifier: z.string().default(""),
   /** Optional 0-5 natural-language sample queries (ARD SHOULD). Omitted from output when empty. */
@@ -394,6 +401,7 @@ const AgentSkillsBlock = z.object({
    */
   name: z
     .string()
+    .max(SKILL_NAME_MAX, `agent_skills.name must be at most ${SKILL_NAME_MAX} characters`)
     .regex(
       /^(?:[a-z0-9]+(?:-[a-z0-9]+)*)?$/,
       'agent_skills.name must be lowercase letters and digits, groups joined by single hyphens (e.g. "example-site"), or empty to derive it from [site].name',

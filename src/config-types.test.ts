@@ -254,6 +254,19 @@ describe("ai_catalog config", () => {
   it("accepts an empty aliases list (no redirect)", () => {
     expect(ConfigSchema.parse({ ...minimal, ai_catalog: { aliases: [] } }).ai_catalog.aliases).toEqual([]);
   });
+
+  it("skill_type defaults to application/ai-skill+md and accepts the two other skill types", () => {
+    expect(ConfigSchema.parse(minimal).ai_catalog.skill_type).toBe("application/ai-skill+md");
+    for (const t of ['text/markdown; profile="urn:air:agent-skills"', "application/agent-skills+md"]) {
+      expect(ConfigSchema.parse({ ...minimal, ai_catalog: { skill_type: t } }).ai_catalog.skill_type).toBe(t);
+    }
+  });
+
+  it("skill_type rejects anything else", () => {
+    for (const t of ["application/ai-skill", "text/markdown", ""]) {
+      expect(ConfigSchema.safeParse({ ...minimal, ai_catalog: { skill_type: t } }).success, t).toBe(false);
+    }
+  });
 });
 
 describe("agent_skills.name", () => {
@@ -264,8 +277,14 @@ describe("agent_skills.name", () => {
     expect(ConfigSchema.safeParse(withName("")).success).toBe(true);
   });
 
-  it.each(["site", "example-site", "a1", "my-2nd-shop", "x"])("accepts the skill name %s", (name) => {
+  it.each(["site", "example-site", "a1", "my-2nd-shop", "x", "a".repeat(64)])("accepts the skill name %s", (name) => {
     expect(ConfigSchema.parse(withName(name)).agent_skills.name).toBe(name);
+  });
+
+  it("rejects a name over 64 characters", () => {
+    const r = ConfigSchema.safeParse(withName("a".repeat(65)));
+    expect(r.success).toBe(false);
+    if (!r.success) expect(r.error.issues[0]!.path).toEqual(["agent_skills", "name"]);
   });
 
   it.each([

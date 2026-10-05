@@ -72,6 +72,7 @@ mode = "merge"
 # path    = "/.well-known/ard.json"
 # aliases = ["/.well-known/ai-catalog.json"]   # 301 to path; [] leaves it to origin
 # mode    = "synthesize"   # synthesize | merge | passthrough
+# skill_type = "application/ai-skill+md"   # or 'text/markdown; profile="urn:air:agent-skills"' or "application/agent-skills+md"
 # representative_queries = ["find a product about X", "list recent posts"]
 # tags = ["shop"]
 

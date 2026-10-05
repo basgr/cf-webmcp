@@ -29,7 +29,7 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     robots_txt: { path: "/robots.txt", mode: "merge" },
     agents_md: { path: "/.well-known/agents.md", mode: "merge", aliases: ["/AGENTS.md", "/agents.md"] },
     api_catalog: { path: "/.well-known/api-catalog", mode: "merge" },
-    ai_catalog: { path: "/.well-known/ard.json", aliases: ["/.well-known/ai-catalog.json"], mode: "synthesize", host_identifier: "", representative_queries: [], tags: [] },
+    ai_catalog: { path: "/.well-known/ard.json", aliases: ["/.well-known/ai-catalog.json"], mode: "synthesize", skill_type: "application/ai-skill+md", host_identifier: "", representative_queries: [], tags: [] },
     agent_skills: {
       path: "/.well-known/agent-skills/site/SKILL.md",
       mode: "synthesize",

@@ -548,13 +548,76 @@ describe("preflight: the ARD manifest (ard.json) and its aliases", () => {
     }
   });
 
-  it("merge: HTML or text at either path is a COLLISION", async () => {
-    stubGets({ [ARD]: html, [PREDECESSOR]: text });
+  it("merge: HTML at the canonical path is a COLLISION", async () => {
+    stubGets({ [ARD]: html });
     const { code, result } = await run(withMode("merge"));
     expect(code).toBe(1);
-    expect(result.collisions).toHaveLength(2);
+    expect(result.collisions).toHaveLength(1);
     expect(result.collisions[0]).toMatch(/^\/\.well-known\/ard\.json: .*text\/html/);
-    expect(result.collisions[1]).toMatch(/^\/\.well-known\/ai-catalog\.json: .*text\/plain/);
+  });
+
+  it("merge: text at the predecessor path, read after a canonical 404, is a COLLISION", async () => {
+    stubGets({ [PREDECESSOR]: text });
+    const { code, result } = await run(withMode("merge"));
+    expect(code).toBe(1);
+    expect(result.collisions).toHaveLength(1);
+    expect(result.collisions[0]).toMatch(/^\/\.well-known\/ai-catalog\.json: .*text\/plain/);
+  });
+
+  it("merge: accepts application/ld+json", async () => {
+    stubGets({ [ARD]: json(VALID, "application/ld+json") });
+    const { code, result } = await run(withMode("merge"));
+    expect(code).toBe(0);
+    expect(result.collisions).toEqual([]);
+  });
+
+  it.each([500, 503, 410, 403])(
+    "merge: a %i at the canonical path is a WARNING (the Worker serves the generated document), not a COLLISION",
+    async (status) => {
+      stubGets({ [ARD]: () => new Response("x", { status, headers: { "content-type": "text/plain" } }) });
+      const { code, result } = await run(withMode("merge"));
+      expect(code).toBe(0);
+      expect(result.collisions).toEqual([]);
+      expect(result.warnings.filter((w) => w.startsWith("/.well-known/ard.json"))).toEqual([
+        `/.well-known/ard.json: origin answers ${status}; in merge mode the Worker serves the generated document instead`,
+      ]);
+    },
+  );
+
+  it("merge: a 503 at the predecessor path after a canonical 404 is a WARNING too", async () => {
+    stubGets({ [PREDECESSOR]: () => new Response("x", { status: 503 }) });
+    const { code, result } = await run(withMode("merge"));
+    expect(code).toBe(0);
+    expect(result.collisions).toEqual([]);
+    expect(result.warnings.filter((w) => w.startsWith("/.well-known/ai-catalog.json"))).toEqual([
+      "/.well-known/ai-catalog.json: origin answers 503; in merge mode the Worker serves the generated document instead",
+    ]);
+  });
+
+  it("merge: with a valid ard.json at origin, a document at the predecessor path is reported as redirected, not merged", async () => {
+    stubGets({ [ARD]: json(VALID), [PREDECESSOR]: json(VALID, "application/ai-catalog+json") });
+    const { code, result, lines } = await run(withMode("merge"));
+    expect(code).toBe(0);
+    expect(result.collisions).toEqual([]);
+    expect(lines.find((l) => l.includes("/.well-known/ai-catalog.json"))).toMatch(/redirected to \/\.well-known\/ard\.json, not merged/);
+    expect(result.warnings.filter((w) => w.startsWith("/.well-known/ai-catalog.json"))).toEqual([
+      "/.well-known/ai-catalog.json: origin serves a document here too, but the Worker redirects this path to /.well-known/ard.json and does not merge it",
+    ]);
+  });
+
+  it("merge: the predecessor path is not read after a canonical answer other than 404, so its own answer is not judged", async () => {
+    stubGets({ [ARD]: () => new Response("x", { status: 500 }), [PREDECESSOR]: html });
+    const { result, lines } = await run(withMode("merge"));
+    expect(result.collisions).toEqual([]);
+    expect(lines.find((l) => l.includes("/.well-known/ai-catalog.json"))).toMatch(/not merged/);
+  });
+
+  it("merge with aliases = []: a document at the predecessor path next to a valid ard.json is left to origin, no warning", async () => {
+    stubGets({ [ARD]: json(VALID), [PREDECESSOR]: json(VALID) });
+    const { code, result, lines } = await run(withMode("merge", "aliases = []\n"));
+    expect(code).toBe(0);
+    expect(result.warnings.filter((w) => w.startsWith("/.well-known/ai-catalog.json"))).toEqual([]);
+    expect(lines.find((l) => l.includes("/.well-known/ai-catalog.json"))).toMatch(/not read, origin answers at \/\.well-known\/ard\.json/);
   });
 
   it("merge: a body declared as JSON that does not parse is a COLLISION", async () => {

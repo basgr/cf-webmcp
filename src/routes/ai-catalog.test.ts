@@ -35,7 +35,7 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     robots_txt: { path: "/robots.txt", mode: "merge" },
     agents_md: { path: "/.well-known/agents.md", mode: "merge", aliases: ["/AGENTS.md", "/agents.md"] },
     api_catalog: { path: "/.well-known/api-catalog", mode: "merge" },
-    ai_catalog: { path: "/.well-known/ard.json", aliases: ["/.well-known/ai-catalog.json"], mode: "synthesize", host_identifier: "", representative_queries: [], tags: [] },
+    ai_catalog: { path: "/.well-known/ard.json", aliases: ["/.well-known/ai-catalog.json"], mode: "synthesize", skill_type: "application/ai-skill+md", host_identifier: "", representative_queries: [], tags: [] },
     agent_skills: { path: "/.well-known/agent-skills/site/SKILL.md", mode: "synthesize", name: "", description: "", aliases: ["/.well-known/agent-skills/site/SKILLS.md", "/.well-known/agent-skills/site/skill.md", "/.well-known/agent-skills/site/skills.md"], hints: [] },
     agent_skills_index: { path: "/.well-known/agent-skills/index.json", mode: "synthesize" },
     origin_trial: { tokens: [] },
@@ -159,10 +159,12 @@ describe("aiCatalogResponse (synthesize)", () => {
 });
 
 describe("ardRedirect", () => {
-  it("301s an alias to the canonical path with noindex and the ARD cache settings", () => {
+  it("301s an alias to the canonical path with CORS, noindex and the ARD cache settings", () => {
     const res = ardRedirect(cfg);
     expect(res.status).toBe(301);
     expect(res.headers.get("location")).toBe("/.well-known/ard.json");
+    // A browser follows a cross-origin redirect only when the redirect itself passes CORS.
+    expect(res.headers.get("access-control-allow-origin")).toBe("*");
     expect(res.headers.get("x-robots-tag")).toBe("noindex");
     expect(res.headers.get("x-content-type-options")).toBe("nosniff");
     const cc = res.headers.get("cache-control") ?? "";
@@ -296,7 +298,7 @@ describe("aiCatalogResponse (merge)", () => {
     { name: "an entry without a string identifier", body: JSON.stringify({ entries: [{ noId: true }] }) },
     { name: "no entries array", body: JSON.stringify({ specVersion: "1.0", host: { displayName: "O" } }) },
     { name: "a top-level array", body: JSON.stringify([{ identifier: "a" }]) },
-  ])("relays an origin JSON document that fails v0.91 validation unchanged, with noindex ($name)", async ({ body }) => {
+  ])("relays an origin JSON document that fails the structural check unchanged, with noindex ($name)", async ({ body }) => {
     const res = await aiCatalogResponse(req, cfgMerge, SYNTH_ONE, async () =>
       new Response(body, { status: 200, headers: { "content-type": "application/json", "x-origin": "1" } }));
     expect(res.status).toBe(200);
@@ -343,6 +345,169 @@ describe("aiCatalogResponse (merge)", () => {
     expect(res.headers.get("x-robots-tag")).toBe("noindex");
     expect(res.headers.get("content-type")).toBe("text/html");
     expect(await res.text()).toBe("<html>hi</html>");
+  });
+
+  it("does not add our entry when origin lists an entry with our url under another identifier", async () => {
+    const sameUrl = { identifier: "urn:air:example.com:skill:their-name", displayName: "Theirs", type: "application/ai-skill+md", url: "https://example.com/.well-known/agent-skills/site/SKILL.md" };
+    const res = await aiCatalogResponse(req, cfgMerge, SYNTH_ONE, async () => originDoc([sameUrl, OTHER]));
+    const doc = JSON.parse(await res.text());
+    expect(doc.entries).toEqual([sameUrl, OTHER]);
+  });
+
+  it("adds our entry next to an origin entry that has neither our identifier nor our url", async () => {
+    const res = await aiCatalogResponse(req, cfgMerge, SYNTH_ONE, async () => originDoc([OTHER, { identifier: "urn:air:example.com:data:x", data: {} }]));
+    const ids = JSON.parse(await res.text()).entries.map((e: { identifier: string }) => e.identifier);
+    expect(ids).toEqual([OTHER.identifier, "urn:air:example.com:data:x", OUR_ID]);
+  });
+
+  describe("cache-control of the generated document", () => {
+    const SHORT = "public, max-age=60, s-maxage=60";
+    const NORMAL = "public, max-age=300, s-maxage=21600, stale-while-revalidate=86400, stale-if-error=86400";
+
+    it.each<{ name: string; answers: Record<string, () => Response> }>([
+      { name: "a 500 at the canonical path", answers: { [CANONICAL]: () => new Response("boom", { status: 500 }) } },
+      { name: "a relayed redirect", answers: { [CANONICAL]: () => new Response(null, { status: 302, headers: { location: "https://www.example.com/x" } }) } },
+      { name: "the proxy's 502", answers: { [CANONICAL]: () => new Response("origin request failed", { status: 502 }) } },
+      { name: "the proxy's 504", answers: { [CANONICAL]: () => new Response("origin did not answer in time", { status: 504 }) } },
+      { name: "a 410", answers: { [CANONICAL]: () => new Response("gone", { status: 410 }) } },
+      { name: "a 503 at the predecessor after a canonical 404", answers: { [PREDECESSOR]: () => new Response("boom", { status: 503 }) } },
+    ])("is short after $name (origin failed)", async ({ answers }) => {
+      const { proxy } = originBy(answers);
+      const res = await aiCatalogResponse(req, cfgMerge, SYNTH_ONE, proxy);
+      expect(res.status).toBe(200);
+      expect(await res.text()).toBe(SYNTH_ONE);
+      expect(res.headers.get("cache-control")).toBe(SHORT);
+      expect(res.headers.get("x-robots-tag")).toBe("noindex");
+      expect(res.headers.get("access-control-allow-origin")).toBe("*");
+    });
+
+    it("is the normal one after a 404 at both paths (origin has no manifest)", async () => {
+      const { proxy } = originBy({});
+      const res = await aiCatalogResponse(req, cfgMerge, SYNTH_ONE, proxy);
+      expect(res.headers.get("cache-control")).toBe(NORMAL);
+    });
+
+    it("is the normal one in synthesize mode and on a merged document", async () => {
+      expect((await aiCatalogResponse(req, cfg, SYNTH_ONE, noProxy)).headers.get("cache-control")).toBe(NORMAL);
+      expect((await aiCatalogResponse(req, cfgMerge, SYNTH_ONE, async () => originDoc([OTHER]))).headers.get("cache-control")).toBe(NORMAL);
+    });
+  });
+
+  describe("a relayed document keeps origin's bytes and headers", () => {
+    const BOM = new Uint8Array([0xef, 0xbb, 0xbf]);
+    const bytes = (text: string, bom = false) => {
+      const body = new TextEncoder().encode(text);
+      if (!bom) return body;
+      const out = new Uint8Array(BOM.length + body.length);
+      out.set(BOM, 0);
+      out.set(body, BOM.length);
+      return out;
+    };
+
+    it("adds no content type when origin sent none", async () => {
+      const raw = bytes('{"entries":{}}');
+      const res = await aiCatalogResponse(req, cfgMerge, SYNTH_ONE, async () => {
+        const r = new Response(raw, { status: 200 });
+        expect(r.headers.get("content-type")).toBeNull();
+        return r;
+      });
+      expect(res.headers.get("content-type")).toBeNull();
+      expect(res.headers.get("x-robots-tag")).toBe("noindex");
+      expect(new Uint8Array(await res.arrayBuffer())).toEqual(raw);
+    });
+
+    it("relays a byte order mark as it came", async () => {
+      const raw = bytes('{"entries":[{"noId":true}]}', true);
+      const res = await aiCatalogResponse(req, cfgMerge, SYNTH_ONE, async () =>
+        new Response(raw, { status: 200, headers: { "content-type": "application/json" } }));
+      expect(new Uint8Array(await res.arrayBuffer())).toEqual(raw);
+    });
+
+    it("still merges a valid document that starts with a byte order mark", async () => {
+      const raw = bytes(JSON.stringify({ entries: [OTHER] }), true);
+      const res = await aiCatalogResponse(req, cfgMerge, SYNTH_ONE, async () =>
+        new Response(raw, { status: 200, headers: { "content-type": "application/json" } }));
+      expect(res.headers.get("content-type")).toBe(JSON_UTF8);
+      const ids = JSON.parse(await res.text()).entries.map((e: { identifier: string }) => e.identifier);
+      expect(ids).toEqual([OTHER.identifier, OUR_ID]);
+    });
+
+    it("merges application/ld+json and relays application/json-seq", async () => {
+      const ld = await aiCatalogResponse(req, cfgMerge, SYNTH_ONE, async () => originDoc([OTHER], "application/ld+json"));
+      expect(JSON.parse(await ld.text()).entries).toHaveLength(2);
+      const seq = await aiCatalogResponse(req, cfgMerge, SYNTH_ONE, async () => originDoc([OTHER], "application/json-seq"));
+      expect(seq.headers.get("content-type")).toBe("application/json-seq");
+      expect(seq.headers.get("x-robots-tag")).toBe("noindex");
+    });
+  });
+
+  describe("size cap: origin documents over 1 MiB are not merged", () => {
+    const MIB = 1024 * 1024;
+    /** A valid ARD document padded with spaces: mergeable, if it were read. */
+    const VALID_DOC = new TextEncoder().encode(JSON.stringify({ entries: [OTHER] }));
+    /**
+     * A stream of `total` bytes in 64 KiB chunks: the valid document, then spaces.
+     * Optionally fails after `failAfter` bytes.
+     */
+    function stream(total: number, failAfter?: number): ReadableStream<Uint8Array> {
+      let sent = 0;
+      return new ReadableStream<Uint8Array>({
+        pull(controller) {
+          if (failAfter !== undefined && sent >= failAfter) {
+            controller.error(new Error("connection reset"));
+            return;
+          }
+          if (sent >= total) {
+            controller.close();
+            return;
+          }
+          const n = Math.min(64 * 1024, total - sent);
+          const chunk = new Uint8Array(n).fill(0x20);
+          if (sent === 0) chunk.set(VALID_DOC.subarray(0, n), 0);
+          controller.enqueue(chunk);
+          sent += n;
+        },
+      });
+    }
+    async function expectRelayedUnchanged(res: Response, total: number) {
+      expect(res.status).toBe(200);
+      expect(res.headers.get("x-robots-tag")).toBe("noindex");
+      // Origin's own content type: the document was not merged.
+      expect(res.headers.get("content-type")).toBe("application/json");
+      const body = new Uint8Array(await res.arrayBuffer());
+      expect(body.byteLength).toBe(total);
+      expect(body.subarray(0, VALID_DOC.length)).toEqual(VALID_DOC);
+    }
+
+    it("relays a body whose Content-Length is over 1 MiB unread, with noindex", async () => {
+      const res = await aiCatalogResponse(req, cfgMerge, SYNTH_ONE, async () =>
+        new Response(stream(MIB + 1), { status: 200, headers: { "content-type": "application/json", "content-length": String(MIB + 1) } }));
+      await expectRelayedUnchanged(res, MIB + 1);
+    });
+
+    it("relays a body without Content-Length that turns out to be over 1 MiB, every byte of it", async () => {
+      const res = await aiCatalogResponse(req, cfgMerge, SYNTH_ONE, async () =>
+        new Response(stream(MIB + 100_000), { status: 200, headers: { "content-type": "application/json" } }));
+      await expectRelayedUnchanged(res, MIB + 100_000);
+    });
+
+    it("merges a body of exactly 1 MiB", async () => {
+      const doc = JSON.stringify({ entries: [OTHER] });
+      const padded = doc + " ".repeat(MIB - doc.length);
+      expect(new TextEncoder().encode(padded).byteLength).toBe(MIB);
+      const res = await aiCatalogResponse(req, cfgMerge, SYNTH_ONE, async () =>
+        new Response(new TextEncoder().encode(padded), { status: 200, headers: { "content-type": "application/json" } }));
+      expect(res.headers.get("content-type")).toBe(JSON_UTF8);
+      expect(JSON.parse(await res.text()).entries).toHaveLength(2);
+    });
+
+    it("serves the generated document with the short cache when the body fails mid-stream", async () => {
+      const res = await aiCatalogResponse(req, cfgMerge, SYNTH_ONE, async () =>
+        new Response(stream(10 * 64 * 1024, 2 * 64 * 1024), { status: 200, headers: { "content-type": "application/json" } }));
+      expect(res.status).toBe(200);
+      expect(await res.text()).toBe(SYNTH_ONE);
+      expect(res.headers.get("cache-control")).toBe("public, max-age=60, s-maxage=60");
+    });
   });
 
   it("does NOT merge when origin content-type is text/json or text/plain - relays unchanged", async () => {

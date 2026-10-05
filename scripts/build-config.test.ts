@@ -633,6 +633,100 @@ describe("ai_catalog generation (ARD v0.91 ard.json)", () => {
     await expect(runBuild(toml)).resolves.toBeDefined();
   });
 
+  it("uses [site].name as the entry's displayName, also when [agent_skills].name is set (M10)", async () => {
+    const toml = await writeToml("ard-display.toml", ardToml([], `\n[agent_skills]\nname = "my-shop"\n`));
+    const e = ard((await runBuild(toml)).files).entries[0];
+    expect(e.displayName).toBe("Example Co.");
+    expect(e.identifier).toBe("urn:air:example.com:skill:my-shop");
+  });
+
+  it("types the skill entry with [ai_catalog].skill_type", async () => {
+    const toml = await writeToml("ard-type.toml", ardToml([], `\n[ai_catalog]\nskill_type = "application/agent-skills+md"\n`));
+    expect(ard((await runBuild(toml)).files).entries[0].type).toBe("application/agent-skills+md");
+  });
+
+  it("names the duplicate alias by its index in a path collision", async () => {
+    const toml = await writeToml("ard-dup.toml", ardToml([], `\n[ai_catalog]\naliases = ["/.well-known/x.json", "/.well-known/x.json"]\n`));
+    await expect(runBuild(toml)).rejects.toThrow(
+      /both "ai_catalog\.aliases\[0\]" and "ai_catalog\.aliases\[1\]" are configured to claim \/\.well-known\/x\.json/,
+    );
+  });
+
+  it("strips one trailing dot of [site].domain from the urn and the did:web", async () => {
+    const toml = await writeToml("ard-dot.toml", ardToml().replace('domain = "example.com"', 'domain = "example.com."'));
+    const doc = ard((await runBuild(toml)).files);
+    expect(doc.entries[0].identifier).toBe("urn:air:example.com:skill:example-co");
+    expect(doc.host.identifier).toBe("did:web:example.com");
+  });
+
+  describe("a [site] value no identifier can be made from is a build error naming the field", () => {
+    it.each([
+      ['public_url = "localhost:8787"', /\[build-config\] \[site\]\.public_url "localhost:8787"/],
+      ['public_url = "example.com"', /\[build-config\] \[site\]\.public_url "example\.com"/],
+    ])("%s", async (line, message) => {
+      const toml = await writeToml("ard-bad-url.toml", ardToml([line]));
+      await expect(runBuild(toml)).rejects.toThrow(message);
+    });
+
+    it('domain = "example.com:99999"', async () => {
+      const toml = await writeToml("ard-bad-port.toml", ardToml().replace('domain = "example.com"', 'domain = "example.com:99999"'));
+      await expect(runBuild(toml)).rejects.toThrow(/\[build-config\] \[site\]\.domain "example\.com:99999"/);
+    });
+  });
+
+  describe("warnings", () => {
+    const warningsFor = async (text: string): Promise<string[]> => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      await runBuild(await writeToml("ard-warn.toml", text));
+      const out = warn.mock.calls.map((c) => String(c[0])).filter((m) => !m.includes("fallback_widget is not set"));
+      warn.mockRestore();
+      return out;
+    };
+
+    it("none for the defaults", async () => {
+      expect(await warningsFor(ardToml())).toEqual([]);
+    });
+
+    it("an explicit path at the predecessor ai-catalog.json (I2)", async () => {
+      const w = await warningsFor(ardToml([], `\n[ai_catalog]\npath = "/.well-known/ai-catalog.json"\naliases = []\n`));
+      expect(w).toEqual([expect.stringMatching(/consumers of ARD v0\.91 MUST fetch \/\.well-known\/ard\.json; move \[ai_catalog\]\.path to the default/)]);
+    });
+
+    it("a custom path while ard.json is not among the aliases, and none once it is (I2)", async () => {
+      const custom = await warningsFor(ardToml([], `\n[ai_catalog]\npath = "/.well-known/agents/ard.json"\n`));
+      expect(custom).toEqual([expect.stringMatching(/\/\.well-known\/ard\.json is not served/)]);
+      const aliased = await warningsFor(
+        ardToml([], `\n[ai_catalog]\npath = "/.well-known/agents/ard.json"\naliases = ["/.well-known/ard.json"]\n`),
+      );
+      expect(aliased).toEqual([]);
+    });
+
+    it("no path warning when the feature is off or in passthrough", async () => {
+      expect(await warningsFor(`${MINIMAL}\n\n[ai_catalog]\npath = "/.well-known/ai-catalog.json"\n`)).toEqual([]);
+      expect(await warningsFor(ardToml([], `\n[ai_catalog]\nmode = "passthrough"\npath = "/.well-known/ai-catalog.json"\n`))).toEqual([]);
+    });
+
+    it.each([
+      ["localhost:8787", "localhost", /is localhost/],
+      ["127.0.0.1", "127.0.0.1", /is an IP address/],
+      ["intranet", "intranet", /has no dot/],
+      ["a..b", "a..b", /has an empty label/],
+    ])("a urn publisher that is not an FQDN: domain %s (M5)", async (domain, publisher, reason) => {
+      const w = await warningsFor(ardToml().replace('domain = "example.com"', `domain = "${domain}"`));
+      expect(w).toHaveLength(1);
+      expect(w[0]).toContain(`urn:air publisher "${publisher}"`);
+      expect(w[0]).toMatch(reason);
+      expect(w[0]).toMatch(/fully qualified domain name/);
+    });
+
+    it("no FQDN warning when ARD is off, in passthrough, or the name is under .localhost", async () => {
+      const local = (rest: string) => MINIMAL.replace('domain = "example.com"', 'domain = "localhost:8787"') + rest;
+      expect(await warningsFor(local(""))).toEqual([]);
+      expect(await warningsFor(local(`\n\n[features]\nai_catalog = true\n\n[ai_catalog]\nmode = "passthrough"\n`))).toEqual([]);
+      expect(await warningsFor(ardToml().replace('domain = "example.com"', 'domain = "agent.localhost:8787"'))).toEqual([]);
+    });
+  });
+
   it("does not claim the alias, so no collision, when the feature is off or in passthrough", async () => {
     const off = `${MINIMAL}\n\n[ai_catalog]\naliases = ["/.well-known/api-catalog"]\n`;
     await expect(runBuild(await writeToml("ard-off.toml", off))).resolves.toBeDefined();
@@ -657,9 +751,22 @@ describe("one skill name for SKILL.md, the skills index and the ARD entry (M10)"
     return { frontmatter, index, ard: identifier.slice(identifier.lastIndexOf(":") + 1) };
   }
 
-  it("derives the same NFKD slug in all three from [site].name", async () => {
+  it("derives the same NFKD and transliterated slug in all three from [site].name", async () => {
     expect(await namesFor("Café")).toEqual({ frontmatter: "cafe", index: "cafe", ard: "cafe" });
-    expect(await namesFor("Grüße Welt")).toEqual({ frontmatter: "gru-e-welt", index: "gru-e-welt", ard: "gru-e-welt" });
+    expect(await namesFor("Grüße Welt")).toEqual({ frontmatter: "grusse-welt", index: "grusse-welt", ard: "grusse-welt" });
+  });
+
+  it("cuts a derived name to 64 characters and trims a hyphen left at the end, the same in all three", async () => {
+    // 63 letters, then a space: the slug is 63 letters, a hyphen, more letters; cut at 64 it ends in the hyphen.
+    const cut = "a".repeat(63);
+    expect(await namesFor(`${cut} bcdef`)).toEqual({ frontmatter: cut, index: cut, ard: cut });
+    const exact = "b".repeat(64);
+    expect(await namesFor(`${exact}cc`)).toEqual({ frontmatter: exact, index: exact, ard: exact });
+  });
+
+  it("rejects an [agent_skills].name over 64 characters, even with the skill surfaces off", async () => {
+    const text = `${MINIMAL}\n\n[features]\nagent_skills = false\nagent_skills_index = false\n\n[agent_skills]\nname = "${"a".repeat(65)}"\n`;
+    await expect(runBuild(await writeToml("long.toml", text))).rejects.toThrow(/agent_skills\.name/);
   });
 
   it("uses an explicit [agent_skills].name verbatim in all three", async () => {

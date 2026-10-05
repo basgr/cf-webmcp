@@ -278,6 +278,15 @@
               ],
               "default": "synthesize"
             },
+            "skill_type": {
+              "type": "string",
+              "enum": [
+                "application/ai-skill+md",
+                "text/markdown; profile=\"urn:air:agent-skills\"",
+                "application/agent-skills+md"
+              ],
+              "default": "application/ai-skill+md"
+            },
             "host_identifier": {
               "type": "string",
               "default": ""
@@ -322,6 +331,7 @@
             },
             "name": {
               "type": "string",
+              "maxLength": 64,
               "pattern": "^(?:[a-z0-9]+(?:-[a-z0-9]+)*)?$",
               "default": ""
             },

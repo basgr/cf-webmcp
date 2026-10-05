@@ -28,7 +28,15 @@ import { ConfigSchema, type Config, type ToolConfig, type ExecutorConfig } from 
 import { compileTemplate } from "../src/mini-language.js";
 import { decodeOriginTrialToken, type OriginTrialPayload } from "../src/origin-trial.js";
 import { buildFrontmatter, buildSkillBody, skillName } from "../src/routes/agent-skills.js";
-import { SKILL_MEDIA_TYPE, didWeb, siteHost, urnAir } from "../src/ard.js";
+import {
+  ARD_PATH,
+  ARD_PREDECESSOR_PATH,
+  didWeb,
+  publisherProblem,
+  siteHost,
+  sitePublisher,
+  urnAir,
+} from "../src/ard.js";
 import { LICENSE_PREAMBLE } from "../src/widget-preamble.js";
 import { bridgeNpmVersion, sha256Hex, widgetAssetName } from "./widget-pin.js";
 
@@ -1063,29 +1071,29 @@ function checkPathCollisions(config: Config): void {
   const claimed: Array<{ name: string; path: string }> = [];
   if (config.features.manifest) {
     claimed.push({ name: "manifest", path: config.manifest.path });
-    for (const a of config.manifest.aliases) {
-      if (a !== config.manifest.path) claimed.push({ name: "manifest.alias", path: a });
-    }
+    config.manifest.aliases.forEach((a, i) => {
+      if (a !== config.manifest.path) claimed.push({ name: `manifest.aliases[${i}]`, path: a });
+    });
   }
   if (config.features.webmcp_landing) claimed.push({ name: "webmcp_landing", path: config.webmcp_landing.path });
   if (config.features.llms_txt && config.llms_txt.mode !== "passthrough") claimed.push({ name: "llms_txt", path: config.llms_txt.path });
   if (config.features.robots_txt && config.robots_txt.mode !== "passthrough") claimed.push({ name: "robots_txt", path: config.robots_txt.path });
   if (config.features.agents_md && config.agents_md.mode !== "passthrough") {
     claimed.push({ name: "agents_md", path: config.agents_md.path });
-    for (const a of config.agents_md.aliases) claimed.push({ name: "agents_md.alias", path: a });
+    config.agents_md.aliases.forEach((a, i) => claimed.push({ name: `agents_md.aliases[${i}]`, path: a }));
   }
   if (config.features.api_catalog && config.api_catalog.mode !== "passthrough") {
     claimed.push({ name: "api_catalog", path: config.api_catalog.path });
   }
   if (config.features.ai_catalog && config.ai_catalog.mode !== "passthrough") {
     claimed.push({ name: "ai_catalog", path: config.ai_catalog.path });
-    for (const a of config.ai_catalog.aliases) {
-      if (a !== config.ai_catalog.path) claimed.push({ name: "ai_catalog.alias", path: a });
-    }
+    config.ai_catalog.aliases.forEach((a, i) => {
+      if (a !== config.ai_catalog.path) claimed.push({ name: `ai_catalog.aliases[${i}]`, path: a });
+    });
   }
   if (config.features.agent_skills && config.agent_skills.mode !== "passthrough") {
     claimed.push({ name: "agent_skills", path: config.agent_skills.path });
-    for (const a of config.agent_skills.aliases) claimed.push({ name: "agent_skills.alias", path: a });
+    config.agent_skills.aliases.forEach((a, i) => claimed.push({ name: `agent_skills.aliases[${i}]`, path: a }));
   }
   if (config.features.agent_skills_index && config.agent_skills_index.mode !== "passthrough") {
     claimed.push({ name: "agent_skills_index", path: config.agent_skills_index.path });
@@ -1253,6 +1261,57 @@ export interface AiCatalogEntry {
 }
 
 /**
+ * The did:web host and the urn:air publisher of the ARD manifest, or a build
+ * error naming the [site] field that cannot be used (a public_url without a
+ * scheme, a port out of range).
+ */
+function ardHosts(config: Config): { host: string; publisher: string } {
+  try {
+    return { host: siteHost(config.site), publisher: sitePublisher(config.site) };
+  } catch (e) {
+    throw new Error(`[build-config] ${(e as Error).message}`);
+  }
+}
+
+/**
+ * Warnings about an ARD manifest that is served (feature on, not passthrough)
+ * but will not be found or will not satisfy ARD v0.91:
+ *   - [ai_catalog].path left at the predecessor path, or moved elsewhere while
+ *     /.well-known/ard.json is not an alias: v0.91 consumers MUST fetch ard.json.
+ *   - a urn:air publisher that is not a fully qualified domain name (localhost,
+ *     an IP address, a single label, an empty label). Not an error: the
+ *     example-site fixture runs on localhost.
+ */
+export function ardWarnings(config: Config): string[] {
+  if (!config.features.ai_catalog || config.ai_catalog.mode === "passthrough") return [];
+  const out: string[] = [];
+  const { path, aliases } = config.ai_catalog;
+  if (path === ARD_PREDECESSOR_PATH) {
+    out.push(
+      `[build-config] [ai_catalog].path is ${ARD_PREDECESSOR_PATH}, the predecessor path: consumers of ARD v0.91 MUST fetch ` +
+        `${ARD_PATH}; move [ai_catalog].path to the default (${ARD_PATH}).`,
+    );
+  } else if (path !== ARD_PATH && !aliases.includes(ARD_PATH)) {
+    out.push(
+      `[build-config] [ai_catalog].path is ${path}, so ${ARD_PATH} is not served: consumers of ARD v0.91 MUST fetch ${ARD_PATH}. ` +
+        `Add it to [ai_catalog].aliases or move [ai_catalog].path to the default.`,
+    );
+  }
+  if (config.features.agent_skills) {
+    const publisher = ardHosts(config).publisher;
+    const problem = publisherProblem(publisher);
+    if (problem !== null) {
+      out.push(
+        `[build-config] the urn:air publisher "${publisher}" (from [site].domain) ${problem}: ARD v0.91 requires a fully qualified ` +
+          `domain name there (spec/urn-naming-guide.md section 2). The manifest is built anyway; use the real domain, or a name ` +
+          `under .localhost for local work.`,
+      );
+    }
+  }
+  return out;
+}
+
+/**
  * The ARD v0.91 manifest: `entries` is the only member ARD defines. `host` is
  * a transport member ARD ignores (v0.91 section 5.1); it keeps the predecessor
  * ai-catalog Host Info shape, and there is no specVersion.
@@ -1275,7 +1334,7 @@ export interface AiCatalogDoc {
  */
 export function buildAiCatalog(config: Config): AiCatalogDoc {
   const base = siteBase(config);
-  const host = siteHost(config.site);
+  const { host, publisher } = ardHosts(config);
   const hostInfo = {
     displayName: config.site.name,
     identifier: config.ai_catalog.host_identifier || didWeb(host),
@@ -1288,9 +1347,10 @@ export function buildAiCatalog(config: Config): AiCatalogDoc {
     ];
     const entry: AiCatalogEntry = {
       // The same name as the SKILL.md frontmatter and the skills index.
-      identifier: urnAir(config.site.domain, "skill", skillName(config)),
-      displayName: config.agent_skills.name || config.site.name,
-      type: SKILL_MEDIA_TYPE,
+      identifier: urnAir(publisher, "skill", skillName(config)),
+      // Human-readable: the site's name, not the slug.
+      displayName: config.site.name,
+      type: config.ai_catalog.skill_type,
       url: `${base}${config.agent_skills.path}`,
       description: config.agent_skills.description || config.site.description || undefined,
       capabilities: capabilities.length ? capabilities : undefined,
@@ -1605,6 +1665,10 @@ export async function buildConfig(opts: BuildOptions): Promise<void> {
   );
   const aiCatalog = config.features.ai_catalog ? buildAiCatalog(config) : null;
   const aiCatalogStr = aiCatalog ? stringifyCanonical(aiCatalog) : "";
+  for (const warning of ardWarnings(config)) {
+    // eslint-disable-next-line no-console
+    console.warn(warning);
+  }
   const buildAt = new Date().toISOString();
   const preflight = await loadPreflightResult(opts.outDir, configHash);
   const agentSkillsDigest = await computeAgentSkillsDigest(config);

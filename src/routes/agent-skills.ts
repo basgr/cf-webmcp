@@ -15,7 +15,7 @@
 
 import type { Config } from "../config-types";
 import { buildCacheControl } from "../cache";
-import { slugify } from "../ard";
+import { SKILL_NAME_MAX, slugify } from "../ard";
 
 const BEGIN = "<!-- cf-webmcp:begin -->";
 const END = "<!-- cf-webmcp:end -->";
@@ -118,13 +118,14 @@ export function mergeBlock(original: string, block: string): string {
 
 /**
  * The skill's name: [agent_skills].name when set (the schema holds it to the
- * Agent Skills name rule), else the slug of [site].name. The one value used by
- * the SKILL.md frontmatter, the skills index entry and the ARD entry
- * identifier. The build refuses a config where this is empty and one of
- * those is served.
+ * Agent Skills name rule, 64 characters at most), else the slug of [site].name
+ * cut to 64 characters, a hyphen left at the end trimmed. The one value used by
+ * the synthesized SKILL.md frontmatter, the skills index entry and the ARD entry
+ * identifier. The build refuses a config where this is empty and one of those
+ * is served.
  */
 export function skillName(config: Config): string {
-  return config.agent_skills.name || slugify(config.site.name);
+  return config.agent_skills.name || slugify(config.site.name).slice(0, SKILL_NAME_MAX).replace(/-+$/, "");
 }
 
 export function buildFrontmatter(config: Config): string {

@@ -1533,6 +1533,7 @@ describe("ARD v0.91: /.well-known/ard.json, the 301 from ai-catalog.json and rel
     expect(res.status).toBe(301);
     expect(res.headers.get("location")).toBe("/.well-known/ard.json");
     expect(res.headers.get("x-robots-tag")).toBe("noindex");
+    expect(res.headers.get("access-control-allow-origin")).toBe("*");
     expect(await res.text()).toBe("");
     // Claimed, not proxied: origin is not asked, even in merge mode.
     expect(fetchMock).not.toHaveBeenCalled();
@@ -1591,7 +1592,7 @@ describe("ARD v0.91: /.well-known/ard.json, the 301 from ai-catalog.json and rel
     ]);
   });
 
-  it("merge: relays an origin document that fails v0.91 validation unchanged, with noindex", async () => {
+  it("merge: relays an origin document that fails the structural check unchanged, with noindex", async () => {
     const invalid = JSON.stringify({ specVersion: "1.0", entries: [{ displayName: "no identifier" }] });
     stubOrigin({ [ARD]: () => new Response(invalid, { status: 200, headers: { "content-type": "application/json" } }) });
     const res = await call(handlerFor({ features: { ai_catalog: true }, ai_catalog: { mode: "merge" } }), ARD);

@@ -4,7 +4,21 @@
 
 - **`fallback_widget` now defaults to `false`.** The desktop-bridge widget is opt-in. A TOML that does not set the key loses the pairing flow on upgrade: the landing shows the "Not connected" state and the widget route answers 404. The build prints a notice for such a TOML. To keep the widget, set `fallback_widget = true` under `[features]`, run `npm run upload-widget` before deploying, and read [Known limits of the desktop bridge](deployment.md#known-limits-of-the-desktop-bridge). The default, WordPress and WooCommerce templates set it to `true` explicitly.
 - **`{{widget_block}}` now carries the pairing steps.** It renders the "Pairing required" heading, the bridge commands and the widget scripts. A custom landing template copied from the old default must drop its own pairing heading and CLI line, or it renders them twice (see the `{{widget_block}}` row in [`docs/customisation.md`](customisation.md)).
-- ARD moved to v0.91: canonical `/.well-known/ard.json`, 301 from `/.well-known/ai-catalog.json`, `rel="ard"`; see [`docs/ard.md`](ard.md).
+- **ARD moved to v0.91, and skill names follow the Agent Skills name rule.** See [`docs/ard.md`](ard.md). The ARD lines apply with `[features].ai_catalog = true`; the last three apply to every config.
+  - The manifest is served at `/.well-known/ard.json` and advertised with `rel="ard"` in the Link header and the link tag; `rel="ai-catalog"` is no longer emitted. The robots.txt `Agentmap:` line and the llms.txt line point at the new path.
+  - It is served as `application/json; charset=utf-8` instead of `application/ai-catalog+json`, and the document no longer has a `specVersion` member.
+  - `/.well-known/ai-catalog.json` now answers with a 301 to `/.well-known/ard.json` (`[ai_catalog].aliases`, default `["/.well-known/ai-catalog.json"]`; set `aliases = []` to leave it to origin).
+  - A config that sets `[ai_catalog].path = "/.well-known/ai-catalog.json"` keeps serving there, and the build warns: consumers of ARD v0.91 MUST fetch `/.well-known/ard.json`. Remove the line or move `path` to the default. A different custom path also warns while `/.well-known/ard.json` is not one of the aliases.
+  - The entry identifier changes for some sites. The skill name in it is now built the same way as for the SKILL.md, so accents are removed (`Café` was `caf`, now `cafe`) and some letters are transliterated (`ß` becomes `ss`). The publisher segment is `[site].domain`, lowercased and without its port.
+  - `host.identifier` is now `did:web:` plus the host of `[site].public_url` when that is set, with a port written as `%3A`; before, it always used `[site].domain`.
+  - The entry's `displayName` is now always `[site].name`, also when `[agent_skills].name` is set.
+  - The skill entry's `type` stays `application/ai-skill+md` by default and can be changed with the new `[ai_catalog].skill_type`.
+  - Merge mode: an origin document that fails the structural check is now relayed unchanged instead of being replaced by the generated one. When origin answers 404 at `ard.json`, its `/.well-known/ai-catalog.json` is merged instead. When origin already lists an entry with our identifier or our url, origin's entry is kept and ours is not added. Origin documents over 1 MiB are relayed, not merged, and the generated document that stands in for a failed origin is cached for 60 seconds only.
+  - Preflight now probes both `/.well-known/ard.json` and `/.well-known/ai-catalog.json`.
+  - The build warns when `[site].domain` is not a fully qualified domain name (localhost, an IP address, a single label), and fails with a named error when `[site].public_url` is not an absolute http(s) URL or a port is out of range.
+  - `[agent_skills].name` must be lowercase letters and digits in groups joined by single hyphens, at most 64 characters, even with `agent_skills` off. `name = "My Shop"` now fails validation; write `name = "my-shop"`.
+  - A `[site].name` with nothing left after slugify (a name only in a non-Latin script, say) now fails the build when a SKILL.md, the skills index or the ARD entry uses the name, instead of falling back to `site`. Set `[agent_skills].name`.
+  - A derived name is cut to 64 characters, and letters such as `ß`, `æ` and `ø` are now written as `ss`, `ae` and `o` instead of becoming hyphens (`Grüße Welt` was `gru-e-welt`, now `grusse-welt`). The SKILL.md frontmatter, the skills index and its digest change for such names.
 
 ## v0.5.1: landing runtime fix, docs overhaul, hardening
 

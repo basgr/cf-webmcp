@@ -7,7 +7,9 @@ import {
   didWeb,
   isArdContentType,
   isArdDocument,
+  publisherProblem,
   siteHost,
+  sitePublisher,
   slugify,
   urnAir,
 } from "./ard";
@@ -83,9 +85,26 @@ describe("slugify", () => {
     expect(slugify("ﬁle")).toBe("file");
   });
 
-  it("treats a letter without an ASCII decomposition as a separator, like any other non-ASCII character", () => {
-    // NFKD leaves ß as ß; it is not special-cased to "ss".
-    expect(slugify("Grüße Welt")).toBe("gru-e-welt");
+  it("transliterates letters NFKD leaves alone, after lowercasing, so uppercase input works too", () => {
+    expect(slugify("Grüße Welt")).toBe("grusse-welt");
+    expect(slugify("ÆBLE")).toBe("aeble");
+    expect(slugify("ØRSTED")).toBe("orsted");
+    expect(slugify("ẞ")).toBe("ss");
+    expect(slugify("Kırmızı Kedi")).toBe("kirmizi-kedi");
+    expect(slugify("Garðabær")).toBe("gardabaer");
+  });
+
+  it.each([
+    ["ß", "ss"], ["æ", "ae"], ["œ", "oe"], ["ø", "o"], ["đ", "d"], ["ł", "l"], ["þ", "th"],
+    ["ı", "i"], ["ð", "d"], ["ħ", "h"], ["ŧ", "t"], ["ŋ", "n"], ["ĸ", "k"],
+    ["Æ", "ae"], ["Œ", "oe"], ["Ø", "o"], ["Đ", "d"], ["Ł", "l"], ["Þ", "th"], ["Ð", "d"], ["Ħ", "h"], ["Ŧ", "t"], ["Ŋ", "n"],
+  ])("maps %s to %s", (letter, ascii) => {
+    expect(slugify(`x${letter}y`)).toBe(`x${ascii}y`);
+  });
+
+  it("still treats any other character outside a-z and 0-9 as a separator", () => {
+    expect(slugify("x☃y")).toBe("x-y");
+    expect(slugify("Łódź & Þór")).toBe("lodz-thor");
   });
 
   it("returns an empty string when nothing is left (the build refuses that where a slug is required)", () => {
@@ -96,9 +115,56 @@ describe("slugify", () => {
 
   it("always yields a valid skill name or an empty string", () => {
     const name = /^[a-z0-9]+(-[a-z0-9]+)*$/;
-    for (const input of ["Example Co.", "--a--b--", "Grüße Welt", "x", "A1 B2"]) {
+    for (const input of ["Example Co.", "--a--b--", "Grüße Welt", "x", "A1 B2", "ÆBLE ØRSTED"]) {
       expect(slugify(input)).toMatch(name);
     }
+  });
+});
+
+describe("trailing dot", () => {
+  it("is stripped once from the did:web host and the urn publisher", () => {
+    expect(didWeb("example.com.")).toBe("did:web:example.com");
+    expect(didWeb("example.com.:8787")).toBe("did:web:example.com%3A8787");
+    expect(urnAir("example.com.", "skill", "x")).toBe("urn:air:example.com:skill:x");
+    expect(urnAir("example.com.:8787", "skill", "x")).toBe("urn:air:example.com:skill:x");
+  });
+});
+
+describe("siteHost and sitePublisher name the [site] field they cannot use", () => {
+  it.each([
+    ["localhost:8787", /\[site\]\.public_url "localhost:8787"/],
+    ["example.com", /\[site\]\.public_url "example\.com"/],
+    ["ftp://example.com", /\[site\]\.public_url "ftp:\/\/example\.com"/],
+  ])("public_url %s", (publicUrl, message) => {
+    expect(() => siteHost({ domain: "example.com", public_url: publicUrl })).toThrow(message);
+  });
+
+  it("a domain with a port out of range", () => {
+    expect(() => siteHost({ domain: "example.com:99999" })).toThrow(/\[site\]\.domain "example\.com:99999"/);
+    expect(() => sitePublisher({ domain: "example.com:99999" })).toThrow(/\[site\]\.domain "example\.com:99999"/);
+    // Checked even when public_url supplies the host.
+    expect(() => siteHost({ domain: "example.com:99999", public_url: "https://example.com" })).toThrow(/\[site\]\.domain/);
+  });
+
+  it("sitePublisher is [site].domain without its port, lowercased, one trailing dot removed", () => {
+    expect(sitePublisher({ domain: "Example.com.:8787" })).toBe("example.com");
+  });
+});
+
+describe("publisherProblem (ARD v0.91: the urn publisher is an FQDN)", () => {
+  it.each(["example.com", "shop.example.co.uk", "agent.localhost", "xn--bcher-kva.example"])("accepts %s", (p) => {
+    expect(publisherProblem(p)).toBeNull();
+  });
+
+  it.each([
+    ["localhost", /localhost/],
+    ["127.0.0.1", /IP address/],
+    ["[::1]", /IP address/],
+    ["intranet", /no dot/],
+    ["a..b", /empty label/],
+    [".example.com", /empty label/],
+  ])("flags %s", (p, reason) => {
+    expect(publisherProblem(p)).toMatch(reason);
   });
 });
 
@@ -126,17 +192,21 @@ describe("isArdDocument (v0.91: an object with an entries array of objects, each
 });
 
 describe("isArdContentType", () => {
-  it("accepts application/json, application/ai-catalog+json and a missing type", () => {
+  it("accepts application/json, any application/*+json and a missing type", () => {
     expect(isArdContentType(null)).toBe(true);
     expect(isArdContentType("")).toBe(true);
     expect(isArdContentType("application/json")).toBe(true);
     expect(isArdContentType("application/json; charset=utf-8")).toBe(true);
+    expect(isArdContentType("Application/JSON;charset=UTF-8")).toBe(true);
     expect(isArdContentType("application/ai-catalog+json")).toBe(true);
+    expect(isArdContentType("application/ld+json")).toBe(true);
   });
 
-  it("rejects text types and HTML", () => {
+  it("rejects text types, HTML and JSON look-alikes", () => {
     expect(isArdContentType("text/json")).toBe(false);
     expect(isArdContentType("text/plain")).toBe(false);
     expect(isArdContentType("text/html")).toBe(false);
+    expect(isArdContentType("application/json-seq")).toBe(false);
+    expect(isArdContentType("application/jsonx")).toBe(false);
   });
 });

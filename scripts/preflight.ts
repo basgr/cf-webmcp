@@ -56,12 +56,22 @@ interface PathCheck {
    * merge_json: a 200 ARD document the Worker merges into (the ARD manifest in merge mode).
    */
   expect: "claim" | "merge" | "merge_json";
+  /**
+   * The ARD manifest in merge mode: its canonical path, or the predecessor path
+   * the merge reads only after a 404 at the canonical one (`redirected`: the
+   * predecessor is also an alias the Worker 301s to the canonical path).
+   */
+  ard?: { role: "canonical" } | { role: "predecessor"; canonical: string; redirected: boolean };
 }
 
 type Outcome =
   | { kind: "ok"; status: number; contentType: string }
   | { kind: "merge"; status: number; contentType: string; hasMarker: boolean }
   | { kind: "merge_json"; status: number; contentType: string; valid: boolean }
+  /** merge_json path answering neither 200, 404 nor 3xx: the Worker serves its generated document. */
+  | { kind: "fallback"; status: number; contentType: string }
+  /** The ARD predecessor path, not read because origin answers at the canonical path. */
+  | { kind: "not_merged"; status: number; contentType: string; canonical: string; redirected: boolean }
   | { kind: "collision"; status: number; contentType: string; reason: string }
   | { kind: "error"; reason: string };
 
@@ -152,13 +162,27 @@ function pathsToCheck(config: Config, base: URL): PathCheck[] {
   if (config.features.api_catalog && config.api_catalog.mode !== "passthrough") claim(config.api_catalog.path, "claim");
   if (config.features.ai_catalog && config.ai_catalog.mode !== "passthrough") {
     // In merge mode the Worker merges into origin's ARD document at the path, or
-    // at the predecessor path when origin has none at the path, so a JSON document
-    // at either is a merge. Every other alias is only ever redirected: a claim.
+    // at the predecessor path when origin answers 404 at the path, so a JSON
+    // document at either is a merge. Every other alias is only ever redirected: a
+    // claim. The canonical path is probed first: the predecessor's row depends on it.
+    const { path: canonical, aliases } = config.ai_catalog;
     const merge = config.ai_catalog.mode === "merge";
-    const paths = new Set([config.ai_catalog.path, ...config.ai_catalog.aliases]);
+    const paths = new Set([canonical, ...aliases]);
     if (merge) paths.add(ARD_PREDECESSOR_PATH);
     for (const p of paths) {
-      claim(p, merge && (p === config.ai_catalog.path || p === ARD_PREDECESSOR_PATH) ? "merge_json" : "claim");
+      if (!merge || (p !== canonical && p !== ARD_PREDECESSOR_PATH)) {
+        claim(p, "claim");
+        continue;
+      }
+      out.push({
+        label: p,
+        url: probeUrl(base, p),
+        expect: "merge_json",
+        ard:
+          p === canonical
+            ? { role: "canonical" }
+            : { role: "predecessor", canonical, redirected: aliases.includes(ARD_PREDECESSOR_PATH) },
+      });
     }
   }
   if (config.features.agent_skills && config.agent_skills.mode !== "passthrough") {
@@ -219,6 +243,11 @@ async function probe(check: PathCheck, deployToken: string | undefined): Promise
         }
         return { kind: "merge_json", status: 200, contentType: ct, valid: isArdDocument(parsed) };
       }
+      if (res.status !== 200) {
+        // Not a document of origin's the Worker would shadow: on any other answer
+        // the merge falls back to the generated document. A warning, not a collision.
+        return { kind: "fallback", status: res.status, contentType: ct };
+      }
       return {
         kind: "collision",
         status: res.status,
@@ -254,6 +283,25 @@ async function probe(check: PathCheck, deployToken: string | undefined): Promise
   } catch (e) {
     return { kind: "error", reason: (e as Error).message };
   }
+}
+
+/**
+ * Whether the merge stops at this answer from the canonical ARD path, so the
+ * predecessor path is never read: anything but a 404 (a redirect is followed by
+ * the Worker and may end in one, so it counts as unknown).
+ */
+function isAnswerTheMergeKeeps(status: number): boolean {
+  return status !== 404 && !(status >= 300 && status < 400);
+}
+
+/**
+ * The predecessor path's outcome when the merge does not read it. A collision,
+ * merge or fallback there means nothing then: the row says it is not merged.
+ * Nothing at all there (404, a redirect, a failed probe) stays as it was.
+ */
+function notMerged(outcome: Outcome, ard: { canonical: string; redirected: boolean }): Outcome {
+  if (outcome.kind === "error" || outcome.kind === "ok") return outcome;
+  return { kind: "not_merged", status: outcome.status, contentType: outcome.contentType, canonical: ard.canonical, redirected: ard.redirected };
 }
 
 /** One MCP probe: the path it POSTs to, what came back. */
@@ -349,7 +397,15 @@ function formatRow(check: PathCheck, outcome: Outcome): string {
     case "merge":
       return `  ${label} 200 ${outcome.contentType.padEnd(28)} → merge (marker ${outcome.hasMarker ? "present, will replace" : "absent, will append"})`;
     case "merge_json":
-      return `  ${label} 200 ${outcome.contentType.padEnd(28)} → ${outcome.valid ? "merge (ARD manifest, our entry is added unless origin lists its identifier)" : "merge refused (not an ARD manifest, relayed unchanged)"}`;
+      return `  ${label} 200 ${outcome.contentType.padEnd(28)} → ${outcome.valid ? "merge (ARD manifest, our entry is added unless origin lists its identifier or url)" : "merge refused (not an ARD manifest, relayed unchanged)"}`;
+    case "fallback":
+      return `  ${label} ${String(outcome.status).padEnd(3)} ${outcome.contentType.padEnd(28)} → WARNING (the Worker serves the generated document)`;
+    case "not_merged":
+      return `  ${label} ${String(outcome.status).padEnd(3)} ${outcome.contentType.padEnd(28)} → ${
+        outcome.redirected
+          ? `redirected to ${outcome.canonical}, not merged`
+          : `not merged (not read, origin answers at ${outcome.canonical})`
+      }`;
     case "collision":
       return `  ${label} ${String(outcome.status).padEnd(3)} ${outcome.contentType.padEnd(28)} → COLLISION (${outcome.reason})`;
     case "error":
@@ -391,8 +447,16 @@ export async function runPreflight(configPath: string, force: boolean, opts: Pre
   let hardCollisions = 0;
   const collisions: string[] = [];
   const warnings: string[] = [];
+  // The merge reads the ARD predecessor path only after a 404 at the canonical
+  // path; the canonical check comes first in `checks`.
+  let ardCanonicalStatus: number | null = null;
   for (const check of checks) {
-    const outcome = await probe(check, deployToken);
+    let outcome = await probe(check, deployToken);
+    if (check.ard?.role === "canonical") {
+      ardCanonicalStatus = outcome.kind === "error" ? null : outcome.status;
+    } else if (check.ard?.role === "predecessor" && ardCanonicalStatus !== null && isAnswerTheMergeKeeps(ardCanonicalStatus)) {
+      outcome = notMerged(outcome, check.ard);
+    }
     log(formatRow(check, outcome));
     if (outcome.kind === "collision") {
       hardCollisions++;
@@ -403,6 +467,13 @@ export async function runPreflight(configPath: string, force: boolean, opts: Pre
       warnings.push(
         `${check.label}: origin's JSON is not an ARD manifest (an object with an entries array of objects with a string identifier); ` +
           `the Worker relays it unchanged and adds no entry`,
+      );
+    } else if (outcome.kind === "fallback") {
+      warnings.push(`${check.label}: origin answers ${outcome.status}; in merge mode the Worker serves the generated document instead`);
+    } else if (outcome.kind === "not_merged" && outcome.redirected && outcome.status === 200) {
+      warnings.push(
+        `${check.label}: origin serves a document here too, but the Worker redirects this path to ${outcome.canonical} ` +
+          `and does not merge it`,
       );
     } else if (outcome.kind === "error") {
       warnings.push(`${check.label}: ${outcome.reason}`);
