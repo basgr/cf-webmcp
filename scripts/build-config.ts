@@ -1606,6 +1606,26 @@ export function globPatternWarnings(config: Config): string[] {
 }
 
 /**
+ * An [origin].allowed_origins entry with a path, query or fragment. Every check compares origins
+ * (scheme, host and port: src/safe-fetch.ts, resolveUrl, checkAllowList), so the rest of the
+ * entry is ignored and the whole origin is allowed, which is not what `https://example.com/blog`
+ * reads as. One warning per such entry; the build goes on.
+ */
+export function allowedOriginWarnings(config: Config): string[] {
+  const out: string[] = [];
+  for (const entry of config.origin.allowed_origins) {
+    const url = new URL(entry);
+    if (url.pathname === "/" && url.search === "" && url.hash === "" && !entry.endsWith("?") && !entry.endsWith("#")) continue;
+    out.push(
+      `[build-config] [origin].allowed_origins entry ${JSON.stringify(entry)} has a path, query or fragment, which is ignored: ` +
+        `the Worker compares origins only, so the whole origin ${url.origin} is allowed, every path on it included. ` +
+        `Write the origin alone (${url.origin}) so the config says what it allows.`,
+    );
+  }
+  return out;
+}
+
+/**
  * A url_template whose first placeholder is in the path and has nothing fixed in front of it but
  * the origin (its static path prefix is `/`, as in `https://example.com{{path}}`): a caller then
  * chooses the whole path, so the tool can request any path on the origin, and every request
@@ -2070,6 +2090,7 @@ export async function buildConfig(opts: BuildOptions): Promise<void> {
     ...declaredInputWarnings(config),
     ...deadConfigWarnings(config),
     ...globPatternWarnings(config),
+    ...allowedOriginWarnings(config),
     ...rootTemplateWarnings(config),
   ]) {
     // eslint-disable-next-line no-console

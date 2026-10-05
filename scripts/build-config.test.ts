@@ -3046,6 +3046,44 @@ paths       = ${patterns}
   });
 });
 
+describe("an [origin].allowed_origins entry with a path gets a warning: only its origin counts", () => {
+  const originWarnings = () =>
+    (console.warn as unknown as { mock: { calls: unknown[][] } }).mock.calls
+      .map((c) => String(c[0]))
+      .filter((m) => m.includes("[origin].allowed_origins entry"));
+  const withAllowed = (list: string[]) =>
+    MINIMAL.replace('allowed_origins = ["https://example.com"]', `allowed_origins = ${JSON.stringify(list)}`);
+
+  it.each([
+    ["a path", "https://example.com/blog"],
+    ["a path with a trailing slash", "https://example.com/blog/"],
+    ["a query", "https://example.com/?x=1"],
+    ["a fragment", "https://example.com/#top"],
+  ])("warns for %s, naming the entry and the origin it allows, and still builds", async (_label, entry) => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { files } = await runBuild(await writeToml("ao-path.toml", withAllowed([entry])));
+
+    expect(files).toHaveProperty("config.ts");
+    const warnings = originWarnings();
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toMatch(/^\[build-config\] \[origin\]\.allowed_origins entry /);
+    expect(warnings[0]).toContain(JSON.stringify(entry));
+    expect(warnings[0]).toContain("the whole origin https://example.com");
+  });
+
+  it("warns once per entry with a path", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    await runBuild(await writeToml("ao-two.toml", withAllowed(["https://example.com/a", "https://cdn.example.com/b", "https://api.example.com"])));
+    expect(originWarnings()).toHaveLength(2);
+  });
+
+  it.each([["https://example.com"], ["https://example.com/"], ["https://EXAMPLE.com:443"]])("is silent for %s", async (entry) => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    await runBuild(await writeToml("ao-quiet.toml", withAllowed([entry])));
+    expect(originWarnings()).toEqual([]);
+  });
+});
+
 describe("a url_template whose first path placeholder sits at the root gets a warning: any origin path is reachable with the deploy token", () => {
   const rootWarnings = () =>
     (console.warn as unknown as { mock: { calls: unknown[][] } }).mock.calls
