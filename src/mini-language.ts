@@ -67,11 +67,17 @@ export function parsePlaceholder(raw: string): Placeholder {
 
 /**
  * Determine whether a position in the URL is path or query.
- * Path: characters before the first unescaped `?`.
- * Query: characters after.
+ * Path: characters before the template's first `?` or `#`.
+ * Query (or fragment): characters after.
+ *
+ * Only the template's own text counts: placeholders are masked before the search, so a `?` or
+ * `#` inside a `default:` or `map:` value (`{{a|default:v?1}}`) does not turn the placeholders
+ * after it into query values, which would exempt them from the dot-segment check.
  */
 function findPositions(template: string): Array<{ start: number; end: number; isQuery: boolean }> {
-  const queryStart = template.indexOf("?");
+  PLACEHOLDER_RE.lastIndex = 0;
+  const masked = template.replace(PLACEHOLDER_RE, (whole) => "_".repeat(whole.length));
+  const queryStart = masked.search(/[?#]/);
   PLACEHOLDER_RE.lastIndex = 0;
   const out: Array<{ start: number; end: number; isQuery: boolean }> = [];
   let m: RegExpExecArray | null;

@@ -114,6 +114,15 @@ describe("resolveUrl: a template cannot be steered out of its path prefix", () =
     expect(ok.url.pathname).toBe("/a/b/y");
   });
 
+  it("refuses .. after a placeholder whose default holds a ?, by the dot-segment check and not only by the prefix", () => {
+    const r = resolve("https://example.com/api/{{a|default:v?1}}/{{b}}", { b: ".." });
+    if (r.ok) throw new Error(`resolved to ${r.url.href}`);
+    expect(r.error.code).toBe("invalid_input");
+    expect(r.error.message).toContain("{{b}}");
+    expect(r.error.message).toContain("path segment");
+    expect(r.error.message).not.toContain("path prefix");
+  });
+
   it("checks the origin first: a host that left allowed_origins is still refused for that", () => {
     const r = resolve("https://{{h}}/api/x", { h: "evil.example.com" });
     if (r.ok) throw new Error("expected rejection");

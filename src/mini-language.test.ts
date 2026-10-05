@@ -202,6 +202,28 @@ describe("a path-position placeholder cannot carry a dot segment", () => {
     expect(compileTemplate("https://example.com/search?q={{q}}").resolver({ q: "../x" })).toBe("https://example.com/search?q=..%2Fx");
   });
 
+  it.each([
+    ["a ? in a default", "https://example.com/api/{{a|default:v?1}}/{{b}}", {}, "https://example.com/api/v%3F1/x/y"],
+    ["a # in a default", "https://example.com/api/{{a|default:v#1}}/{{b}}", {}, "https://example.com/api/v%231/x/y"],
+    ["a ? in a map value", "https://example.com/api/{{a|map:k=v?1}}/{{b}}", { a: "k" }, "https://example.com/api/v%3F1/x/y"],
+  ])("finds the query by the template's own text, never by %s of an earlier placeholder", (_label, template, input, resolved) => {
+    // Such a ? made every later placeholder a query value: `..` went through unchecked, and only
+    // the path-prefix check stood between it and the parent path.
+    const compiled = compileTemplate(template);
+    expect(compiled.slots.map((s) => s.isQuery)).toEqual([false, false]);
+    expect(() => compiled.resolver({ ...input, b: ".." })).toThrow(/\{\{b\}\} in a path position must not contain a "\." or "\.\." path segment/);
+    expect(compiled.resolver({ ...input, b: "x/y" })).toBe(resolved);
+  });
+
+  it("still reads a placeholder after the template's own ? or # as a query (or fragment) value", () => {
+    const query = compileTemplate("https://example.com/api/{{a|default:v?1}}?q={{b}}");
+    expect(query.slots.map((s) => s.isQuery)).toEqual([false, true]);
+    expect(query.resolver({ b: "../x" })).toBe("https://example.com/api/v%3F1?q=..%2Fx");
+    const fragment = compileTemplate("https://example.com/page#{{frag}}");
+    expect(fragment.slots.map((s) => s.isQuery)).toEqual([true]);
+    expect(fragment.resolver({ frag: "a/b" })).toBe("https://example.com/page#a%2Fb");
+  });
+
   it("names the placeholder and never echoes the value", () => {
     let message = "";
     try {
