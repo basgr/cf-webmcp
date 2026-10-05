@@ -26,7 +26,7 @@ Edit `webmcp.toml`:
 
 - `[site].domain` - your domain (e.g. `example.com`).
 - `[site].name`, `[site].description` - shown in the manifest and landing.
-- `[origin].base_url` - your real origin URL.
+- `[origin].base_url` - your real origin URL. Only its origin (scheme, host and port) is used: proxied requests and the merge routes go to that origin with the request's own path, and a path in `base_url` is ignored.
 - `[origin].allowed_origins` - list of origins executors may fetch. Usually just your origin.
 - Tool URLs in `[[tools]]` - update `sitemap_url`, `feed_url`, `url_template` to point at your site.
 - `[origin_trial].tokens` - your token for Chrome's WebMCP origin trial, so Chrome visitors get WebMCP without a flag on the HTML pages the Worker proxies and on the landing page (in route-only mode only on the landing page; see [`docs/browser-support.md`](browser-support.md#the-chrome-origin-trial)).

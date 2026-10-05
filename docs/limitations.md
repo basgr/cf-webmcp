@@ -34,6 +34,14 @@ The Worker adds its `<link rel="webmcp">` (and the other discovery `<link>` tags
 
 The bootstrap `<script>` does not depend on `<head>`. It goes before `</body>`, and a page without `</body>` gets it at the very end of the document (minified HTML often omits `</body>`). That includes a page with no `<body>` at all, as long as it has a doctype, an `<html>` or a `<head>` tag. Bare fragments with no doctype, `<html>`, `<head>` or `<body>` tag, such as an AJAX partial, are passed through untouched, with only the `Link` header added.
 
+## The bootstrap goes before the first `</body>` the rewriter sees
+
+HTMLRewriter is a streaming tokenizer, not a tree builder, so it also reports a `body` element that sits inside `<template>` or inline `<svg>`. The Worker puts the bootstrap `<script>` before the end of the first `body` element it is told about. On a page where `<template><body></body></template>` comes before the real `</body>`, the script lands inside the template, whose content is inert: it never runs, and the page registers no tools. A `body` tag inside inline SVG (`<svg><body/></svg>`) moves the script into the SVG markup the same way; whether it runs there depends on how the browser's parser reads that markup. The `<link>` tags and the `Link` header are not affected. Workaround: keep `body` tags out of templates and inline SVG at origin.
+
+## Merge routes: no deadline on the body, no rate limit
+
+The merge routes (`/llms.txt`, `/robots.txt`, `/.well-known/agents.md`, the API catalog, the ARD manifest and the agent skill, in a merge mode) wait at most 10 seconds for origin's response headers, then answer `504`. There is no deadline on the body after that: an origin that sends its headers and then trickles the body keeps the request, and the Worker's fetch, open for as long as it takes, both while the Worker reads up to 1 MiB to merge and while it relays a larger file. These routes are also outside the Worker's rate limiter, which counts tool calls (`POST <namespace>/exec/<tool>`) only, so every request to them fetches origin's file. If they need a limit, use a Cloudflare rate limiting rule on their paths, and keep origin's files small and fast.
+
 ## HTML injection fails open only on setup errors
 
 Selectors in `[[forms]]` and `dom_extract` are checked against a strict grammar when the config is compiled (see [`docs/form-injection.md`](form-injection.md)), so most typos fail the build. Because the check cannot promise that Cloudflare's HTMLRewriter takes everything it accepts, the Worker also guards each form selector and each param selector separately at request time: when HTMLRewriter rejects one, only that form or param is skipped (one log line names it), and the bootstrap script, the `<link>` tags and the other forms are injected as usual.

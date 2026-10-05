@@ -2,7 +2,11 @@
 
 ## v0.6.0
 
-Some configs need changes, and most deployments need a step or two before the first deploy. The groups below go from what needs action to what is new.
+Some configs need changes, and most deployments need a step or two before the first deploy. The security fix comes first; the groups after it go from what needs action to what is new.
+
+### Security
+
+- **Upgrade promptly: v0.5.x and earlier fetched another host for some paths.** For a request whose path starts with `//` or `/\` (`https://your-site.example//attacker.example/login`; `/.//attacker.example/...` and `/..//attacker.example/...` too), the proxy fetched `attacker.example` instead of your origin. It sent that host the visitor's request as it came, with its method, its cookies (`HttpOnly` ones included), its `Authorization` header and its body, and served the answer under your domain, with the bootstrap injected. Every release since v0.1.0 does this, on every deployment that proxies page requests. v0.6.0 always fetches the origin of `[origin].base_url`, with the path as the URL parser wrote it: the request above goes to `<your origin>//attacker.example/login`, and origin answers it like any other path. Should a path ever produce a URL on another origin, the Worker answers `400` with the plain-text body `bad request path` and fetches nothing. There is no config to change.
 
 ### Before you deploy
 
