@@ -892,13 +892,26 @@ function originTrialCoversSite(payload: OriginTrialPayload, site: URL): boolean 
 }
 
 /**
+ * "in N days" from one day up, "in N hours" below that, "in less than an hour" under an hour.
+ * Whole units, rounded down: the warning never promises more time than there is.
+ */
+function timeLeft(ms: number): string {
+  const days = Math.floor(ms / 86_400_000);
+  if (days >= 1) return `in ${days} day${days === 1 ? "" : "s"}`;
+  const hours = Math.floor(ms / 3_600_000);
+  if (hours >= 1) return `in ${hours} hour${hours === 1 ? "" : "s"}`;
+  return "in less than an hour";
+}
+
+/**
  * Checks [origin_trial].tokens, which the Worker sends as `Origin-Trial` headers unchanged.
  * Chrome ignores a token without saying so, so every way a token silently does nothing is a
- * build error: it cannot be decoded, it is listed twice, it is a third-party token (not
- * accepted as a header on a first-party document), it was issued for another origin than the
- * site's, or it has expired. A token that expires within 30 days is a warning. Every problem
- * is reported at once, by index; no message carries a token beyond decodeOriginTrialToken's
- * short prefix. The signature is not checked: that is Chrome's job.
+ * build error: it cannot be decoded (decodeOriginTrialToken is as strict as Chrome's parser),
+ * it is listed twice, it is a third-party token (not accepted as a header on a first-party
+ * document; Chrome reads the flag on version 3 tokens only), it was issued for another origin
+ * than the site's, or it has expired. A token that expires within 30 days is a warning. Every
+ * problem is reported at once, by index; no message carries a token beyond
+ * decodeOriginTrialToken's short prefix. The signature is not checked: that is Chrome's job.
  */
 function checkOriginTrial(config: Config, now: Date): void {
   const tokens = config.origin_trial.tokens;
@@ -929,9 +942,10 @@ function checkOriginTrial(config: Config, now: Date): void {
     }
     firstIndex.set(token, i);
 
+    let version: number;
     let payload: OriginTrialPayload;
     try {
-      payload = decodeOriginTrialToken(token).payload;
+      ({ version, payload } = decodeOriginTrialToken(token));
     } catch (e) {
       problems.push(`${name} cannot be used: ${(e as Error).message}`);
       return;
@@ -941,7 +955,7 @@ function checkOriginTrial(config: Config, now: Date): void {
     const expiresAt = new Date(expiryMs).toISOString();
     const label = `${name} (feature ${JSON.stringify(payload.feature)}, expires ${expiresAt})`;
     const own: string[] = [];
-    if (payload.isThirdParty) {
+    if (payload.isThirdParty && version === 3) {
       own.push(
         `is a third-party token. Chrome does not accept a third-party token delivered as an Origin-Trial HTTP header on a ` +
           `first-party document. Register the trial as a first-party one for ${site.origin} and use that token.`,
@@ -960,10 +974,9 @@ function checkOriginTrial(config: Config, now: Date): void {
     for (const text of own) problems.push(`${label} ${text}`);
 
     if (own.length === 0 && expiryMs - nowMs <= ORIGIN_TRIAL_WARN_WITHIN_MS) {
-      const days = Math.ceil((expiryMs - nowMs) / 86_400_000);
       warnings.push(
-        `[build-config] ${label} expires in ${days} day${days === 1 ? "" : "s"}. ` +
-          `Renew it and redeploy before then: after that Chrome ignores it.`,
+        `[build-config] ${name} (feature ${JSON.stringify(payload.feature)}) expires ${expiresAt}, ` +
+          `${timeLeft(expiryMs - nowMs)}. Renew it and redeploy before then: after that Chrome ignores it.`,
       );
     }
   });

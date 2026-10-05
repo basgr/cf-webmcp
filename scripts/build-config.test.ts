@@ -965,6 +965,52 @@ describe("buildConfig: [origin_trial]", () => {
     expect(messages[0]).not.toContain(token);
   });
 
+  describe("the near-expiry warning says when, and how long from the build", () => {
+    const now = new Date("2026-10-05T12:00:00.000Z");
+    const nowSeconds = now.getTime() / 1000;
+    const HOUR = 3600;
+
+    async function warningFor(remainingSeconds: number, name: string): Promise<{ message: string; expiry: number }> {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const expiry = nowSeconds + remainingSeconds;
+      await runBuild(await writeToml(`${name}.toml`, otToml([tokenFor({ expiry })])), { now });
+      const messages = originTrialWarnings(warn);
+      expect(messages).toHaveLength(1);
+      return { message: messages[0]!, expiry };
+    }
+
+    it("prints the ISO expiry date-time once, and the days left", async () => {
+      const { message, expiry } = await warningFor(12 * 86_400 + 5 * HOUR, "ot-w-days");
+      const iso = new Date(expiry * 1000).toISOString();
+      expect(message.split(iso)).toHaveLength(2);
+      expect(message).toContain(`expires ${iso}, in 12 days`);
+    });
+
+    it("counts whole days, rounding down, and says day in the singular", async () => {
+      const { message } = await warningFor(86_400 + 23 * HOUR, "ot-w-oneday");
+      expect(message).toMatch(/, in 1 day\b(?!s)/);
+      expect(message).not.toMatch(/hour/);
+    });
+
+    it("switches to hours below one day", async () => {
+      const { message, expiry } = await warningFor(5 * HOUR + 20 * 60, "ot-w-hours");
+      expect(message).toContain(`expires ${new Date(expiry * 1000).toISOString()}, in 5 hours`);
+      expect(message).not.toMatch(/\bday/);
+    });
+
+    it("says 1 hour, not 1 day, for a token that expires in an hour", async () => {
+      const { message } = await warningFor(HOUR, "ot-w-onehour");
+      expect(message).toMatch(/, in 1 hour\b(?!s)/);
+      expect(message).not.toMatch(/\bday/);
+    });
+
+    it("says less than an hour when under an hour is left", async () => {
+      const { message } = await warningFor(30 * 60, "ot-w-minutes");
+      expect(message).toContain("in less than an hour");
+      expect(message).not.toMatch(/\b0 hours/);
+    });
+  });
+
   it("warns at exactly 30 days and not a second later", async () => {
     const now = new Date("2026-10-05T12:00:00.000Z");
     const nowSeconds = now.getTime() / 1000;
@@ -991,6 +1037,67 @@ describe("buildConfig: [origin_trial]", () => {
     await expect(runBuild(await writeToml("ot-third.toml", otToml([token])))).rejects.toThrow(
       /origin_trial\.tokens\[0\].*third-party/is,
     );
+  });
+
+  describe("a version 2 token", () => {
+    // Chrome reads isThirdParty only from version 3 tokens, so on version 2 the flag means nothing.
+    it("is not rejected for isThirdParty, which Chrome does not read on version 2", async () => {
+      const token = makeOriginTrialToken({ isThirdParty: true }, { version: 2 });
+      await expect(runBuild(await writeToml("ot-v2-third.toml", otToml([token])))).resolves.toBeDefined();
+    });
+
+    it("is still checked for the origin and the expiry", async () => {
+      const wrongOrigin = makeOriginTrialToken({ isThirdParty: true, origin: "https://other.example:443" }, { version: 2 });
+      await expect(runBuild(await writeToml("ot-v2-origin.toml", otToml([wrongOrigin])))).rejects.toThrow(
+        /origin_trial\.tokens\[0\]/,
+      );
+      const expired = makeOriginTrialToken({ isThirdParty: true, expiry: expiryInDays(-1) }, { version: 2 });
+      await expect(runBuild(await writeToml("ot-v2-expired.toml", otToml([expired])))).rejects.toThrow(/expired/);
+    });
+
+    it("does not make a version 3 third-party token acceptable", async () => {
+      const token = makeOriginTrialToken({ isThirdParty: true }, { version: 3 });
+      await expect(runBuild(await writeToml("ot-v3-third.toml", otToml([token])))).rejects.toThrow(/third-party/i);
+    });
+  });
+
+  describe("tokens Chrome would drop as malformed", () => {
+    it("rejects a padded token whose = was stripped", async () => {
+      let token = "";
+      for (let n = 0; n < 3 && !token.endsWith("="); n++) token = tokenFor({ usage: "x".repeat(n) });
+      const stripped = token.replace(/=+$/, "");
+      await expect(runBuild(await writeToml("ot-stripped.toml", otToml([stripped])))).rejects.toThrow(
+        /origin_trial\.tokens\[0\].*padding/s,
+      );
+    });
+
+    it("rejects two tokens pasted together", async () => {
+      let one = "";
+      for (let n = 0; n < 3 && (one === "" || one.endsWith("=")); n++) one = tokenFor({ usage: "x".repeat(n) });
+      await expect(runBuild(await writeToml("ot-pasted.toml", otToml([one + tokenFor()])))).rejects.toThrow(
+        /origin_trial\.tokens\[0\].*payload length/s,
+      );
+    });
+
+    it("rejects a token with bytes after its payload", async () => {
+      const token = makeOriginTrialToken({}, { trailing: new Uint8Array([1, 2, 3]) });
+      await expect(runBuild(await writeToml("ot-trailing.toml", otToml([token])))).rejects.toThrow(/payload length/);
+    });
+
+    it("rejects a token longer than 6144 characters", async () => {
+      const token = tokenFor({ usage: "x".repeat(5300) });
+      expect(token.length).toBeGreaterThan(6144);
+      await expect(runBuild(await writeToml("ot-long.toml", otToml([token])))).rejects.toThrow(/too long/);
+    });
+
+    it("rejects a fractional, zero or 32-bit-overflowing expiry", async () => {
+      for (const expiry of [expiryInDays(30) + 0.5, 0, 3_000_000_000]) {
+        await expect(
+          runBuild(await writeToml(`ot-expiry-${expiry}.toml`, otToml([tokenFor({ expiry })]))),
+          String(expiry),
+        ).rejects.toThrow(/payload\.expiry/);
+      }
+    });
   });
 
   it("rejects a token that cannot be decoded, without echoing it", async () => {

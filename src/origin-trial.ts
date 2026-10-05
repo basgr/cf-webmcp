@@ -11,6 +11,11 @@
  * Pure: atob, Uint8Array, DataView, TextDecoder and Headers only, no Buffer and no
  * Workers APIs, so the same code runs in the build (node) and in the Worker (workerd).
  *
+ * The decoder is as strict as Chrome's own parser (TrialToken::Extract): a token Chrome
+ * calls malformed does nothing, and says nothing, so the build must refuse it. That means
+ * at most 6144 characters, strict base64 (a multiple of 4 characters, padding required)
+ * and a payload length that equals exactly the bytes after the header.
+ *
  * Token layout (the part that does not depend on third-party use), after base64:
  *
  *   byte 0        version, 2 or 3
@@ -22,6 +27,10 @@
 /** What the config schema accepts as a token: standard base64, padding optional up to two "=". */
 export const ORIGIN_TRIAL_TOKEN_RE = /^[A-Za-z0-9+/]+={0,2}$/;
 
+/** Chrome's kMaxTokenSize: a longer token is dropped unread. */
+const MAX_TOKEN_LENGTH = 6144;
+/** Chrome reads expiry as an int: a whole number of seconds, 1 to 2^31 - 1. */
+const MAX_EXPIRY = 2_147_483_647;
 const SIGNATURE_LENGTH = 64;
 const LENGTH_OFFSET = 1 + SIGNATURE_LENGTH;
 const PAYLOAD_OFFSET = LENGTH_OFFSET + 4;
@@ -58,12 +67,16 @@ function fail(token: string, reason: string): never {
 }
 
 /**
- * Decodes a token and validates the shape of what it carries. The signature is not
- * checked. Throws an Error on anything malformed; the message names the token by a
- * short prefix only, never in full.
+ * Decodes a token and validates the shape of what it carries, to the standard Chrome's
+ * parser applies. The signature is not checked. Throws an Error on anything malformed; the
+ * message names the token by a short prefix only, never in full.
  */
 export function decodeOriginTrialToken(token: string): DecodedOriginTrialToken {
   if (!ORIGIN_TRIAL_TOKEN_RE.test(token)) fail(token, "not valid base64");
+  if (token.length > MAX_TOKEN_LENGTH) {
+    fail(token, `too long (${token.length} characters, Chrome reads at most ${MAX_TOKEN_LENGTH})`);
+  }
+  if (token.length % 4 !== 0) fail(token, "base64 padding missing or wrong length");
 
   let bytes: Uint8Array;
   try {
@@ -84,8 +97,8 @@ export function decodeOriginTrialToken(token: string): DecodedOriginTrialToken {
   }
 
   const payloadLength = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(LENGTH_OFFSET, false);
-  if (payloadLength > bytes.length - PAYLOAD_OFFSET) {
-    fail(token, `payload length is ${payloadLength} bytes but only ${bytes.length - PAYLOAD_OFFSET} follow`);
+  if (payloadLength !== bytes.length - PAYLOAD_OFFSET) {
+    fail(token, `payload length is ${payloadLength} bytes but ${bytes.length - PAYLOAD_OFFSET} follow the header`);
   }
 
   let text: string;
@@ -118,10 +131,9 @@ export function decodeOriginTrialToken(token: string): DecodedOriginTrialToken {
   if (typeof p["feature"] !== "string" || p["feature"] === "") fail(token, "payload.feature must be a non-empty string");
 
   const expiry = p["expiry"];
-  if (typeof expiry !== "number" || !Number.isFinite(expiry)) {
-    fail(token, "payload.expiry must be a finite number (seconds since the epoch)");
+  if (typeof expiry !== "number" || !Number.isInteger(expiry) || expiry <= 0 || expiry > MAX_EXPIRY) {
+    fail(token, `payload.expiry must be a whole number of seconds since the epoch, from 1 to ${MAX_EXPIRY}`);
   }
-  if (Number.isNaN(new Date(expiry * 1000).getTime())) fail(token, "payload.expiry is outside the range of dates");
 
   const payload: OriginTrialPayload = { origin: p["origin"], feature: p["feature"], expiry };
   for (const key of ["isSubdomain", "isThirdParty"] as const) {
@@ -136,14 +148,15 @@ export function decodeOriginTrialToken(token: string): DecodedOriginTrialToken {
 /**
  * Puts one `Origin-Trial` header per token on `headers`. A value the origin already sent
  * stays, ours is appended after it, and a token that is already present (as its own header
- * or inside a comma-separated list) is not added a second time.
+ * or inside a comma-separated list, bare or as a quoted string, which Chrome accepts) is not
+ * added a second time.
  */
 export function appendOriginTrialHeaders(headers: Headers, tokens: readonly string[]): void {
   if (tokens.length === 0) return;
   const present = new Set(
     (headers.get("origin-trial") ?? "")
       .split(",")
-      .map((v) => v.trim())
+      .map((v) => v.trim().replace(/^"(.*)"$/, "$1").trim())
       .filter((v) => v !== ""),
   );
   for (const token of tokens) {

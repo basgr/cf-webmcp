@@ -1610,6 +1610,171 @@ describe("Origin-Trial headers", () => {
     });
   });
 
+  describe("on a 304 for an HTML navigation", () => {
+    // Chrome merges the headers of a 304 into the page it cached (HttpResponseHeaders::Update) and
+    // Origin-Trial is not among the headers it keeps from the old copy. So a 304 that carries the
+    // current tokens fixes a cached page that predates the first deploy, or holds a rotated-out token.
+    const notModified = (headers: Record<string, string> = {}) => () =>
+      new Response(null, { status: 304, headers: { etag: '"v1"', ...headers } });
+    const navigate = (headers: Record<string, string>, method = "GET") => ({ method, headers });
+
+    it.each(["document", "iframe", "frame", "Document", " IFRAME "])(
+      "sends the headers on a 304 for Sec-Fetch-Dest: %j",
+      async (dest) => {
+        stubOrigin({ [page]: notModified() });
+        const res = await call(createHandler(withTokens()), page, navigate({ "sec-fetch-dest": dest }));
+
+        expect(res.status).toBe(304);
+        expect(trialTokens(res)).toEqual([T1, T2]);
+      },
+    );
+
+    it.each([
+      "text/html",
+      "TEXT/HTML",
+      "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,*/*;q=0.8",
+      "application/xhtml+xml, text/html;q=0.9",
+    ])("sends the headers on a 304 for Accept: %s", async (accept) => {
+      stubOrigin({ [page]: notModified() });
+      const res = await call(createHandler(withTokens()), page, navigate({ accept }));
+
+      expect(res.status).toBe(304);
+      expect(trialTokens(res)).toEqual([T1, T2]);
+    });
+
+    it("sends the headers on a 304 answering a HEAD navigation", async () => {
+      stubOrigin({ [page]: notModified() });
+      const res = await call(createHandler(withTokens()), page, navigate({ "sec-fetch-dest": "document" }, "HEAD"));
+
+      expect(res.status).toBe(304);
+      expect(trialTokens(res)).toEqual([T1, T2]);
+    });
+
+    it.each([
+      ["Accept: image/avif,image/*,*/*;q=0.8", { accept: "image/avif,image/*,*/*;q=0.8" }],
+      ["Accept: */*", { accept: "*/*" }],
+      ["Accept: text/css,*/*;q=0.1", { accept: "text/css,*/*;q=0.1" }],
+      ["Accept: application/json", { accept: "application/json" }],
+      ["Sec-Fetch-Dest: image", { "sec-fetch-dest": "image" }],
+      ["Sec-Fetch-Dest: script", { "sec-fetch-dest": "script" }],
+      ["Sec-Fetch-Dest: style", { "sec-fetch-dest": "style" }],
+      ["Sec-Fetch-Dest: empty", { "sec-fetch-dest": "empty" }],
+      ["Sec-Fetch-Dest: worker", { "sec-fetch-dest": "worker" }],
+      ["no Accept and no Sec-Fetch-Dest", {}],
+    ] as Array<[string, Record<string, string>]>)("sends nothing on a 304 for %s", async (_label, headers) => {
+      stubOrigin({ [page]: notModified() });
+      const res = await call(createHandler(withTokens()), page, navigate(headers));
+
+      expect(res.status).toBe(304);
+      expect(res.headers.has("origin-trial")).toBe(false);
+    });
+
+    it.each(["POST", "PUT", "DELETE", "PATCH"])("sends nothing on a 304 for a %s, whatever it accepts", async (method) => {
+      stubOrigin({ [page]: notModified() });
+      const res = await call(
+        createHandler(withTokens()),
+        page,
+        navigate({ "sec-fetch-dest": "document", accept: "text/html" }, method),
+      );
+
+      expect(res.status).toBe(304);
+      expect(res.headers.has("origin-trial")).toBe(false);
+    });
+
+    it("does not repeat a token the origin already sent on the 304", async () => {
+      stubOrigin({ [page]: notModified({ "origin-trial": T1 }) });
+      const res = await call(createHandler(withTokens()), page, navigate({ "sec-fetch-dest": "document" }));
+
+      expect(trialTokens(res)).toEqual([T1, T2]);
+    });
+
+    it("does not repeat a token the origin sent as a quoted string", async () => {
+      stubOrigin({ [page]: notModified({ "origin-trial": `"${T1}"` }) });
+      const res = await call(createHandler(withTokens()), page, navigate({ "sec-fetch-dest": "document" }));
+
+      expect(trialTokens(res).map((v) => v.replace(/^"|"$/g, ""))).toEqual([T1, T2]);
+      expect((res.headers.get("origin-trial") ?? "").split(T1)).toHaveLength(2);
+    });
+
+    it("keeps a token the origin sent on the 304 and appends ours", async () => {
+      stubOrigin({ [page]: notModified({ "origin-trial": "originToken" }) });
+      const res = await call(createHandler(withTokens()), page, navigate({ "sec-fetch-dest": "document" }));
+
+      expect(trialTokens(res)).toEqual(["originToken", T1, T2]);
+    });
+
+    it("sends the headers when inject_html is off", async () => {
+      stubOrigin({ [page]: notModified() });
+      const res = await call(
+        createHandler(withTokens({ features: { inject_html: false } })),
+        page,
+        navigate({ "sec-fetch-dest": "document" }),
+      );
+
+      expect(trialTokens(res)).toEqual([T1, T2]);
+    });
+
+    it("sends nothing without tokens", async () => {
+      stubOrigin({ [page]: notModified() });
+      const res = await call(createHandler(makeDeps()), page, navigate({ "sec-fetch-dest": "document" }));
+
+      expect(res.status).toBe(304);
+      expect(res.headers.has("origin-trial")).toBe(false);
+    });
+
+    it("keeps adding the Link header to a 304, as it always did", async () => {
+      stubOrigin({ [page]: notModified() });
+      const handler = createHandler(withTokens());
+
+      const navigation = await call(handler, page, navigate({ "sec-fetch-dest": "document" }));
+      const subresource = await call(handler, page, navigate({ "sec-fetch-dest": "image" }));
+
+      expect(navigation.headers.get("link")).toContain('rel="webmcp"');
+      expect(subresource.headers.get("link")).toContain('rel="webmcp"');
+    });
+
+    it("sends only the tokens on a 304 when link_header is off", async () => {
+      stubOrigin({ [page]: notModified() });
+      const res = await call(
+        createHandler(withTokens({ features: { link_header: false } })),
+        page,
+        navigate({ "sec-fetch-dest": "document" }),
+      );
+
+      expect(trialTokens(res)).toEqual([T1, T2]);
+      expect(res.headers.has("link")).toBe(false);
+    });
+
+    it.each([206, 301, 302, 307, 308, 400, 404, 410, 500, 503])(
+      "does not extend the rule to a %i, even for a document navigation",
+      async (status) => {
+        const headers: Record<string, string> = { "content-type": "text/html; charset=utf-8" };
+        if (status >= 300 && status < 400) headers["location"] = "https://example.com/elsewhere";
+        const hasBody = !(status >= 300 && status < 400);
+        stubOrigin({ [page]: () => new Response(hasBody ? HTML : null, { status, headers }) });
+        const res = await call(
+          createHandler(withTokens()),
+          page,
+          navigate({ "sec-fetch-dest": "document", accept: "text/html" }),
+        );
+
+        expect(res.status).toBe(status);
+        expect(res.headers.has("origin-trial")).toBe(false);
+      },
+    );
+
+    it("does not send the headers on a 200 that is not HTML, even for a document navigation", async () => {
+      stubOrigin({ [page]: () => new Response("{}", { status: 200, headers: { "content-type": "application/json" } }) });
+      const res = await call(
+        createHandler(withTokens()),
+        page,
+        navigate({ "sec-fetch-dest": "document", accept: "text/html" }),
+      );
+
+      expect(res.headers.has("origin-trial")).toBe(false);
+    });
+  });
+
   describe("on the landing page", () => {
     it("sends the headers on GET and HEAD", async () => {
       const fetchMock = stubOrigin({});

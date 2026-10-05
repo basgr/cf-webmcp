@@ -272,8 +272,11 @@ export function createHandler(deps: HandlerDeps): Required<Pick<ExportedHandler<
     // Origin-Trial tokens go on the top-level HTML document, so they follow the status and
     // content type of what origin sent, not whether this response is injected below:
     // inject_html off, an excluded path, a non-UTF-8 charset or a bare fragment all still
-    // get them.
-    const trial = isHtmlDocument(upstream);
+    // get them. A 304 answering an HTML navigation gets them too: Chrome merges a 304's
+    // headers into the page it cached, so without them a cached copy that predates the first
+    // deploy, or holds a rotated-out token, would keep its old state for as long as origin
+    // keeps answering 304.
+    const trial = isHtmlDocument(upstream) || (upstream.status === 304 && isHtmlNavigation(request));
 
     // The Link header is discovery data, independent of body injection: it goes
     // on every proxied response, including when inject_html is off.
@@ -339,6 +342,18 @@ export function createHandler(deps: HandlerDeps): Required<Pick<ExportedHandler<
     if (addTrial) appendOriginTrialHeaders(headers, config.origin_trial.tokens);
     return new Response(response.body, { status: response.status, headers });
   }
+}
+
+/**
+ * A request a browser makes to load a page: GET or HEAD, and either Sec-Fetch-Dest says
+ * document, iframe or frame, or Accept names text/html. Only used to tell the 304s that
+ * revalidate an HTML page from those that revalidate an image, a stylesheet or a script.
+ */
+function isHtmlNavigation(request: Request): boolean {
+  if (request.method !== "GET" && request.method !== "HEAD") return false;
+  const dest = (request.headers.get("sec-fetch-dest") ?? "").trim().toLowerCase();
+  if (dest === "document" || dest === "iframe" || dest === "frame") return true;
+  return /text\/html/i.test(request.headers.get("accept") ?? "");
 }
 
 /**
