@@ -12,6 +12,7 @@ import { makeConfig, type ConfigOverrides } from "../test-support/config";
 const SITEMAP_URL = "https://example.com/sitemap.xml";
 const ENC = new TextEncoder();
 const CONFIG_HASH = "c0ffee00";
+const VERSION = "0.0.0-test";
 
 function post(body: BodyInit | null, init: RequestInit = {}): Request {
   return new Request("https://example.com/_webmcp/exec/search_pages", {
@@ -32,7 +33,7 @@ async function run(
     request,
     makeConfig(overrides),
     toolName,
-    { domain: "example.com", deployToken: "", configHash: CONFIG_HASH, ...opts },
+    { domain: "example.com", deployToken: "", configHash: CONFIG_HASH, version: VERSION, ...opts },
     () => {},
   );
 }
@@ -100,7 +101,7 @@ describe("exec: executor exceptions", () => {
       post("{}"),
       makeConfig(),
       "search_pages",
-      { domain: "example.com", deployToken: "", configHash: CONFIG_HASH },
+      { domain: "example.com", deployToken: "", configHash: CONFIG_HASH, version: VERSION },
       waitUntil,
     );
 
@@ -310,13 +311,18 @@ let cacheRun = 0;
 const freshConfigHash = () => `t${Date.now().toString(16)}${(cacheRun++).toString(16)}`;
 
 /** One exec call that also waits for the cache write it scheduled. */
-async function runAndSettle(request: Request, configHash: string, overrides: ConfigOverrides = CORS): Promise<Response> {
+async function runAndSettle(
+  request: Request,
+  configHash: string,
+  overrides: ConfigOverrides = CORS,
+  version = VERSION,
+): Promise<Response> {
   const pending: Promise<unknown>[] = [];
   const res = await execResponse(
     request,
     makeConfig(overrides),
     "search_pages",
-    { domain: "example.com", deployToken: "", configHash },
+    { domain: "example.com", deployToken: "", configHash, version },
     (p) => pending.push(p),
   );
   await Promise.all(pending);
@@ -353,7 +359,7 @@ describe("exec: the cache replays results, never another caller's CORS headers",
     await runAndSettle(fromOrigin(APP_A), configHash);
 
     const stored = await caches.default.match(
-      await makeCacheKey("example.com", configHash, { toolName: "search_pages", bodyText: "{}" }),
+      await makeCacheKey("example.com", { version: VERSION, configHash }, { toolName: "search_pages", bodyText: "{}" }),
     );
     expect(stored).toBeDefined();
     const names = [...stored!.headers.keys()];
@@ -373,11 +379,24 @@ describe("exec: the cache replays results, never another caller's CORS headers",
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
-  it("puts the config hash into the cache key URL", async () => {
-    const a = await makeCacheKey("example.com", "aaaa1111", { toolName: "search_pages", bodyText: "{}" });
-    const b = await makeCacheKey("example.com", "bbbb2222", { toolName: "search_pages", bodyText: "{}" });
-    expect(a.url).toContain("/aaaa1111/");
-    expect(a.url).not.toBe(b.url);
+  it("keys the cache on the cf-webmcp version: the same call after an upgrade is a miss", async () => {
+    const fetchMock = vi.fn(async () => sitemapOk());
+    vi.stubGlobal("fetch", fetchMock);
+    const configHash = freshConfigHash();
+
+    expect((await runAndSettle(fromOrigin(null), configHash, CORS, "0.6.0")).headers.get("x-webmcp-cache")).toBe("MISS");
+    expect((await runAndSettle(fromOrigin(null), configHash, CORS, "0.6.0")).headers.get("x-webmcp-cache")).toBe("HIT");
+    expect((await runAndSettle(fromOrigin(null), configHash, CORS, "0.6.1")).headers.get("x-webmcp-cache")).toBe("MISS");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("puts the version and the config hash into the cache key URL", async () => {
+    const key = (version: string, configHash: string) =>
+      makeCacheKey("example.com", { version, configHash }, { toolName: "search_pages", bodyText: "{}" });
+    const a = await key("0.6.0", "aaaa1111");
+    expect(a.url).toContain("/0.6.0/aaaa1111/search_pages/");
+    expect((await key("0.6.0", "bbbb2222")).url).not.toBe(a.url);
+    expect((await key("0.6.1", "aaaa1111")).url).not.toBe(a.url);
   });
 });
 

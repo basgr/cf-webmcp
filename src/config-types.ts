@@ -63,8 +63,10 @@ const HttpsUrl = z
 // discovery URL, and the raw string goes into the Link header, robots.txt, llms.txt and
 // <link href>. The host takes the [site].domain charset (letters, digits, dots, hyphens),
 // so no CR/LF, quote or whitespace can get in. The regex alone rules out a path, query,
-// fragment and credentials; the URL parse adds the port range.
-const PUBLIC_URL_RE = /^https?:\/\/[a-z0-9.-]+(:\d+)?$/i;
+// fragment and credentials; the URL parse adds the port range. Letter case is spelled out
+// in the classes, not with the i flag: zod-to-json-schema drops flags, and the JSON schema
+// an editor checks must accept what this schema accepts.
+const PUBLIC_URL_RE = /^[Hh][Tt][Tt][Pp][Ss]?:\/\/[A-Za-z0-9.-]+(:\d+)?$/;
 
 function parsesAsHttpOrigin(value: string): boolean {
   let url: URL;
@@ -93,7 +95,7 @@ const PublicUrl = z
   )
   // Only judged once the regex passed, so a value gets one message, not two.
   .refine((s) => !PUBLIC_URL_RE.test(s) || parsesAsHttpOrigin(s), {
-    message: "public_url does not parse as an http or https origin: the port must be from 1 to 65535",
+    message: "public_url does not parse as an http or https origin: the host or port is invalid (a port runs from 1 to 65535)",
   });
 
 // JSON Schema subset we accept inside [tools.input_schema].
@@ -250,7 +252,8 @@ const Site = z.object({
   domain: z
     .string()
     .min(1)
-    .regex(/^[a-z0-9.-]+(:\d+)?$/i, "domain must be a bare hostname (optionally with port), no scheme or path"),
+    // Letter case in the class, not the i flag, which the generated JSON schema would lose.
+    .regex(/^[A-Za-z0-9.-]+(:\d+)?$/, "domain must be a bare hostname (optionally with port), no scheme or path"),
   name: z.string().min(1),
   description: z.string().default(""),
   locale: z.string().default("en"),

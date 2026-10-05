@@ -86,6 +86,14 @@ describe("site.public_url validation", () => {
     expect(found[0]).toMatch(/^site\.public_url: /);
   });
 
+  it("says the host or port is invalid when the charset fits but the URL does not parse", () => {
+    for (const value of ["https://example.com:99999", "http://localhost:0"]) {
+      const found = issues(value);
+      expect(found).toEqual([expect.stringMatching(/the host or port is invalid/)]);
+      expect(found[0]).not.toMatch(/must be from 1 to 65535/);
+    }
+  });
+
   it("still accepts a config without public_url", () => {
     expect(ConfigSchema.parse(minimal).site.public_url).toBeUndefined();
   });

@@ -131,7 +131,8 @@ class State {
 
 /**
  * injectIntoHtml, failing open: if building the rewriter throws synchronously,
- * the untouched origin response is returned and the error is logged.
+ * the untouched origin response is returned with `failedOpen: true` and the error
+ * is logged.
  *
  * This is the outer net. A form or param selector that HTMLRewriter rejects is
  * already contained inside injectIntoHtml (only that form or param is skipped,
@@ -151,16 +152,19 @@ class State {
  * a different host whenever the Worker proxies to another one, and it does
  * nothing on Custom Domains and workers.dev routes.
  */
-export function safeInject(upstream: Response, opts: InjectOptions): Response {
+export function safeInject(upstream: Response, opts: InjectOptions): { response: Response; failedOpen: boolean } {
+  // failedOpen is said outright, not read from `response === upstream`: transform() hands
+  // back the very object it was given when there is no body (a HEAD), and that response
+  // still counts as rewritten.
   try {
-    return injectIntoHtml(upstream, opts);
+    return { response: injectIntoHtml(upstream, opts), failedOpen: false };
   } catch (e) {
     console.error(
       `cf-webmcp: HTML injection failed, serving the origin response unchanged: ${
         e instanceof Error ? e.message : String(e)
       }`,
     );
-    return upstream;
+    return { response: upstream, failedOpen: true };
   }
 }
 

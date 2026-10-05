@@ -14,7 +14,7 @@
             "domain": {
               "type": "string",
               "minLength": 1,
-              "pattern": "^[a-z0-9.-]+(:\\d+)?$"
+              "pattern": "^[A-Za-z0-9.-]+(:\\d+)?$"
             },
             "name": {
               "type": "string",
@@ -30,7 +30,7 @@
             },
             "public_url": {
               "type": "string",
-              "pattern": "^https?:\\/\\/[a-z0-9.-]+(:\\d+)?$"
+              "pattern": "^[Hh][Tt][Tt][Pp][Ss]?:\\/\\/[A-Za-z0-9.-]+(:\\d+)?$"
             }
           },
           "required": [

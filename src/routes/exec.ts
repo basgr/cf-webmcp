@@ -1,7 +1,7 @@
 /**
  * POST /<namespace>/exec/:tool_name
  * Validates input, dispatches to the executor, wraps in the response envelope,
- * sets cache headers. Cache lookup is keyed on config_hash + tool_name + sha256(body).
+ * sets cache headers. Cache lookup is keyed on version + config_hash + tool_name + sha256(body).
  *
  * CORS is computed per request, for every answer: a cache hit, a miss, and every
  * error (405, 404, 400, 413, 429, 5xx). The cache stores results without any CORS
@@ -21,6 +21,8 @@ export interface ExecOptions {
   deployToken: string;
   /** CONFIG_HASH of this build. Part of the cache key, so a config change starts a fresh cache. */
   configHash: string;
+  /** cf-webmcp's version (CF_WEBMCP_VERSION). Part of the cache key, so an upgrade starts a fresh cache. */
+  version: string;
   /** Deadline for one executor run, origin fetch and body reads together. Defaults to 8s. */
   timeoutMs?: number;
 }
@@ -110,7 +112,11 @@ async function execAnswer(
   }
 
   // Cache check.
-  const cacheKey = await makeCacheKey(opts.domain, opts.configHash, { toolName, bodyText });
+  const cacheKey = await makeCacheKey(
+    opts.domain,
+    { version: opts.version, configHash: opts.configHash },
+    { toolName, bodyText },
+  );
   const cache = caches.default;
   const cached = await cache.match(cacheKey);
   if (cached) {

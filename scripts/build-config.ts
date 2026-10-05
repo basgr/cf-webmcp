@@ -202,15 +202,29 @@ export interface InjectionHashInputs {
   bootstrapAsset: string;
   /** The script's integrity attribute, null when [features].subresource_integrity is off. */
   bootstrapSri: string | null;
-  /** The widget (widget.<sha16>.js). Only the landing names it, but it costs nothing to include. */
-  widgetAsset: string | null;
+  /**
+   * rewriterSourceHash of src/injection/html-rewriter.ts: a change to the rewriter's code
+   * changes the rewritten pages even when the version is not bumped.
+   */
+  rewriterSha256: string;
+}
+
+/** The rewriter source the build hashes into INJECTION_HASH. */
+const REWRITER_SOURCE = path.join(ROOT, "src", "injection", "html-rewriter.ts");
+
+/**
+ * sha256 (64 hex) of a source text with CRLF line endings read as LF, so a Windows
+ * checkout (core.autocrlf) and a Linux one of the same commit hash alike.
+ */
+export function rewriterSourceHash(text: string): string {
+  return sha256Hex(text.replace(/\r\n/g, "\n"));
 }
 
 /**
  * INJECTION_HASH: the first 16 hex of the sha256 over everything that shapes what the
  * Worker does to a proxied page, so the ETag suffix of rewritten pages moves exactly
  * when the rewritten output can:
- *   - the inputs above (version, script src and integrity, widget);
+ *   - the inputs above (version, script src and integrity, rewriter source);
  *   - [features].inject_html and [injection].exclude_paths: whether a page is rewritten;
  *   - [paths].namespace: the script src path;
  *   - the <link> tags as configLinkOptions builds them for the handler: [features].link_tag,
@@ -218,13 +232,12 @@ export interface InjectionHashInputs {
  *     flag, mode and path, all on the site URL ([site].public_url, else [site].domain);
  *   - [[forms]], whole: names, descriptions, selectors, params, paths and autosubmit;
  *   - [origin_trial].tokens, which go out on rewritten pages as Origin-Trial headers.
- * No other config field: one the injected page does not show (cache TTLs, rate limits,
- * CORS, health, the site's name and description, the other routes' settings) must not by
- * itself make every visitor refetch every page. [[tools]] reach the page through the
- * bootstrap file name. Today that file name still moves with every config change, because
- * the bootstrap's first line names CONFIG_HASH, and the old name then answers 404, so the
- * refetch is needed; the list above keeps the hash right if the bootstrap ever stops
- * naming the config hash.
+ * No other config field, and not the widget: neither the bootstrap nor the injected page
+ * names it. A config field the injected page does not show (cache TTLs, rate limits, CORS,
+ * health, the site's name and description, the other routes' settings) must not make every
+ * visitor refetch every page. [[tools]] reach the page through the bootstrap file name,
+ * which is addressed by the bootstrap's content alone and so moves only when a tool, the
+ * namespace or the generator changes.
  */
 export function injectionHashOf(config: Config, inputs: InjectionHashInputs): string {
   return sha256Hex(
@@ -232,7 +245,7 @@ export function injectionHashOf(config: Config, inputs: InjectionHashInputs): st
       version: inputs.version,
       bootstrap_asset: inputs.bootstrapAsset,
       bootstrap_sri: inputs.bootstrapSri,
-      widget_asset: inputs.widgetAsset,
+      rewriter_sha256: inputs.rewriterSha256,
       inject_html: config.features.inject_html,
       exclude_paths: config.injection.exclude_paths,
       namespace: config.paths.namespace,
@@ -475,8 +488,12 @@ const EXEC_CLIENT_JS = `  // The exec endpoints are paths. They are called on th
  * key. Such a script runs with the page's full authority and could register one of our tool
  * names itself, which crashes the renderer just the same; no state this script keeps on the
  * page can be protected from it.
+ *
+ * The body depends on [[tools]] and [paths].namespace only, and names no config hash: the
+ * file is addressed by its content, so a config change that touches neither keeps the URL
+ * (and every page that points at it) valid.
  */
-function buildBootstrap(config: Config, configHash: string): string {
+function buildBootstrap(config: Config): string {
   const ns = config.paths.namespace;
   const toolPayload = config.tools.map((t) => {
     const defaults = defaultAnnotationsFor(t.executor.type);
@@ -500,7 +517,7 @@ function buildBootstrap(config: Config, configHash: string): string {
 
   // Worker serves this file with content-type application/javascript; charset=utf-8.
   // ES5 style for maximum browser reach (no arrow fns / spread).
-  return `// cf-webmcp bootstrap, config_hash=${configHash}
+  return `// cf-webmcp bootstrap
 (function () {
   // Host object: document.modelContext is the current binding (Apr 2026 WebMCP
   // draft, Chrome 150+); navigator.modelContext is the deprecated 146-149 one
@@ -1037,7 +1054,7 @@ function buildConfigTs(
   agentSkillsDigest: string | null,
   bootstrapSri: string | null,
   llmsTxtTokenHints: { manifest: number; landing: number },
-  http: { manifestEtag: string; landingEtag: string; ardEtag: string; injectionHash: string },
+  http: { manifestEtag: string; landingEtag: string; ardEtag: string; injectionHash: string; version: string },
 ): string {
   // Plain JSON dump plus the derived hash and asset names.
   const json = JSON.stringify(config, null, 2);
@@ -1051,6 +1068,8 @@ import type { Config } from "../config-types";
  * also change with the widget pin and the generator.
  */
 export const CONFIG_HASH = ${JSON.stringify(configHash)};
+/** cf-webmcp's version from package.json. Part of the exec cache key, so an upgrade starts a fresh cache. */
+export const CF_WEBMCP_VERSION = ${JSON.stringify(http.version)};
 /**
  * Strong ETags of the bodies served from this build: "<first 16 hex of the sha256 of
  * the exact bytes>", quotes included. ARD_ETAG is of the synthesized ARD manifest.
@@ -1753,8 +1772,9 @@ export async function buildConfig(opts: BuildOptions): Promise<void> {
 
   // Content-addressed assets. The bootstrap is named after its own bytes, so a
   // generator change with an unchanged TOML still moves the URL, together with
-  // the SRI hash computed below over the same string.
-  const bootstrap = buildBootstrap(config, configHash);
+  // the SRI hash computed below over the same string, and a TOML edit that leaves
+  // [[tools]] and [paths].namespace alone does not.
+  const bootstrap = buildBootstrap(config);
   const bootstrapName = `bootstrap.${sha256Hex(bootstrap).slice(0, 16)}.js`;
   // The SRI hash is over the same string, and the landing page's own <script> for the
   // bootstrap needs both, so both are fixed before the landing is built.
@@ -1787,17 +1807,19 @@ export async function buildConfig(opts: BuildOptions): Promise<void> {
     manifest: estimateTokens(manifestStr),
     landing: estimateTokens(landing),
   };
-  // Over the exact strings embedded in assets.ts below.
+  // The ETags are over the exact strings embedded in assets.ts below.
+  const version = await packageVersion();
   const http = {
     manifestEtag: bodyEtag(manifestStr),
     landingEtag: bodyEtag(landing),
     ardEtag: bodyEtag(aiCatalogStr),
     injectionHash: injectionHashOf(config, {
-      version: await packageVersion(),
+      version,
       bootstrapAsset: bootstrapName,
       bootstrapSri,
-      widgetAsset: widget.asset,
+      rewriterSha256: rewriterSourceHash(await fs.readFile(REWRITER_SOURCE, "utf8")),
     }),
+    version,
   };
   const configTs = buildConfigTs(
     config,

@@ -418,8 +418,9 @@ describe("safeInject (outer guard for synchronous rewriter errors)", () => {
     // a stand-in for any unexpected synchronous failure that no per-selector guard covers.
     const out = safeInject(upstream, { ...opts, manifestUrl: undefined as unknown as string });
 
-    expect(out).toBe(upstream);
-    expect(await out.text()).toBe(page);
+    expect(out.failedOpen).toBe(true);
+    expect(out.response).toBe(upstream);
+    expect(await out.response.text()).toBe(page);
     expect(errors).toHaveBeenCalledTimes(1);
     expect(String(errors.mock.calls[0]!.join(" "))).toContain("serving the origin response unchanged");
     errors.mockRestore();
@@ -433,11 +434,21 @@ describe("safeInject (outer guard for synchronous rewriter errors)", () => {
 
     const out = safeInject(response(), { ...opts, forms });
 
-    const body = await out.text();
+    expect(out.failedOpen).toBe(false);
+    const body = await out.response.text();
     expect(body).toContain('<link rel="webmcp"');
     expect(body).toMatch(/<form[^>]+toolname="f"/);
     expect(errors).not.toHaveBeenCalled();
     errors.mockRestore();
+  });
+
+  it("does not report a body-less response (a HEAD) as failed open", () => {
+    const head = new Response(null, { status: 200, headers: { "content-type": "text/html" } });
+
+    const out = safeInject(head, opts);
+
+    expect(out.failedOpen).toBe(false);
+    expect(out.response.status).toBe(200);
   });
 });
 

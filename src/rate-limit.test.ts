@@ -3,7 +3,9 @@ import {
   checkGlobalRateLimit,
   checkPerToolRateLimit,
   clientIp,
+  RATE_LIMIT_EVICT_BATCH,
   RATE_LIMIT_MAX_BUCKETS,
+  _bucketCountsForTests,
   _resetForTests,
 } from "./rate-limit";
 
@@ -98,6 +100,42 @@ describe("a full bucket map", () => {
     for (let i = 0; i < RATE_LIMIT_MAX_BUCKETS; i++) checkPerToolRateLimit(`ip-${i}`, "search_pages", 3);
     expect(checkPerToolRateLimit("one-more", "search_pages", 3).allowed).toBe(true);
   });
+
+  it("evicts a batch of 1/16 of the capacity in one pass", () => {
+    expect(RATE_LIMIT_EVICT_BATCH).toBe(RATE_LIMIT_MAX_BUCKETS / 16);
+    for (let i = 0; i < RATE_LIMIT_MAX_BUCKETS; i++) checkGlobalRateLimit(`key-${i}`, 1);
+    expect(_bucketCountsForTests().global).toBe(RATE_LIMIT_MAX_BUCKETS);
+
+    checkGlobalRateLimit("newcomer", 1);
+
+    expect(_bucketCountsForTests().global).toBe(RATE_LIMIT_MAX_BUCKETS - RATE_LIMIT_EVICT_BATCH + 1);
+  });
+
+  it("never holds more buckets than the capacity", () => {
+    for (let i = 0; i < RATE_LIMIT_MAX_BUCKETS * 2 + 100; i++) {
+      checkGlobalRateLimit(`g-${i}`, 5);
+      checkPerToolRateLimit(`p-${i}`, "search_pages", 5);
+      const counts = _bucketCountsForTests();
+      if (counts.global > RATE_LIMIT_MAX_BUCKETS || counts.perTool > RATE_LIMIT_MAX_BUCKETS) {
+        throw new Error(`over capacity after ${i + 1} keys: ${JSON.stringify(counts)}`);
+      }
+    }
+  });
+
+  it("keeps recently used buckets through a batch eviction and drops the least recently used ones", () => {
+    // limit 1: a key whose bucket survives is refused; a key whose bucket was evicted starts afresh.
+    for (let i = 0; i < RATE_LIMIT_MAX_BUCKETS; i++) checkGlobalRateLimit(`key-${i}`, 1);
+    // key-0 .. key-9 are used again (and refused), which makes them the most recently used.
+    for (let i = 0; i < 10; i++) expect(checkGlobalRateLimit(`key-${i}`, 1).allowed).toBe(false);
+
+    checkGlobalRateLimit("newcomer", 1);
+
+    for (let i = 0; i < 10; i++) expect(checkGlobalRateLimit(`key-${i}`, 1).allowed, `key-${i}`).toBe(false);
+    // The batch took key-10 .. key-1033, the least recently used.
+    expect(checkGlobalRateLimit("key-10", 1).allowed).toBe(true);
+    expect(checkGlobalRateLimit(`key-${10 + RATE_LIMIT_EVICT_BATCH - 1}`, 1).allowed).toBe(true);
+    expect(checkGlobalRateLimit(`key-${10 + RATE_LIMIT_EVICT_BATCH}`, 1).allowed).toBe(false);
+  });
 });
 
 describe("clientIp", () => {
@@ -149,6 +187,28 @@ describe("clientIp", () => {
   it("keys an IPv4-mapped IPv6 address as the IPv4 address", () => {
     expect(clientIp(withHeaders({ "cf-connecting-ip": "::ffff:1.2.3.4" }))).toBe("1.2.3.4");
     expect(clientIp(withHeaders({ "cf-connecting-ip": "::FFFF:0102:0304" }))).toBe("1.2.3.4");
+  });
+
+  describe("Pseudo IPv4 (CF-Connecting-IP holds a made-up IPv4, CF-Connecting-IPv6 the real address)", () => {
+    it("prefers CF-Connecting-IPv6 when both are present, keyed by /64", () => {
+      const req = withHeaders({ "cf-connecting-ip": "240.12.34.56", "cf-connecting-ipv6": "2001:db8:1:2:3:4:5:6" });
+      expect(clientIp(req)).toBe("2001:db8:1:2::/64");
+    });
+
+    it("uses CF-Connecting-IPv6 alone", () => {
+      expect(clientIp(withHeaders({ "cf-connecting-ipv6": "2001:db8:1:2::9" }))).toBe("2001:db8:1:2::/64");
+    });
+
+    it("uses CF-Connecting-IP when only it is present", () => {
+      expect(clientIp(withHeaders({ "cf-connecting-ip": "203.0.113.7" }))).toBe("203.0.113.7");
+    });
+
+    it.each(["not-an-ip", "203.0.113.7", "2001:db8:::1", ""])(
+      "falls back to CF-Connecting-IP when CF-Connecting-IPv6 is %j",
+      (v6) => {
+        expect(clientIp(withHeaders({ "cf-connecting-ip": "203.0.113.7", "cf-connecting-ipv6": v6 }))).toBe("203.0.113.7");
+      },
+    );
   });
 
   it("shares one rate-limit bucket across a /64", () => {

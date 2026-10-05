@@ -155,4 +155,4 @@ The bridge's websocket port defaults to 4797; the script passes free ones with `
 
 ## Restart loop
 
-If you change the TOML or any source file, `wrangler dev` hot-reloads the Worker automatically. The build pipeline reruns on save because `npm run dev:worker` chains `npm run build` first, then `wrangler dev` watches for file changes. If you change the config hash, the manifest `ETag` rotates.
+If you change the TOML or any source file, `wrangler dev` hot-reloads the Worker automatically. The build pipeline reruns on save because `npm run dev:worker` chains `npm run build` first, then `wrangler dev` watches for file changes. The manifest's `ETag` is the hash of the manifest body, so it follows the body, not the config hash; the body holds its build time (`generated_at`), so every rebuild moves it.

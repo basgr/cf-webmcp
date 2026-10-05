@@ -74,6 +74,7 @@ export function makeDeps(
     },
     meta: {
       CONFIG_HASH: "testhash",
+      CF_WEBMCP_VERSION: "0.0.0-test",
       MANIFEST_ETAG: '"manifesttesttag0"',
       LANDING_ETAG: '"landingtesttag00"',
       ARD_ETAG: '"ardtesttag000000"',

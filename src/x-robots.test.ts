@@ -215,7 +215,7 @@ async function responseFor(kind: RouteMatch["kind"], config: Config): Promise<Re
         new Request("https://example.com/_webmcp/exec/search_pages", { method: "GET" }),
         config,
         "search_pages",
-        { domain: "example.com", deployToken: "", configHash: "abc12345" },
+        { domain: "example.com", deployToken: "", configHash: "abc12345", version: "0.0.0-test" },
         () => {},
       );
     case "health":

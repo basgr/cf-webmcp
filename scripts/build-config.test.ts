@@ -5,7 +5,13 @@ import path from "node:path";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
 import TOML from "@iarna/toml";
-import { buildConfig, CLOUDFLARE_WEBMCP_LABS_TOOL_NAMES, defaultAnnotationsFor, injectionHashOf } from "./build-config";
+import {
+  buildConfig,
+  CLOUDFLARE_WEBMCP_LABS_TOOL_NAMES,
+  defaultAnnotationsFor,
+  injectionHashOf,
+  rewriterSourceHash,
+} from "./build-config";
 import { ConfigSchema } from "../src/config-types";
 import { buildFrontmatter } from "../src/routes/agent-skills";
 import { agentSkillsIndexResponse } from "../src/routes/agent-skills-index";
@@ -953,8 +959,14 @@ describe("INJECTION_HASH", () => {
   const injectionHash = (files: Record<string, string>) => exportedConst(files["config.ts"]!, "INJECTION_HASH") as string;
   const site = (line: string) => MINIMAL.replace('name   = "Example Co."', `name   = "Example Co."\n${line}`);
   /** The build inputs held fixed, so a test sees only what the config itself contributes. */
-  const FIXED = { version: "0.6.0", bootstrapAsset: "bootstrap.0123456789abcdef.js", bootstrapSri: null, widgetAsset: null };
+  const FIXED = {
+    version: "0.6.0",
+    bootstrapAsset: "bootstrap.0123456789abcdef.js",
+    bootstrapSri: null,
+    rewriterSha256: "0".repeat(64),
+  };
   const hashFor = (toml: string) => injectionHashOf(ConfigSchema.parse(TOML.parse(toml)), FIXED);
+  const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
   it("is 16 hex and stable for the same input", async () => {
     const a = await runBuild(await writeToml("ih-a.toml", MINIMAL));
@@ -963,10 +975,10 @@ describe("INJECTION_HASH", () => {
     expect(injectionHash(b.files)).toBe(injectionHash(a.files));
   });
 
-  it("is injectionHashOf over this build's config, bootstrap, integrity, widget and package version", async () => {
-    const pinPath = await writePin("pin.json", fakePin("widget A"));
-    const { files } = await runBuild(await writeToml("ih-inputs.toml", MINIMAL), { widgetPinPath: pinPath });
-    const pkg = JSON.parse(await fs.readFile(path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "package.json"), "utf8"));
+  it("is injectionHashOf over this build's config, bootstrap, integrity, rewriter source and package version", async () => {
+    const { files } = await runBuild(await writeToml("ih-inputs.toml", MINIMAL));
+    const pkg = JSON.parse(await fs.readFile(path.join(repoRoot, "package.json"), "utf8"));
+    const rewriter = await fs.readFile(path.join(repoRoot, "src", "injection", "html-rewriter.ts"), "utf8");
     const config = files["config.ts"]!;
 
     expect(injectionHash(files)).toBe(
@@ -974,27 +986,35 @@ describe("INJECTION_HASH", () => {
         version: pkg.version,
         bootstrapAsset: exportedConst(config, "BOOTSTRAP_ASSET") as string,
         bootstrapSri: exportedConst(config, "BOOTSTRAP_SRI") as string | null,
-        widgetAsset: exportedConst(config, "WIDGET_ASSET") as string | null,
+        // Line endings normalised: a CRLF checkout must hash like an LF one.
+        rewriterSha256: sha256(rewriter.replace(/\r\n/g, "\n")),
       }),
     );
   });
 
-  it("moves with any config change in a build, because the bootstrap names the config hash and so its file name moves", async () => {
+  it("hashes the rewriter source the same with CRLF and LF line endings", () => {
+    expect(rewriterSourceHash("a\r\nb\r\n")).toBe(rewriterSourceHash("a\nb\n"));
+    expect(rewriterSourceHash("a\nb\n")).toBe(sha256("a\nb\n"));
+    expect(rewriterSourceHash("a\nc\n")).not.toBe(rewriterSourceHash("a\nb\n"));
+  });
+
+  it("leaves BOOTSTRAP_ASSET and INJECTION_HASH alone on a config change the page does not show", async () => {
     const base = await runBuild(await writeToml("ih-base.toml", MINIMAL));
     const before = { injection: injectionHash(base.files), asset: exportedConst(base.files["config.ts"]!, "BOOTSTRAP_ASSET") };
     await fs.rm(base.outDir, { recursive: true });
     const other = (await runBuild(await writeToml("ih-cache.toml", `${MINIMAL}\n[cache]\nmanifest_max_age = 10\n`))).files;
 
-    // The injected script src changes, so a page rewritten before must not be revalidated.
-    expect(exportedConst(other["config.ts"]!, "BOOTSTRAP_ASSET")).not.toBe(before.asset);
-    expect(injectionHash(other)).not.toBe(before.injection);
+    // The config changed (CONFIG_HASH moves), the bootstrap bytes did not: cached pages stay valid.
+    expect(exportedConst(other["config.ts"]!, "CONFIG_HASH")).not.toBe(exportedConst(base.files["config.ts"]!, "CONFIG_HASH"));
+    expect(exportedConst(other["config.ts"]!, "BOOTSTRAP_ASSET")).toBe(before.asset);
+    expect(injectionHash(other)).toBe(before.injection);
   });
 
   it.each([
     ["the version", { version: "0.6.1" }],
     ["the bootstrap file name", { bootstrapAsset: "bootstrap.fedcba9876543210.js" }],
     ["the bootstrap integrity", { bootstrapSri: `sha384-${"A".repeat(64)}` }],
-    ["the widget file name", { widgetAsset: "widget.0123456789abcdef.js" }],
+    ["the rewriter source (a code change without a version bump)", { rewriterSha256: "1".repeat(64) }],
   ])("changes with %s", (_label, change) => {
     const config = ConfigSchema.parse(TOML.parse(MINIMAL));
     expect(injectionHashOf(config, { ...FIXED, ...change })).not.toBe(injectionHashOf(config, FIXED));
@@ -1041,11 +1061,40 @@ describe("INJECTION_HASH", () => {
     expect(hashFor(changed)).toBe(hashFor(MINIMAL));
   });
 
-  it("changes with the widget pin", async () => {
-    const toml = await writeToml("ih-widget.toml", MINIMAL);
+  it("does not change with the widget pin: the bootstrap and the injected page do not name the widget", async () => {
+    const toml = await writeToml("ih-widget.toml", widgetOn(MINIMAL));
     const a = await runBuild(toml, { widgetPinPath: await writePin("pin-a.json", fakePin("widget A")) });
     const b = await runBuild(toml, { widgetPinPath: await writePin("pin-b.json", fakePin("widget B")) });
-    expect(injectionHash(b.files)).not.toBe(injectionHash(a.files));
+    expect(exportedConst(b.files["config.ts"]!, "WIDGET_ASSET")).not.toBe(exportedConst(a.files["config.ts"]!, "WIDGET_ASSET"));
+    expect(injectionHash(b.files)).toBe(injectionHash(a.files));
+  });
+});
+
+describe("the bootstrap is addressed by its content only", () => {
+  it("does not name the config hash", async () => {
+    const { files } = await runBuild(await writeToml("bs-nohash.toml", MINIMAL));
+    const configHash = exportedConst(files["config.ts"]!, "CONFIG_HASH") as string;
+    expect(files["bootstrap.js"]).not.toContain(configHash);
+    expect(files["bootstrap.js"]).not.toContain("config_hash");
+  });
+
+  it("keeps its file name for two configs that differ only outside [[tools]] and [paths]", async () => {
+    const a = await runBuild(await writeToml("bs-same-a.toml", MINIMAL));
+    const b = await runBuild(
+      await writeToml("bs-same-b.toml", `${MINIMAL.replace('name   = "Example Co."', 'name   = "Other Co."')}\n[rate_limit]\nrequests_per_minute_per_ip = 5\n`),
+    );
+    expect(exportedConst(b.files["config.ts"]!, "BOOTSTRAP_ASSET")).toBe(exportedConst(a.files["config.ts"]!, "BOOTSTRAP_ASSET"));
+    expect(b.files["bootstrap.js"]).toBe(a.files["bootstrap.js"]);
+  });
+});
+
+describe("CF_WEBMCP_VERSION", () => {
+  it("is the version in package.json, for the exec cache key", async () => {
+    const { files } = await runBuild(await writeToml("version.toml", MINIMAL));
+    const pkg = JSON.parse(
+      await fs.readFile(path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "package.json"), "utf8"),
+    );
+    expect(exportedConst(files["config.ts"]!, "CF_WEBMCP_VERSION")).toBe(pkg.version);
   });
 });
 
@@ -1552,6 +1601,25 @@ describe("templates: the widget is opt-in, and switched on explicitly where a te
     const schema = JSON.parse(await fs.readFile(path.join(repoRoot, "schemas", "webmcp.schema.json"), "utf8"));
     const features = schema.definitions.WebMCPConfig.properties.features.properties;
     expect(features.fallback_widget).toEqual({ type: "boolean", default: false });
+  });
+
+  it("the committed JSON schema patterns for [site] accept what the zod schema accepts, upper case included", async () => {
+    const schema = JSON.parse(await fs.readFile(path.join(repoRoot, "schemas", "webmcp.schema.json"), "utf8"));
+    const site = schema.definitions.WebMCPConfig.properties.site.properties;
+    // As an editor applies them: no flags.
+    const publicUrl = new RegExp(site.public_url.pattern);
+    const domain = new RegExp(site.domain.pattern);
+    for (const ok of ["https://www.example.com", "HTTPS://Example.COM", "Http://LOCALHOST:8787"]) {
+      expect(publicUrl.test(ok), ok).toBe(true);
+      expect(ConfigSchema.shape.site.shape.public_url.safeParse(ok).success, ok).toBe(true);
+    }
+    for (const ok of ["example.com", "Example.COM", "LOCALHOST:8787"]) {
+      expect(domain.test(ok), ok).toBe(true);
+      expect(ConfigSchema.shape.site.shape.domain.safeParse(ok).success, ok).toBe(true);
+    }
+    for (const bad of ["https://example.com/", "ftp://example.com", "https://exa mple.com"]) {
+      expect(publicUrl.test(bad), bad).toBe(false);
+    }
   });
 });
 

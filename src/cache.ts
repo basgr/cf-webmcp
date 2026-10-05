@@ -1,9 +1,10 @@
 /**
  * Thin wrapper around the Cloudflare Cache API. The default cache works on GET
  * URLs. For POST executor calls we build a synthetic GET cache key derived from
- * `config_hash + tool_name + sha256(body)` so semantically-identical calls share
- * cache, and a deploy that changes the config (a tool's executor, its URL template,
- * its projection) never answers from a result the previous config produced.
+ * `version + config_hash + tool_name + sha256(body)` so semantically-identical calls
+ * share cache, and a deploy that changes the config (a tool's executor, its URL
+ * template, its projection) or the executor code (a cf-webmcp upgrade) never answers
+ * from a result the previous deploy produced.
  */
 
 export interface CacheKey {
@@ -11,10 +12,18 @@ export interface CacheKey {
   bodyText: string;
 }
 
-export async function makeCacheKey(domain: string, configHash: string, key: CacheKey): Promise<Request> {
+/** What makes one deploy's cached results unusable for another. */
+export interface CacheScope {
+  /** cf-webmcp's version (CF_WEBMCP_VERSION). */
+  version: string;
+  /** CONFIG_HASH. */
+  configHash: string;
+}
+
+export async function makeCacheKey(domain: string, scope: CacheScope, key: CacheKey): Promise<Request> {
   const hash = await sha256Hex(key.bodyText);
-  const url = `https://${domain}/__webmcp-cache/${encodeURIComponent(configHash)}/${encodeURIComponent(key.toolName)}/${hash}`;
-  return new Request(url, { method: "GET" });
+  const segments = [scope.version, scope.configHash, key.toolName].map(encodeURIComponent).join("/");
+  return new Request(`https://${domain}/__webmcp-cache/${segments}/${hash}`, { method: "GET" });
 }
 
 export function buildCacheControl(opts: {

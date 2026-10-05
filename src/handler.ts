@@ -65,6 +65,8 @@ export interface HandlerPreflight {
 export interface HandlerMeta {
   /** Hash of the config alone: /_webmcp/health, the preflight staleness check and the exec cache key. Not an ETag. */
   CONFIG_HASH: string;
+  /** cf-webmcp's version from package.json, for the exec cache key. */
+  CF_WEBMCP_VERSION: string;
   /** Strong ETags of the bodies served from this build: "<sha256(body) first 16 hex>", quotes included. */
   MANIFEST_ETAG: string;
   LANDING_ETAG: string;
@@ -134,7 +136,12 @@ export function createHandler(deps: HandlerDeps): Required<Pick<ExportedHandler<
             request,
             config,
             match.toolName!,
-            { domain: config.site.domain, deployToken: env.CF_WEBMCP_DEPLOY_TOKEN ?? "", configHash: meta.CONFIG_HASH },
+            {
+              domain: config.site.domain,
+              deployToken: env.CF_WEBMCP_DEPLOY_TOKEN ?? "",
+              configHash: meta.CONFIG_HASH,
+              version: meta.CF_WEBMCP_VERSION,
+            },
             (p) => ctx.waitUntil(p),
           );
         case "health":
@@ -315,9 +322,10 @@ export function createHandler(deps: HandlerDeps): Required<Pick<ExportedHandler<
     // The Link header is discovery data, independent of body injection: it goes
     // on every proxied response, including when inject_html is off.
     if (!config.features.inject_html || !shouldInject(request, upstream, config)) {
-      // A 304 that revalidates a copy this build rewrote (its tag was one rule a
-      // stripped) gets the suffix back, so the browser keeps the suffixed validator.
-      // Any other response keeps origin's validators untouched.
+      // A 304 for a request that carried tags rule a stripped loses Last-Modified, and
+      // when it revalidates one of those copies its ETag gets the suffix back, so the
+      // browser keeps the suffixed validator (resuffixNotModified). Any other response
+      // keeps origin's validators untouched.
       const resuffix =
         upstream.status === 304 && validators.stripped.size > 0
           ? (headers: Headers) => resuffixNotModified(headers, validators.stripped, suffix)
@@ -350,9 +358,10 @@ export function createHandler(deps: HandlerDeps): Required<Pick<ExportedHandler<
       forms,
     });
     // When safeInject failed open it handed back origin's response itself: those bytes
-    // are origin's, so they keep origin's validators.
-    const rewritten = injected === upstream ? undefined : (headers: Headers) => rewrittenValidators(headers, suffix);
-    return withProxyHeaders(injected, trial, rewritten);
+    // are origin's, so they keep origin's validators. A HEAD (no body) is rewritten like
+    // its GET and gets the same validators.
+    const rewritten = injected.failedOpen ? undefined : (headers: Headers) => rewrittenValidators(headers, suffix);
+    return withProxyHeaders(injected.response, trial, rewritten);
   }
 
   /**
@@ -429,29 +438,9 @@ interface ForwardedValidators {
   stripped: Set<string>;
 }
 
-/**
- * The conditional headers to send to origin (rules a and b in proxyAndMaybeInject).
- * `htmlRequest` turns on rule b: the request asks for HTML on a path the rewriter runs on.
- * If-Range and If-Match are left alone: a suffixed tag there never matches origin's, so
- * origin answers in full, which is right for a copy whose bytes origin never sent.
- */
-function forwardedValidators(request: Request, suffix: string, htmlRequest: boolean): ForwardedValidators {
-  const ifNoneMatch = request.headers.get("if-none-match");
-  const dropDate = htmlRequest && request.headers.has("if-modified-since");
-  if (ifNoneMatch === null && !dropDate) return { headers: null, stripped: new Set() };
-
-  const headers = new Headers(request.headers);
-  // Rule b: the copy may predate the current injection, so origin must not judge it by date.
-  if (dropDate) headers.delete("if-modified-since");
-  if (ifNoneMatch === null) return { headers, stripped: new Set() };
-
-  // "*" matches any copy, also one from an older build. Unparseable: nothing can be stripped.
-  const tags = ifNoneMatch.trim() === "*" ? null : parseEntityTagList(ifNoneMatch);
-  if (tags === null) {
-    if (htmlRequest) headers.delete("if-none-match");
-    return { headers, stripped: new Set() };
-  }
-  const stripped = new Set<string>();
+/** An entity-tag list with the current suffix taken off every entry that carries it. */
+function stripSuffix(tags: EntityTag[], suffix: string): { sent: EntityTag[]; stripped: string[]; unsuffixed: number } {
+  const stripped: string[] = [];
   let unsuffixed = 0;
   const sent = tags.map((tag) => {
     if (!tag.opaque.endsWith(suffix)) {
@@ -459,17 +448,68 @@ function forwardedValidators(request: Request, suffix: string, htmlRequest: bool
       return tag;
     }
     const own = { weak: tag.weak, opaque: tag.opaque.slice(0, -suffix.length) };
-    stripped.add(own.opaque);
+    stripped.push(own.opaque);
     return own;
   });
-  if (htmlRequest && unsuffixed > 0) {
-    // Rule b: an entry without the current suffix is a copy this build did not rewrite.
-    // Nothing goes to origin, so no 304 can answer for a stripped entry either.
-    headers.delete("if-none-match");
-    return { headers, stripped: new Set() };
+  return { sent, stripped, unsuffixed };
+}
+
+/** An If-None-Match or If-Match value as entity tags; null for "*" and for a value that does not parse. */
+function conditionTags(value: string): EntityTag[] | null {
+  return value.trim() === "*" ? null : parseEntityTagList(value);
+}
+
+/**
+ * The conditional headers to send to origin (rules a and b in proxyAndMaybeInject).
+ * `htmlRequest` turns on rule b: the request asks for HTML on a path the rewriter runs on.
+ *
+ * If-Match gets rule a too: a conditional PUT or DELETE that carries a tag taken from a
+ * rewritten GET reaches origin with origin's own tag. Only the current suffix comes off;
+ * a tag from an older build goes as sent and fails the precondition at origin, and rule b
+ * never touches If-Match. If-Range is left alone: a suffixed tag there never matches
+ * origin's, so origin answers in full, which is right for a copy whose bytes origin never
+ * sent.
+ */
+function forwardedValidators(request: Request, suffix: string, htmlRequest: boolean): ForwardedValidators {
+  const ifNoneMatch = request.headers.get("if-none-match");
+  const ifMatch = request.headers.get("if-match");
+  const dropDate = htmlRequest && request.headers.has("if-modified-since");
+  if (ifNoneMatch === null && ifMatch === null && !dropDate) return { headers: null, stripped: new Set() };
+
+  const headers = new Headers(request.headers);
+  let changed = false;
+  // Rule b: the copy may predate the current injection, so origin must not judge it by date.
+  if (dropDate) {
+    headers.delete("if-modified-since");
+    changed = true;
   }
-  if (stripped.size > 0) headers.set("if-none-match", sent.map(formatEntityTag).join(", "));
-  return { headers, stripped };
+
+  const matchTags = ifMatch === null ? null : conditionTags(ifMatch);
+  if (matchTags !== null) {
+    const { sent, stripped } = stripSuffix(matchTags, suffix);
+    if (stripped.length > 0) {
+      headers.set("if-match", sent.map(formatEntityTag).join(", "));
+      changed = true;
+    }
+  }
+
+  let stripped = new Set<string>();
+  if (ifNoneMatch !== null) {
+    // "*" matches any copy, also one from an older build. Unparseable: nothing can be stripped.
+    const tags = conditionTags(ifNoneMatch);
+    const result = tags === null ? null : stripSuffix(tags, suffix);
+    if (htmlRequest && (result === null || result.unsuffixed > 0)) {
+      // Rule b: an entry without the current suffix is a copy this build did not rewrite.
+      // Nothing goes to origin, so no 304 can answer for a stripped entry either.
+      headers.delete("if-none-match");
+      changed = true;
+    } else if (result !== null && result.stripped.length > 0) {
+      headers.set("if-none-match", result.sent.map(formatEntityTag).join(", "));
+      stripped = new Set(result.stripped);
+      changed = true;
+    }
+  }
+  return { headers: changed ? headers : null, stripped };
 }
 
 /**
@@ -488,16 +528,19 @@ function rewrittenValidators(headers: Headers, suffix: string): void {
 }
 
 /**
- * A 304 whose ETag is one of the tags rule a stripped revalidated a copy this build
- * rewrote: its ETag gets the suffix back and it loses Last-Modified, as the 200 did.
- * Any other 304 is left as origin sent it.
+ * A 304 for a request whose If-None-Match had entries rule a stripped. It loses
+ * Last-Modified whatever it answers: the visitor holds at least one copy this build
+ * rewrote, and a date must not become its validator (a 304 without the header leaves
+ * the cached copy's own validators as they were). When its ETag is one of the stripped
+ * tags, it revalidated such a copy, and the ETag gets the suffix back, weak or strong as
+ * origin sent it. Any other ETag stays as origin sent it.
  */
 function resuffixNotModified(headers: Headers, stripped: Set<string>, suffix: string): void {
+  headers.delete("last-modified");
   const etag = headers.get("etag");
   const tag = etag === null ? null : parseEntityTag(etag);
   if (tag === null || !stripped.has(tag.opaque)) return;
   headers.set("etag", formatEntityTag({ weak: tag.weak, opaque: tag.opaque + suffix }));
-  headers.delete("last-modified");
 }
 
 /** A GET or HEAD whose Accept names text/html: a page load, as opposed to a subresource or an API fetch. */

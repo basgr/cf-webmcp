@@ -9,6 +9,7 @@
 import {
   config,
   CONFIG_HASH,
+  CF_WEBMCP_VERSION,
   MANIFEST_ETAG,
   LANDING_ETAG,
   ARD_ETAG,
@@ -39,6 +40,7 @@ export default createHandler({
   },
   meta: {
     CONFIG_HASH,
+    CF_WEBMCP_VERSION,
     MANIFEST_ETAG,
     LANDING_ETAG,
     ARD_ETAG,

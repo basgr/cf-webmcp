@@ -2123,6 +2123,18 @@ describe("validators on rewritten HTML (a deploy that changes the injection must
       expect(res.headers.has("etag")).toBe(false);
     });
 
+    it("is suffixed on HEAD exactly as on GET, with no Last-Modified", async () => {
+      origin(() => new Response(null, { status: 200, headers: { "content-type": "text/html; charset=utf-8", etag: '"abc"', "last-modified": LAST_MODIFIED } }));
+      const head = await call(handlerWith(), page, { method: "HEAD", headers: NAV });
+      origin(html({ etag: '"abc"', "last-modified": LAST_MODIFIED }));
+      const get = await call(handlerWith(), page, { headers: NAV });
+
+      expect(head.status).toBe(200);
+      expect(head.headers.get("etag")).toBe(`"abc-${H}"`);
+      expect(head.headers.has("last-modified")).toBe(false);
+      expect(head.headers.get("etag")).toBe(get.headers.get("etag"));
+    });
+
     it("is suffixed for any request, a fetch that does not ask for HTML included", async () => {
       origin(html({ etag: '"abc"' }));
       const res = await call(handlerWith(), page, { headers: { accept: "*/*" } });
@@ -2221,6 +2233,32 @@ describe("validators on rewritten HTML (a deploy that changes the injection must
       expect(seen[0]!.headers.get("if-modified-since")).toBe(LAST_MODIFIED);
     });
 
+    it.each(["PUT", "DELETE", "POST"])("strips the current suffix from If-Match on a %s, so origin sees its own tag", async (method) => {
+      const seen = origin(() => new Response(null, { status: 204 }));
+      await call(handlerWith(), page, { method, headers: { "if-match": `"abc-${H}", W/"def-${H}"` } });
+
+      expect(seen[0]!.headers.get("if-match")).toBe('"abc", W/"def"');
+    });
+
+    it.each([
+      ["a tag from an older injection", `"abc-${OLD}"`],
+      ["a raw tag", '"abc"'],
+      ["*", "*"],
+      ["an unparseable value", "abc"],
+    ])("leaves If-Match alone for %s", async (_label, ifMatch) => {
+      const seen = origin(() => new Response(null, { status: 412 }));
+      await call(handlerWith(), page, { method: "PUT", headers: { "if-match": ifMatch } });
+
+      expect(seen[0]!.headers.get("if-match")).toBe(ifMatch);
+    });
+
+    it("strips If-Match on a GET for HTML too, and never drops it (rule b is about If-None-Match and If-Modified-Since)", async () => {
+      const seen = origin(html());
+      await call(handlerWith(), page, { headers: { ...NAV, "if-match": `"abc-${H}"` } });
+
+      expect(seen[0]!.headers.get("if-match")).toBe('"abc"');
+    });
+
     it("forwards a request without validators exactly as before", async () => {
       const seen = origin(html());
       await call(handlerWith(), page, { headers: NAV });
@@ -2261,11 +2299,27 @@ describe("validators on rewritten HTML (a deploy that changes the injection must
       expect(res.headers.get("etag")).toBe(`"abc-${H}"`);
     });
 
-    it("is left alone when it answers a tag that carried no suffix", async () => {
+    it("keeps the ETag of a 304 that answers a tag that carried no suffix, but drops its Last-Modified", async () => {
       origin(notModified({ etag: '"raw"', "last-modified": LAST_MODIFIED }));
       const res = await call(handlerWith(), page, { headers: { accept: "*/*", "if-none-match": `"abc-${H}", "raw"` } });
 
       expect(res.headers.get("etag")).toBe('"raw"');
+      expect(res.headers.has("last-modified")).toBe(false);
+    });
+
+    it("drops Last-Modified from a 304 without an ETag when a suffix was stripped", async () => {
+      origin(notModified({ "last-modified": LAST_MODIFIED }));
+      const res = await call(handlerWith(), page, { headers: { ...NAV, "if-none-match": `"abc-${H}"` } });
+
+      expect(res.status).toBe(304);
+      expect(res.headers.has("etag")).toBe(false);
+      expect(res.headers.has("last-modified")).toBe(false);
+    });
+
+    it("keeps Last-Modified on a 304 when nothing was stripped", async () => {
+      origin(notModified({ etag: '"img1"', "last-modified": LAST_MODIFIED }));
+      const res = await call(handlerWith(), page, { headers: { ...IMAGE, "if-none-match": '"img1"' } });
+
       expect(res.headers.get("last-modified")).toBe(LAST_MODIFIED);
     });
   });
