@@ -1332,6 +1332,53 @@ describe("preflight: the deploy token only goes where the Worker may send it", (
   });
 });
 
+describe("preflight: a deploy token the Worker cannot reliably take out of its answers", () => {
+  const warningsOf = (lines: string[]) => lines.filter((l) => l.includes("WARNING") && l.includes("CF_WEBMCP_DEPLOY_TOKEN"));
+
+  it.each([
+    ["a short word", "secret"],
+    ["base64 with / + and =", "Ab3/xY+9kQ==zz-SECRET-0123456789"],
+    ["31 characters of the safe set", "a".repeat(31)],
+    ["32 characters with a space", "0123456789abcdef 123456789abcdef"],
+  ])("warns for %s, without printing the token", async (_label, token) => {
+    stubOrigin();
+    const { lines } = await run(MINIMAL, { deployToken: token });
+
+    const warnings = warningsOf(lines);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("openssl rand -hex 32");
+    expect(lines.join("\n")).not.toContain(token);
+  });
+
+  it("names both reasons for a short token with a character outside the safe set", async () => {
+    stubOrigin();
+    const { lines } = await run(MINIMAL, { deployToken: "secret/1" });
+
+    const [warning] = warningsOf(lines);
+    expect(warning).toContain("shorter than 32 characters");
+    expect(warning).toContain("A-Z, a-z, 0-9");
+  });
+
+  it.each([
+    ["64 hex characters", "0123456789abcdef".repeat(4)],
+    ["32 characters of letters, digits, _ and -", "Ab3_xY-9kQzz-SECRET_0123456789ab"],
+    ["no token", ""],
+  ])("is quiet for %s", async (_label, token) => {
+    stubOrigin();
+    const { lines } = await run(MINIMAL, { deployToken: token });
+
+    expect(warningsOf(lines)).toEqual([]);
+  });
+
+  it("warns for a token that is withheld too: it is the same secret the Worker sends", async () => {
+    stubOrigin();
+    const { lines } = await run(MINIMAL, { deployToken: "secret", origin: "https://origin.example.net" });
+
+    expect(lines.join("\n")).toContain("token: withheld");
+    expect(warningsOf(lines)).toHaveLength(1);
+  });
+});
+
 describe("probeUrl: a probe never leaves the host it was aimed at", () => {
   const base = new URL("https://origin.example");
 

@@ -32,13 +32,21 @@ import type { Config } from "../config-types";
 import { buildCacheControl, sha256Hex } from "../cache";
 import { ARD_PREDECESSOR_PATH, isArdContentType, isArdDocument, type ArdEntryLike } from "../ard";
 import { MERGE_MAX_BYTES, ORIGIN_FAILURE_CACHE_CONTROL, declaredLength, readCapped, type CappedRead } from "./read-capped";
+import { redactBody, redactText } from "../redact";
 
 /**
  * `synthesizedEtag` is the strong ETag of `synthesizedBody`, computed at build time
  * (ARD_ETAG). A merged document exists only at request time, so its ETag is hashed
- * then, over the merged bytes: the merge reads origin's whole document anyway, and the
- * tag then changes exactly when the merged bytes do, origin edits included. A relayed
+ * then, over the bytes served: the merge reads origin's whole document anyway, and the
+ * tag then changes exactly when the served bytes do, origin edits included. A relayed
  * origin document keeps origin's own headers, its ETag among them.
+ *
+ * `deployToken` is the CF_WEBMCP_DEPLOY_TOKEN secret, which origin got with the fetch.
+ * This route takes it out of whatever of origin's it serves, itself (the handler does that
+ * for the other merge routes, on the way out): the merged document before it is hashed, so
+ * the ETag is a hash of the bytes served, never of a body that still held the token (that
+ * would let anyone check a guess at the token offline), and a relayed body as it streams
+ * (src/redact.ts). Origin's headers that hold it were dropped as they arrived (proxyToOrigin).
  */
 export async function aiCatalogResponse(
   _request: Request,
@@ -46,11 +54,15 @@ export async function aiCatalogResponse(
   synthesizedBody: string,
   proxyToOrigin: (url: URL) => Promise<Response>,
   synthesizedEtag?: string,
+  deployToken = "",
 ): Promise<Response> {
   if (config.ai_catalog.mode === "merge") {
     const merged = await mergeWithOrigin(config, synthesizedBody, proxyToOrigin);
-    if (merged.kind === "relay") return withNoindex(merged.upstream);
-    if (merged.kind === "body") return ardResponse(merged.text, ardCacheControl(config), await bodyEtag(merged.text));
+    if (merged.kind === "relay") return withNoindex(redactBody(merged.upstream, deployToken));
+    if (merged.kind === "body") {
+      const served = redactText(merged.text, deployToken);
+      return ardResponse(served, ardCacheControl(config), await bodyEtag(served));
+    }
     return ardResponse(
       synthesizedBody,
       merged.originFailed ? ORIGIN_FAILURE_CACHE_CONTROL : ardCacheControl(config),

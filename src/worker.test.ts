@@ -2828,4 +2828,140 @@ describe("the deploy token never comes back to the caller", () => {
     expect(body).toContain("https://example.com/[redacted]");
     expect(body).not.toContain(TOKEN);
   });
+
+  /** The first 16 hex of the sha256 of `bytes`, quoted: an ETag as the Worker computes one. */
+  async function etagOf(bytes: Uint8Array): Promise<string> {
+    const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
+    return `"${Array.from(digest, (b) => b.toString(16).padStart(2, "0")).join("").slice(0, 16)}"`;
+  }
+
+  it("the ARD manifest in merge mode: the ETag is the hash of the bytes served, after the token is taken out", async () => {
+    echoOrigin({
+      "/.well-known/ard.json": (t) =>
+        new Response(JSON.stringify({ entries: [{ identifier: "origin-entry", url: `https://example.com/?t=${t}`, description: t }] }), {
+          headers: { "content-type": "application/json" },
+        }),
+    });
+    const res = await call(
+      createHandler(makeDeps({ features: { ai_catalog: true }, ai_catalog: { mode: "merge" } })),
+      "https://example.com/.well-known/ard.json",
+      undefined,
+      tokenEnv,
+    );
+    const bytes = new Uint8Array(await res.arrayBuffer());
+    const body = new TextDecoder().decode(bytes);
+
+    expect(res.status).toBe(200);
+    expect(body).toContain("origin-entry");
+    expect(body).toContain("[redacted]");
+    expect(body).not.toContain(TOKEN);
+    // A hash of the body before the token came out would let anyone check a guess at the token offline.
+    expect(res.headers.get("etag")).toBe(await etagOf(bytes));
+  });
+
+  // Each merge route with a token that is its own Content-Type: an extreme case of a header the
+  // Worker sets that holds the token. Only origin's headers may be dropped for it.
+  it.each([
+    ["llms.txt", { llms_txt: { mode: "merge" as const } }, "/llms.txt", "text/plain", "# Site\n", "text/plain; charset=utf-8", false],
+    ["robots.txt", {}, "/robots.txt", "text/plain", "User-agent: *\n", "text/plain; charset=utf-8", false],
+    ["agents.md", { agents_md: { mode: "merge" as const } }, "/.well-known/agents.md", "text/markdown", "# Agents\n", "text/markdown; charset=utf-8", true],
+    [
+      "SKILL.md",
+      { agent_skills: { mode: "merge" as const } },
+      "/.well-known/agent-skills/site/SKILL.md",
+      "text/markdown",
+      "---\nname: site\ndescription: d\n---\n# Skill\n",
+      "text/markdown; charset=utf-8",
+      true,
+    ],
+    [
+      "the API catalog",
+      {},
+      "/.well-known/api-catalog",
+      "application/linkset+json",
+      '{"linkset":[]}',
+      'application/linkset+json; profile="https://www.rfc-editor.org/info/rfc9727"',
+      true,
+    ],
+    [
+      "the ARD manifest",
+      { features: { ai_catalog: true }, ai_catalog: { mode: "merge" as const } },
+      "/.well-known/ard.json",
+      "application/json",
+      '{"entries":[]}',
+      "application/json; charset=utf-8",
+      true,
+    ],
+  ])(
+    "%s: a header the Worker sets is kept when it holds the token; origin's header that holds it is dropped",
+    async (_label, overrides, path, originType, originBody, workerType, noindex) => {
+      const token = workerType;
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => new Response(originBody, { headers: { "content-type": originType, "x-echo": `seen ${token}` } })),
+      );
+      const res = await call(createHandler(makeDeps(overrides)), `https://example.com${path}`, undefined, {
+        ...env,
+        CF_WEBMCP_DEPLOY_TOKEN: token,
+      });
+      await res.text();
+
+      expect(res.status).toBe(200);
+      expect(res.headers.get("content-type")).toBe(workerType);
+      expect(res.headers.get("cache-control")).not.toBeNull();
+      expect(res.headers.get("x-robots-tag")).toBe(noindex ? "noindex" : null);
+      expect(res.headers.get("x-echo")).toBeNull();
+    },
+  );
+
+  it("a relayed redirect whose Location holds the token loses the Location and keeps the Worker's own headers", async () => {
+    echoOrigin({
+      "/robots.txt": (t) => new Response(null, { status: 302, headers: { location: `https://elsewhere.example/r?t=${t}` } }),
+    });
+    const res = await call(createHandler(makeDeps()), "https://example.com/robots.txt", undefined, tokenEnv);
+
+    expect(res.status).toBe(302);
+    expect(res.headers.get("location")).toBeNull();
+    expect(res.headers.get("cache-control")).toBe("no-store");
+  });
+});
+
+describe("a deploy token too short to search for", () => {
+  // Every header holding "e" used to be dropped (Content-Type, Cache-Control, even noindex), and
+  // every "e" in the body became [redacted].
+  it("agents.md in merge mode with a one-character token keeps its headers and its text", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response("# Agents here\n", { headers: { "content-type": "text/markdown" } })),
+    );
+    const res = await call(createHandler(makeDeps({ agents_md: { mode: "merge" } })), "https://example.com/.well-known/agents.md", undefined, {
+      ...env,
+      CF_WEBMCP_DEPLOY_TOKEN: "e",
+    });
+    const body = await res.text();
+
+    expect(res.headers.get("x-robots-tag")).toBe("noindex");
+    expect(res.headers.get("content-type")).toBe("text/markdown; charset=utf-8");
+    expect(res.headers.get("cache-control")).not.toBeNull();
+    expect(body).toContain("# Agents here\n");
+    expect(body).toContain("## WebMCP on this site");
+    expect(body).not.toContain("[redacted]");
+  });
+
+  it("a token of 16 characters is still taken out", async () => {
+    const token = "0123456789abcdef";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(`# Site\nEchoed: ${token}\n`, { headers: { "content-type": "text/plain" } })),
+    );
+    const res = await call(createHandler(makeDeps({ llms_txt: { mode: "merge" } })), "https://example.com/llms.txt", undefined, {
+      ...env,
+      CF_WEBMCP_DEPLOY_TOKEN: token,
+    });
+    const body = await res.text();
+
+    expect(body).toContain("Echoed: [redacted]");
+    expect(body).not.toContain(token);
+  });
 });

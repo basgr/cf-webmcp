@@ -10,19 +10,66 @@
  *   - Executor output (redactEnvelope): the envelope, serialised the way the exec route sends
  *     it. Done on that final text, after any parse, so a token origin wrote with JSON escapes
  *     and the parse decoded is caught too.
- *   - Merge routes (redactResponse): the response a route hands back, its own merged document
- *     or origin's answer relayed as it came. Every header whose value holds the token is
- *     dropped, and the body is searched as it streams.
+ *   - Merge routes, headers (withoutSecretHeaders): origin's response as it arrives, before a
+ *     route adds anything of its own (src/handler.ts, proxyToOrigin). Every header of origin's
+ *     whose value holds the token is dropped. A header the Worker sets (Content-Type,
+ *     Cache-Control, X-Robots-Tag, an ETag it computed, CORS) is never looked at, so it can
+ *     never be dropped.
+ *   - Merge routes, bodies (redactBody): the body a route answers, its own merged document or
+ *     origin's answer relayed as it came, searched as it streams. A merged document is searched
+ *     after the merge, so a token origin wrote with JSON escapes that a JSON merge decoded is
+ *     caught too. The ARD manifest redacts its merged document itself (redactText), before it
+ *     hashes it for the ETag: the tag must describe the bytes that are served.
  *
  * The token is an opaque string: what is replaced is its value as written, and, where it differs,
- * the form JSON writes inside a string. An encoding beyond that (base64, percent-encoding, HTML
- * entities) is not recognised. An empty token (the secret is not set) is never searched for:
- * nothing is sent, so nothing can come back.
+ * the form JSON.stringify writes inside a string (a quote, a backslash or a control character
+ * escaped, the controls as \n, \t or \uXXXX). Nothing else is recognised: not the `\/` some JSON
+ * writers put for a slash, not a \uXXXX escape of an ordinary character, not percent-encoding,
+ * base64, HTML entities, a change of letter case, nor a URL the Worker writes again (a relayed
+ * Location). A token of letters, digits, `_` and `-` (`openssl rand -hex 32`) has no character
+ * any of these encodings change, so for such a token the value as written is every form there
+ * is, except an encoder that escapes characters it need not (every character as \uXXXX, say).
+ *
+ * A token under MIN_REDACTED_LENGTH characters is not searched for at all: replacing so short a
+ * string replaces it in ordinary text too, and drops every header that happens to contain it
+ * (a one-letter token took Content-Type, Cache-Control and X-Robots-Tag off the merge routes).
+ * The first time that happens in an isolate, a warning goes to the log. An empty token (the
+ * secret is not set) is never searched for either, and nothing is logged: nothing is sent, so
+ * nothing can come back.
  */
 
 import { err, type Envelope } from "./envelope";
 
 export const REDACTED = "[redacted]";
+
+/** The shortest deploy token the Worker searches its answers for. */
+export const MIN_REDACTED_LENGTH = 16;
+
+/**
+ * Logged once per isolate for a token under MIN_REDACTED_LENGTH characters. It names neither the
+ * token nor its length.
+ */
+const SHORT_TOKEN_WARNING =
+  `cf-webmcp: CF_WEBMCP_DEPLOY_TOKEN is shorter than ${MIN_REDACTED_LENGTH} characters, so the Worker does not ` +
+  `take it out of tool output or merge-route answers (replacing so short a string would mangle ordinary text ` +
+  `and headers). Set a token of at least 32 characters, such as the output of \`openssl rand -hex 32\`.`;
+
+let warnedShort = false;
+
+/** The token to search for: "" (search for nothing) when it is unset or too short to search for. */
+function searchable(secret: string): string {
+  if (secret.length >= MIN_REDACTED_LENGTH) return secret;
+  if (secret !== "" && !warnedShort) {
+    warnedShort = true;
+    console.warn(SHORT_TOKEN_WARNING);
+  }
+  return "";
+}
+
+/** Test hook: forget that the short-token warning was logged. */
+export function _resetForTests(): void {
+  warnedShort = false;
+}
 
 /** The forms of the secret to look for, longest first: as written, and as JSON writes it in a string. */
 function needles(secret: string): string[] {
@@ -34,8 +81,14 @@ function needles(secret: string): string[] {
 /** `text` with every occurrence of the secret, as written or JSON-escaped, replaced by REDACTED. */
 export function redactText(text: string, secret: string): string {
   let out = text;
-  for (const needle of needles(secret)) out = out.split(needle).join(REDACTED);
+  for (const needle of needles(searchable(secret))) out = out.split(needle).join(REDACTED);
   return out;
+}
+
+/** Whether `value` holds the secret as written: the test for a header value of origin's. */
+export function holdsSecret(value: string, secret: string): boolean {
+  const s = searchable(secret);
+  return s !== "" && value.includes(s);
 }
 
 /**
@@ -45,7 +98,7 @@ export function redactText(text: string, secret: string): string {
  * `internal` error rather than anything that might still hold it.
  */
 export function redactEnvelope<T>(envelope: Envelope<T>, secret: string): Envelope<T> {
-  if (secret === "") return envelope;
+  if (searchable(secret) === "") return envelope;
   const json = JSON.stringify(envelope);
   const redacted = redactText(json, secret);
   if (redacted === json) return envelope;
@@ -59,21 +112,39 @@ export function redactEnvelope<T>(envelope: Envelope<T>, secret: string): Envelo
 /** Statuses whose response has no body. */
 const NULL_BODY_STATUSES = new Set([101, 204, 205, 304]);
 
+/** A response that cannot be rebuilt: a WebSocket upgrade, or a status outside 200 to 599. */
+function unbuildable(res: Response): boolean {
+  return Boolean(res.webSocket) || res.status < 200 || res.status > 599;
+}
+
 /**
- * The response with every header whose value holds the secret dropped and the secret replaced in
- * its body as it streams. Status, status text and every other header are kept, except
- * Content-Length: the body can change length. The same object when there is no secret.
+ * Origin's response with every header whose value holds the secret dropped; status, status text,
+ * every other header and the body as they came (Content-Length included: the body is not touched
+ * here, and the merge routes judge their 1 MiB cap by it). The same object when nothing is
+ * dropped. For origin's response as it arrives, before the Worker adds a header of its own.
  */
-export function redactResponse(res: Response, secret: string): Response {
-  if (secret === "" || res.webSocket || res.status < 200 || res.status > 599) return res;
+export function withoutSecretHeaders(res: Response, secret: string): Response {
+  const s = searchable(secret);
+  if (s === "" || unbuildable(res)) return res;
+  const holding = [...res.headers].filter(([, value]) => value.includes(s)).map(([name]) => name);
+  if (holding.length === 0) return res;
   const headers = new Headers(res.headers);
-  for (const [name, value] of res.headers) {
-    if (value.includes(secret)) headers.delete(name);
-  }
-  const keepBody = res.body !== null && !NULL_BODY_STATUSES.has(res.status);
-  if (keepBody) headers.delete("content-length");
-  const body = keepBody ? res.body!.pipeThrough(redactingStream(secret)) : null;
-  return new Response(body, { status: res.status, statusText: res.statusText, headers });
+  for (const name of holding) headers.delete(name);
+  return new Response(res.body, { status: res.status, statusText: res.statusText, headers });
+}
+
+/**
+ * The response with the secret replaced in its body as it streams. Status, status text and every
+ * header are kept, except Content-Length: the body can change length. Headers are not searched:
+ * by the time a merge route answers, each one is either the Worker's own or one of origin's that
+ * withoutSecretHeaders let through. The same object when there is no secret or no body.
+ */
+export function redactBody(res: Response, secret: string): Response {
+  const s = searchable(secret);
+  if (s === "" || unbuildable(res) || res.body === null || NULL_BODY_STATUSES.has(res.status)) return res;
+  const headers = new Headers(res.headers);
+  headers.delete("content-length");
+  return new Response(res.body.pipeThrough(redactingStream(s)), { status: res.status, statusText: res.statusText, headers });
 }
 
 /**
@@ -89,9 +160,12 @@ export function redactResponse(res: Response, secret: string): Response {
  * replaces was quadratic: for a token that starts with a quote, 1 MiB of quotes took minutes.
  */
 export function redactingStream(secret: string): TransformStream<Uint8Array, Uint8Array> {
+  const s = searchable(secret);
+  // Nothing to search for: every byte passes as it came.
+  if (s === "") return new TransformStream<Uint8Array, Uint8Array>();
   const encoder = new TextEncoder();
   // Longest first, as needles() orders them: at a position where both start, the longer wins.
-  const forms = needles(secret).map((n) => compilePattern(encoder.encode(n)));
+  const forms = needles(s).map((n) => compilePattern(encoder.encode(n)));
   const replacement = encoder.encode(REDACTED);
   const longest = Math.max(...forms.map((f) => f.bytes.byteLength));
   let carry: Uint8Array = new Uint8Array(0);

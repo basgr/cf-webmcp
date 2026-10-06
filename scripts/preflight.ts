@@ -42,7 +42,9 @@
  *   sends them only to an origin in [origin].allowed_origins: a base_url outside the list
  *   fails with the build's own error before any request, and an --origin host outside it
  *   is probed without them. It warns when they would go over plain http to a host that is
- *   not localhost.
+ *   not localhost, and when the token is one the Worker cannot reliably take out of its
+ *   answers: under 32 characters, or with a character outside A-Z, a-z, 0-9, _ and -
+ *   (deployTokenWeakness).
  */
 
 import { promises as fs } from "node:fs";
@@ -58,6 +60,7 @@ import { isTextish as isRobotsContentType } from "../src/routes/robots-txt.js";
 import { isMarkdownish as isSkillContentType } from "../src/routes/agent-skills.js";
 import { isLinksetContentType, parseLinkset } from "../src/routes/api-catalog.js";
 import { apiCatalogServed, skillsIndexServed } from "../src/served.js";
+import { MIN_REDACTED_LENGTH } from "../src/redact.js";
 import { preflightUserAgent } from "../src/user-agent.js";
 import { checkBaseUrlAllowed, configHashOf, resolveInherits } from "./build-config.js";
 
@@ -579,6 +582,21 @@ export interface PreflightOptions {
   origin?: string;
 }
 
+/**
+ * Why `token` is a poor deploy token for the Worker's redaction (src/redact.ts), as a phrase
+ * after "CF_WEBMCP_DEPLOY_TOKEN", or null when it is a good one or there is none. Good: 32 or
+ * more characters of A-Z, a-z, 0-9, _ and -, the characters that percent-encoding, JSON, the
+ * URL parser and HTML leave as they are, so the value as written is the only form an echo of it
+ * can take. Never names the token or its length.
+ */
+export function deployTokenWeakness(token: string | undefined): string | null {
+  if (!token) return null;
+  const reasons: string[] = [];
+  if (token.length < 32) reasons.push("is shorter than 32 characters");
+  if (!/^[A-Za-z0-9_-]*$/.test(token)) reasons.push("has characters outside A-Z, a-z, 0-9, _ and -");
+  return reasons.length === 0 ? null : reasons.join(" and ");
+}
+
 export async function runPreflight(configPath: string, force: boolean, opts: PreflightOptions = {}): Promise<number> {
   const absPath = path.resolve(configPath);
   // Validate the override first: nothing is read or requested for a bad value.
@@ -614,6 +632,16 @@ export async function runPreflight(configPath: string, force: boolean, opts: Pre
     log(
       `  WARNING: the deploy token goes to ${base.host} over plain http, readable on the way. Use https, ` +
         `or run preflight against localhost.`,
+    );
+  }
+  // About the token itself, so also when it is withheld here: the Worker sends the same one.
+  const weakness = deployTokenWeakness(configuredToken);
+  if (weakness !== null) {
+    log(
+      `  WARNING: CF_WEBMCP_DEPLOY_TOKEN ${weakness}. The Worker takes the token out of what it answers only as ` +
+        `written and as JSON writes it, and not at all under ${MIN_REDACTED_LENGTH} characters, so an origin that ` +
+        `echoes it percent-encoded, with a \\/ escape or in a URL the Worker writes again can hand it to a client. ` +
+        `Use 32 or more characters of A-Z, a-z, 0-9, _ and -, which no such encoding changes: \`openssl rand -hex 32\`.`,
     );
   }
 

@@ -33,7 +33,7 @@ import { configLinkOptions, formsForPath, isExcludedPath, safeInject, shouldInje
 import { fetchWithManualRedirects, isAbortError, logRedirectFailure, type RedirectFailure } from "./safe-fetch";
 import { widgetEnabled } from "./widget-state";
 import { userAgent } from "./user-agent";
-import { redactResponse } from "./redact";
+import { holdsSecret, redactBody, withoutSecretHeaders } from "./redact";
 
 /**
  * One deadline for a whole proxyToOrigin redirect chain, up to the moment the final
@@ -162,7 +162,8 @@ export function createHandler(deps: HandlerDeps): Required<Pick<ExportedHandler<
             envToken: env.CF_WEBMCP_HEALTH_TOKEN,
           });
         // The merge routes pass origin's text and headers on, and origin got the deploy token
-        // with the fetch: withoutToken takes it out of whatever they answer (src/redact.ts).
+        // with the fetch. proxyToOrigin drops origin's headers that hold it as they arrive, before
+        // a route adds its own; withoutToken takes it out of the body a route answers (src/redact.ts).
         case "llms_txt":
           return withoutToken(
             env,
@@ -186,9 +187,15 @@ export function createHandler(deps: HandlerDeps): Required<Pick<ExportedHandler<
         case "api_catalog":
           return withoutToken(env, apiCatalogResponse(request, config, (u) => proxyToOrigin(u, env)));
         case "ards_catalog":
-          return withoutToken(
-            env,
-            aiCatalogResponse(request, config, assets.aiCatalogJson, (u) => proxyToOrigin(u, env), meta.ARD_ETAG),
+          // Not through withoutToken: the route takes the token out of its body itself, because it
+          // hashes a merged document for its ETag, and the hash must be of the bytes it serves.
+          return aiCatalogResponse(
+            request,
+            config,
+            assets.aiCatalogJson,
+            (u) => proxyToOrigin(u, env),
+            meta.ARD_ETAG,
+            env.CF_WEBMCP_DEPLOY_TOKEN ?? "",
           );
         case "ards_catalog_redirect":
           return ardRedirect(config);
@@ -204,9 +211,13 @@ export function createHandler(deps: HandlerDeps): Required<Pick<ExportedHandler<
     },
   };
 
-  /** A merge route's answer with the deploy token taken out of its headers and body (redactResponse). */
+  /**
+   * A merge route's answer with the deploy token taken out of its body as it streams (redactBody).
+   * Its headers are left alone: origin's were checked as they arrived (proxyToOrigin), and the
+   * rest are the Worker's own, which must never be dropped.
+   */
   async function withoutToken(env: Env, answer: Promise<Response>): Promise<Response> {
-    return redactResponse(await answer, env.CF_WEBMCP_DEPLOY_TOKEN ?? "");
+    return redactBody(await answer, env.CF_WEBMCP_DEPLOY_TOKEN ?? "");
   }
 
   function handleHeadable(request: Request, response: Response): Response {
@@ -224,14 +235,20 @@ export function createHandler(deps: HandlerDeps): Required<Pick<ExportedHandler<
    * to the caller's client instead of followed. Any other failure is a 502 (a stalled
    * origin a 504), always with noindex, so a route never throws. The llms.txt and
    * robots.txt routes remove that noindex before they answer (see proxyFailure).
+   *
+   * Origin's answer comes back without the headers whose value holds the deploy token
+   * (withoutSecretHeaders): taken out here, as origin's headers arrive, they are gone before
+   * any route adds a header of its own, so none of the Worker's headers is ever looked at.
+   * Its body is left as it came; the route's answer is searched on the way out (withoutToken).
    */
   async function proxyToOrigin(url: URL, env: Env): Promise<Response> {
     const target = originTarget(config.origin.base_url, url);
     if (target === null) return plainError(400, "bad request path");
+    const token = env.CF_WEBMCP_DEPLOY_TOKEN ?? "";
     const secretHeaders: Record<string, string> = {};
-    if (env.CF_WEBMCP_DEPLOY_TOKEN) {
+    if (token) {
       secretHeaders["cf-webmcp-bypass"] = "1";
-      secretHeaders["cf-webmcp-deploy-token"] = env.CF_WEBMCP_DEPLOY_TOKEN;
+      secretHeaders["cf-webmcp-deploy-token"] = token;
     }
     const deadline = new AbortController();
     const timer = setTimeout(() => deadline.abort(), PROXY_ORIGIN_TIMEOUT_MS);
@@ -246,7 +263,7 @@ export function createHandler(deps: HandlerDeps): Required<Pick<ExportedHandler<
           signal: deadline.signal,
         },
       );
-      return result.ok ? result.response : proxyFailure(target, result.failure);
+      return result.ok ? withoutSecretHeaders(result.response, token) : proxyFailure(target, result.failure, token);
     } catch (e) {
       if (isAbortError(e)) return plainError(504, "origin did not answer in time");
       console.error(
@@ -278,13 +295,15 @@ export function createHandler(deps: HandlerDeps): Required<Pick<ExportedHandler<
    * /.well-known/*. The two apex discovery files, llms.txt and robots.txt, must never
    * carry X-Robots-Tag: their route handlers drop the header from whatever they pass
    * on (see src/robots-tag.ts), so a relay or a 502 from them has none.
+   *
+   * The relayed Location is origin's, and it is left out when it holds the deploy token
+   * (`token`), like any header of origin's that does (see proxyToOrigin).
    */
-  function proxyFailure(start: URL, failure: RedirectFailure): Response {
+  function proxyFailure(start: URL, failure: RedirectFailure, token: string): Response {
     if (failure.kind === "off_list" && failure.redirected) {
-      return new Response(null, {
-        status: failure.status,
-        headers: { location: failure.target, "cache-control": "no-store", "x-robots-tag": "noindex" },
-      });
+      const headers: Record<string, string> = { "cache-control": "no-store", "x-robots-tag": "noindex" };
+      if (!holdsSecret(failure.target, token)) headers["location"] = failure.target;
+      return new Response(null, { status: failure.status, headers });
     }
     logRedirectFailure("proxy", start, failure);
     switch (failure.kind) {
