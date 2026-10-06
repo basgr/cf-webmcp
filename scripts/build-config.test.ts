@@ -2535,6 +2535,14 @@ describe("landing: {{bootstrap_block}}", () => {
     const toml = `${MINIMAL}\n[webmcp_landing]\ntemplate = "custom-typo.html"\n`;
     await expect(runBuild(await writeToml("lb-typo.toml", toml))).rejects.toThrow(/unknown placeholder/);
   });
+
+  it.each(["constructor", "__proto__"])("refuses {{%s}}, a name every object inherits, as an unknown placeholder", async (name) => {
+    // `name in vars` found the inherited member and wrote "function Object() { [native code] }"
+    // (or "[object Object]") into the page.
+    await writeToml("custom-inherited.html", `<body>{{${name}}}</body>`);
+    const toml = `${MINIMAL}\n[webmcp_landing]\ntemplate = "custom-inherited.html"\n`;
+    await expect(runBuild(await writeToml("lb-inherited.toml", toml))).rejects.toThrow(`unknown placeholder "{{${name}}}"`);
+  });
 });
 
 describe("landing: diagnostic and copy", () => {
@@ -2609,6 +2617,21 @@ describe("advertisements follow the features and the widget", () => {
   it("manifest links keep their order and bytes with the landing on (the key sits second)", async () => {
     const { files } = await runBuild(await writeToml("adv-order.toml", MINIMAL));
     expect(Object.keys(manifestOf(files).links).slice(0, 4)).toEqual(["self", "landing", "bootstrap", "health"]);
+  });
+
+  it.each([
+    { label: "public, no token (the default)", health: "", linked: true },
+    { label: "public, a TOML token (the route answers 401 without it)", health: 'public = true\ntoken = "t0ken"\n', linked: true },
+    { label: "not public, a TOML token", health: 'public = false\ntoken = "t0ken"\n', linked: true },
+    // The route answers 404, unless the CF_WEBMCP_HEALTH_TOKEN secret is set, which the build cannot see.
+    { label: "not public and no TOML token", health: "public = false\n", linked: false },
+  ])("manifest links.health with [health] $label: $linked", async ({ health, linked }) => {
+    const toml = health ? `${MINIMAL}\n[health]\n${health}` : MINIMAL;
+    const { files } = await runBuild(await writeToml("adv-health.toml", toml));
+    const links = manifestOf(files).links;
+    if (linked) expect(links.health).toBe("https://example.com/_webmcp/health");
+    else expect(links).not.toHaveProperty("health");
+    expect(links.bootstrap).toMatch(/^https:\/\/example\.com\/_webmcp\/bootstrap\.[0-9a-f]{16}\.js$/);
   });
 
   describe("AGENT_SKILLS_DIGEST covers the SKILL.md the Worker serves", () => {

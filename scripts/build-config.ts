@@ -499,7 +499,8 @@ interface Manifest {
     /** Absent while [features].webmcp_landing is off: there is no landing page to point at. */
     landing?: string;
     bootstrap: string;
-    health: string;
+    /** Absent when the health route answers 404 as far as the build can tell (healthLinked). */
+    health?: string;
     api_catalog?: string;
     agent_skills?: string;
     agent_skills_index?: string;
@@ -510,6 +511,20 @@ interface Manifest {
 
 function siteBase(config: Config): string {
   return config.site.public_url ?? `https://${config.site.domain}`;
+}
+
+/**
+ * Whether the manifest links <namespace>/health: unless [health].public is false and the TOML
+ * sets no [health].token, the combination the route answers with 404 (src/routes/health.ts).
+ * The CF_WEBMCP_HEALTH_TOKEN secret also turns that combination into a bearer-token endpoint,
+ * but it is set with wrangler and only the Worker sees it; the manifest is built before, so it
+ * leaves the link out then too, the safe side for an endpoint nobody made public. A link to an
+ * endpoint that asks for a token (401 without it) is kept: the endpoint is there. agents.md, which
+ * is generated per request, links health only when it answers without a token
+ * (healthAnswersWithoutToken in src/routes/agents-md.ts), secret included.
+ */
+function healthLinked(config: Config): boolean {
+  return config.health.public || config.health.token !== "";
 }
 
 function buildManifest(config: Config, configHash: string, bootstrapName: string): Manifest {
@@ -534,7 +549,7 @@ function buildManifest(config: Config, configHash: string, bootstrapName: string
       self: `${base}${config.manifest.path}`,
       ...(config.features.webmcp_landing ? { landing: `${base}${config.webmcp_landing.path}` } : {}),
       bootstrap: `${base}${ns}/${bootstrapName}`,
-      health: `${base}${ns}/health`,
+      ...(healthLinked(config) ? { health: `${base}${ns}/health` } : {}),
       ...(apiCatalogServed(config)
         ? { api_catalog: `${base}${config.api_catalog.path}` }
         : {}),
@@ -1232,7 +1247,8 @@ async function buildLanding(
   };
 
   return templateSrc.replace(/\{\{\s*([a-z_]+)\s*\}\}/g, (_, name: string) => {
-    if (!(name in vars)) {
+    // An own property only: `in` also finds what every object inherits ({{constructor}}, {{__proto__}}).
+    if (!Object.prototype.hasOwnProperty.call(vars, name)) {
       throw new Error(`[build-config] landing template references unknown placeholder "{{${name}}}"`);
     }
     return vars[name]!;
