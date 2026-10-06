@@ -505,6 +505,25 @@ describe("unknown paths under the namespace", () => {
     expect((await call(handler, "https://example.com/_webmcp/exec/search_pages")).status).toBe(405);
   });
 
+  it("hands a well-formed tool name that no tool has to the exec route (docs/upgrade.md says so)", async () => {
+    const fetchMock = stubOrigin({});
+    const handler = createHandler(makeDeps());
+    const url = "https://example.com/_webmcp/exec/no_such_tool";
+
+    const get = await call(handler, url);
+    expect(get.status).toBe(405);
+    expect(get.headers.get("allow")).toBe("POST, OPTIONS");
+    expect(get.headers.get("x-robots-tag")).toBe("noindex");
+
+    const post = await call(handler, url, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+    expect(post.status).toBe(404);
+    expect(post.headers.get("content-type")).toContain("application/json");
+    expect((await post.json()) as unknown).toMatchObject({ ok: false, error: { code: "not_found" } });
+
+    expect((await call(handler, url, { method: "OPTIONS" })).status).toBe(204);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("keeps proxying paths that merely share the namespace spelling as a prefix", async () => {
     const fetchMock = stubOrigin({ "https://example.com/_webmcp-docs": () => htmlResponse() });
     const handler = createHandler(makeDeps());

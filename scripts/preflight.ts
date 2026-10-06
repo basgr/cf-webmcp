@@ -654,7 +654,7 @@ export async function runPreflight(configPath: string, force: boolean, opts: Pre
   if (weakness !== null) {
     log(
       `  WARNING: CF_WEBMCP_DEPLOY_TOKEN ${weakness}. The Worker takes the token out of what it answers only as ` +
-        `written and as JSON writes it, and not at all under ${MIN_REDACTED_LENGTH} characters, so an origin that ` +
+        `written and as \`JSON.stringify\` writes it, and not at all under ${MIN_REDACTED_LENGTH} characters, so an origin that ` +
         `echoes it percent-encoded, with a \\/ escape or in a URL the Worker writes again can hand it to a client. ` +
         `Use 32 or more characters of A-Z, a-z, 0-9, _ and -, which no such encoding changes: \`openssl rand -hex 32\`.`,
     );

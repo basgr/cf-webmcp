@@ -71,7 +71,7 @@ export function _resetForTests(): void {
   warnedShort = false;
 }
 
-/** The forms of the secret to look for, longest first: as written, and as JSON writes it in a string. */
+/** The forms of the secret to look for, longest first: as written, and as `JSON.stringify` writes it. */
 function needles(secret: string): string[] {
   if (secret === "") return [];
   const escaped = JSON.stringify(secret).slice(1, -1);
