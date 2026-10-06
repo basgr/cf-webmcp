@@ -3137,6 +3137,47 @@ description = "Sorted."
       expect(await outcome(sorter("https://example.com/p?s={{o|map:1=one,2=two}}", 'type = "integer"'))).toBe("built");
     });
 
+    it("tries an integer as the keys String(n) writes: 1e+21 yes, -0 and digits past exactness no", async () => {
+      expect(await outcome(sorter("https://example.com/p?s={{o|map:1=one,-0=zero}}", 'type = "integer"'))).toBe("built");
+      await fs.rm(path.join(tmpDir, "out"), { recursive: true, force: true });
+      expect(await outcome(sorter("https://example.com/p?s={{o|map:1=one,12345678901234567890=big}}", 'type = "integer"'))).toBe("built");
+      await fs.rm(path.join(tmpDir, "out"), { recursive: true, force: true });
+      expect(await outcome(sorter("https://example.com/p?s={{o|map:1e+21=big}}", 'type = "integer"'))).toBe("built");
+    });
+
+    it("tries every value an array's items enum allows, one element at a time", async () => {
+      const property = 'type = "array"\n    items = { type = "string", enum = ["a", "b"] }';
+      expect(await outcome(sorter("https://example.com/p?s={{o|map:a=1}}", property))).toContain('map operator for "o" has no entry for key "b"');
+      await fs.rm(path.join(tmpDir, "out"), { recursive: true, force: true });
+      expect(await outcome(sorter("https://example.com/p?s={{o|map:a=1,b=2}}", property))).toBe("built");
+    });
+
+    it("checks every combination of the values of placeholders outside the query against allowed_origins", async () => {
+      // One value at a time, {a: x, b: 2} was never tried: x2.example.com is not listed.
+      const toml = `${MINIMAL}
+[[tools]]
+name        = "two"
+description = "Two."
+
+  [tools.input_schema]
+  type     = "object"
+  required = ["a", "b"]
+
+    [tools.input_schema.properties.a]
+    type = "string"
+    enum = ["x", "y"]
+
+    [tools.input_schema.properties.b]
+    type = "string"
+    enum = ["1", "2"]
+
+  [tools.executor]
+  type         = "http_json"
+  url_template = "https://{{a}}{{b}}.example.com/p"
+`.replace('allowed_origins = ["https://example.com"]', 'allowed_origins = ["https://example.com", "https://x1.example.com", "https://y2.example.com"]');
+      expect(await outcome(toml)).toMatch(/tool "two" url_template can resolve to origin https:\/\/(x2|y1)\.example\.com/);
+    });
+
     it("probes a host placeholder with its enum values, not with a free-form value the enum refuses", async () => {
       const toml = sorter("https://{{o}}.example.com/x", 'type = "string"\n    enum = ["a", "b"]').replace(
         'allowed_origins = ["https://example.com"]',

@@ -198,7 +198,7 @@ export function declaredInputWarnings(config: Config): string[] {
     );
 }
 
-type InputProperty = { type?: string; enum?: unknown[]; minimum?: number };
+type InputProperty = { type?: string; enum?: unknown[]; minimum?: number; items?: { type?: string; enum?: unknown[] } };
 
 /** The declared property `name` of a tool's input_schema, or undefined. */
 function propertyOf(tool: ToolConfig, name: string): InputProperty | undefined {
@@ -211,8 +211,9 @@ function propertyOf(tool: ToolConfig, name: string): InputProperty | undefined {
  * The values of property `name` the probes send, as a call that passes validation sends them
  * (the resolver looks a value up in a map as String(value)), or null when the probes may send any
  * value of the type:
- *   - every value, when the property allows only a few: its enum, or true and false for a boolean
- *     (`complete`: each one must resolve, since a call may send any of them);
+ *   - every value, when the property allows only a few: its enum, or true and false for a boolean,
+ *     and for an array each of those as a one-element array (`complete`: each one must resolve,
+ *     since a call may send any of them);
  *   - else, when `map:` placeholders read it, the keys every one of those maps has and that a value
  *     of the property's type can be written as (an integer property never sends "one"): any other
  *     value is invalid input at call time, so the probes leave it out. Empty when no value works.
@@ -221,11 +222,19 @@ function probeValues(tool: ToolConfig, compiled: CompiledTemplate, name: string)
   const property = propertyOf(tool, name);
   if (Array.isArray(property?.enum) && property.enum.length > 0) return { values: property.enum, complete: true };
   if (property?.type === "boolean") return { values: [true, false], complete: true };
+  if (property?.type === "array") {
+    const items = property.items;
+    if (Array.isArray(items?.enum) && items.enum.length > 0) return { values: items.enum.map((v) => [v]), complete: true };
+    if (items?.type === "boolean") return { values: [[true], [false]], complete: true };
+  }
   const maps = compiled.slots.filter((s) => s.name === name && s.operator === "map").map((s) => s.mapKeys);
   if (maps.length === 0) return null;
+  // A key a number can be written as: the one String(n) gives ("1e+21" yes; "-0", "1.0" and
+  // digits past what a double holds exactly, no).
   const writable = (key: string): boolean => {
-    if (property?.type === "integer") return /^-?(0|[1-9][0-9]*)$/.test(key);
-    if (property?.type === "number") return Number.isFinite(Number(key)) && String(Number(key)) === key;
+    const n = Number(key);
+    if (property?.type === "integer") return Number.isInteger(n) && String(n) === key;
+    if (property?.type === "number") return Number.isFinite(n) && String(n) === key;
     return true;
   };
   const values = maps[0]!
@@ -322,6 +331,9 @@ function checkTemplateResolves(config: Config): void {
   );
 }
 
+/** How many combinations of listed values checkAllowList tries per template, at most. */
+const ALLOW_LIST_COMBINATIONS = 4096;
+
 /**
  * Sample inputs that exercise every URL template against the allow-list.
  * The check is paranoid by design: if a template can ever resolve outside
@@ -335,7 +347,8 @@ function checkTemplateResolves(config: Config): void {
  * and checkTemplateResolves (which runs first) has resolved those, so a resolver that throws on
  * one is a build error naming the tool, never a skipped probe. (The probes used to set a map
  * placeholder to "/x" as well, and to send nothing at all, which threw, and the throw was
- * skipped: map values were never checked.)
+ * skipped: map values were never checked.) Placeholders outside the query get every combination
+ * of their listed values, up to ALLOW_LIST_COMBINATIONS.
  */
 function checkAllowList(config: Config): void {
   const allowed = new Set(config.origin.allowed_origins.map((u) => new URL(u).origin));
@@ -355,10 +368,24 @@ function checkAllowList(config: Config): void {
       const probe = probeValues(tool, compiled, p);
       if (probe !== null && probe.values.length > 0) listed.set(p, probe.values);
     }
-    const rounds = Math.max(1, ...[...listed.values()].map((values) => values.length));
+    // Every combination of the listed values of the names outside the query (two host
+    // placeholders can each be fine alone and name an unlisted origin together), as long as there
+    // are at most ALLOW_LIST_COMBINATIONS of them; past that, and for query values, which cannot
+    // change the origin, one value per name in turn.
+    const outside = [...listed.keys()].filter((p) => compiled.slots.some((s) => s.name === p && !s.isQuery));
+    let combinations: Array<Record<string, unknown>> | null = [{}];
+    for (const p of outside) {
+      combinations = combinations.flatMap((c) => listed.get(p)!.map((v) => ({ ...c, [p]: v })));
+      if (combinations.length > ALLOW_LIST_COMBINATIONS) {
+        combinations = null;
+        break;
+      }
+    }
+    const rounds = Math.max(1, combinations?.length ?? 0, ...[...listed.values()].map((values) => values.length));
     const filled = (value: string, round: number): Record<string, unknown> =>
       Object.fromEntries(
         compiled.params.map((p) => {
+          if (combinations !== null && outside.includes(p)) return [p, combinations[round % combinations.length]![p]];
           const values = listed.get(p);
           return [p, values ? values[round % values.length] : value];
         }),

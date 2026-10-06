@@ -95,11 +95,12 @@ export function parsePlaceholder(raw: string): Placeholder {
  * `map:` value (`{{a|default:v?1}}`) is the placeholder's, so it never starts the query, the
  * fragment or a parameter; a `?` there used to turn the placeholders after it into query
  * values, which exempted them from the dot-segment check. The config schema reads a template's
- * authority through it too (src/config-types.ts).
+ * authority through it too (src/config-types.ts), filling with a letter, so that a placeholder
+ * that writes the scheme still reads as one.
  */
-export function maskPlaceholders(template: string): string {
+export function maskPlaceholders(template: string, fill = "_"): string {
   PLACEHOLDER_RE.lastIndex = 0;
-  const masked = template.replace(PLACEHOLDER_RE, (whole) => "_".repeat(whole.length));
+  const masked = template.replace(PLACEHOLDER_RE, (whole) => fill.repeat(whole.length));
   PLACEHOLDER_RE.lastIndex = 0;
   return masked;
 }

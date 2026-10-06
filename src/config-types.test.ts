@@ -151,6 +151,9 @@ describe("executor URLs refuse userinfo: sitemap_url, feed_url and the static au
     ["http_get", "https://us\ter@example.com/api/{{p}}"],
     ["http_get", "\u0001https://user@example.com/api/{{p}}"],
     ["http_get", "HTTPS:user@example.com/api/{{p}}"],
+    // A scheme that a placeholder writes, whole or in part.
+    ["http_get", "{{s}}://user:pw@example.com/api"],
+    ["http_get", "http{{t|map:on=s}}://user:pw@example.com/api"],
   ])("a %s url_template %j is refused, naming the field", (type, url_template) => {
     const found = issues({ type, url_template });
     expect(found).toHaveLength(1);

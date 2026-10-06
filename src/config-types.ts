@@ -96,11 +96,12 @@ const EXECUTOR_USERINFO_MESSAGE =
   "instead (see docs/deployment.md)";
 const ExecutorUrl = HttpsUrl.refine((s) => !hasUserinfo(s), { message: EXECUTOR_USERINFO_MESSAGE });
 // A url_template is judged on its own text: every placeholder is masked first, so an @ or a / in a
-// default: or map: value neither counts nor ends the authority early (it is written encoded).
+// default: or map: value neither counts nor ends the authority early (it is written encoded). The
+// mask is a letter, so a placeholder that writes the scheme ({{s}}://, http{{t}}://) still reads as one.
 const UrlTemplate = z
   .string()
   .min(1)
-  .refine((s) => !hasUserinfo(maskPlaceholders(s)), { message: EXECUTOR_USERINFO_MESSAGE });
+  .refine((s) => !hasUserinfo(maskPlaceholders(s, "a")), { message: EXECUTOR_USERINFO_MESSAGE });
 
 // [site].public_url: an http(s) origin and nothing else. Every URL built from it is
 // `${public_url}${path}`, so a path or even a trailing slash would end up in every
