@@ -112,6 +112,66 @@ describe("site.public_url validation", () => {
   });
 });
 
+describe("executor URLs refuse userinfo: sitemap_url, feed_url and the static authority of a url_template", () => {
+  const withExecutor = (executor: Record<string, unknown>) => ({
+    ...minimal,
+    tools: [{ name: "t", description: "x", input_schema: { type: "object", required: [], properties: {} }, executor }],
+  });
+  const issues = (executor: Record<string, unknown>) => {
+    const result = ConfigSchema.safeParse(withExecutor(executor));
+    return result.success ? [] : result.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`);
+  };
+
+  // The runtime's fetch does not send userinfo, so the credentials were dropped without a word.
+  it.each([
+    ["sitemap_filter", "sitemap_url", "https://user:pw@example.com/sitemap.xml"],
+    ["sitemap_filter", "sitemap_url", "https://@example.com/sitemap.xml"],
+    ["rss_feed", "feed_url", "https://user@example.com/feed.xml"],
+    ["rss_feed", "feed_url", "https://:pw@example.com/feed.xml"],
+  ])("%s %s %j is refused, naming the field", (type, field, url) => {
+    const found = issues({ type, [field]: url });
+    expect(found).toHaveLength(1);
+    expect(found[0]).toMatch(new RegExp(`^tools\\.0\\.executor\\.${field}: `));
+    expect(found[0]).toContain("userinfo");
+    expect(found[0]).toContain("deploy-token headers");
+  });
+
+  it.each([
+    ["dom_extract", "https://user:pw@example.com{{path}}"],
+    ["http_json", "https://user@example.com/api?q={{q}}"],
+    ["http_get", "https://@example.com/{{id}}"],
+    // A placeholder in the userinfo: the @ that ends it is the template's own.
+    ["http_get", "https://{{user}}@example.com/x"],
+    // A / inside a placeholder's default does not end the authority before the @.
+    ["http_get", "https://{{a|default:x/y}}@example.com/x"],
+  ])("a %s url_template %j is refused, naming the field", (type, url_template) => {
+    const found = issues({ type, url_template });
+    expect(found).toHaveLength(1);
+    expect(found[0]).toMatch(/^tools\.0\.executor\.url_template: /);
+    expect(found[0]).toContain("userinfo");
+  });
+
+  it.each([
+    "https://example.com{{path}}",
+    "https://example.com/@team/{{id}}",
+    "https://example.com/{{id}}@x",
+    "https://example.com/api?u={{a}}@b",
+    "https://example.com/api#a@b{{x}}",
+    // An @ inside a placeholder's default or map value is the placeholder's, not the authority's.
+    "https://{{host|default:a@b}}.example.com/x",
+    "https://{{sub|map:a=x@y}}.example.com/x",
+  ])("accepts the url_template %j", (url_template) => {
+    expect(issues({ type: "http_get", url_template })).toEqual([]);
+  });
+
+  it.each(["https://example.com/sitemap.xml", "https://example.com/@team/sitemap.xml", "https://example.com/s.xml?a=b@c"])(
+    "accepts the sitemap_url %j",
+    (sitemap_url) => {
+      expect(issues({ type: "sitemap_filter", sitemap_url })).toEqual([]);
+    },
+  );
+});
+
 describe("[origin].base_url and allowed_origins refuse userinfo", () => {
   const withOrigin = (base_url: string, allowed_origins: string[]) => ({ ...minimal, origin: { base_url, allowed_origins } });
   const issues = (base_url: string, allowed_origins: string[]) => {

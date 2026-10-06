@@ -94,9 +94,10 @@ export function parsePlaceholder(raw: string): Placeholder {
  * and only the template's own text left to search. A `?`, `#` or `&` inside a `default:` or
  * `map:` value (`{{a|default:v?1}}`) is the placeholder's, so it never starts the query, the
  * fragment or a parameter; a `?` there used to turn the placeholders after it into query
- * values, which exempted them from the dot-segment check.
+ * values, which exempted them from the dot-segment check. The config schema reads a template's
+ * authority through it too (src/config-types.ts).
  */
-function maskPlaceholders(template: string): string {
+export function maskPlaceholders(template: string): string {
   PLACEHOLDER_RE.lastIndex = 0;
   const masked = template.replace(PLACEHOLDER_RE, (whole) => "_".repeat(whole.length));
   PLACEHOLDER_RE.lastIndex = 0;

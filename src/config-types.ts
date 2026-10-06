@@ -7,6 +7,7 @@ import { z } from "zod";
 import { ARD_PATH, ARD_PREDECESSOR_PATH, SKILL_MEDIA_TYPE, SKILL_MEDIA_TYPES, SKILL_NAME_MAX } from "./ard";
 import { ORIGIN_TRIAL_TOKEN_RE } from "./origin-trial";
 import { checkSelector, type SelectorCheckOptions } from "./selector-grammar";
+import { maskPlaceholders } from "./mini-language";
 
 // ---------- Reusable shapes ----------
 
@@ -81,6 +82,21 @@ const OriginUrl = HttpsUrl.refine((s) => !hasUserinfo(s), {
     "[origin] URL, so credentials there would be dropped without a word. Let origin recognise the Worker by its " +
     "deploy-token headers instead (see docs/deployment.md)",
 });
+
+// sitemap_url, feed_url and the authority of a url_template: the same check as OriginUrl. The
+// Worker's request to origin carries no userinfo (the runtime drops it), so credentials there
+// would be dropped without a word as well.
+const EXECUTOR_USERINFO_MESSAGE =
+  "must not hold userinfo (user:password@ in front of the host): the Worker's request to origin does not carry it, so " +
+  "credentials there would be dropped without a word. Let origin recognise the Worker by its deploy-token headers " +
+  "instead (see docs/deployment.md)";
+const ExecutorUrl = HttpsUrl.refine((s) => !hasUserinfo(s), { message: EXECUTOR_USERINFO_MESSAGE });
+// A url_template is judged on its own text: every placeholder is masked first, so an @ or a / in a
+// default: or map: value neither counts nor ends the authority early (it is written encoded).
+const UrlTemplate = z
+  .string()
+  .min(1)
+  .refine((s) => !hasUserinfo(maskPlaceholders(s)), { message: EXECUTOR_USERINFO_MESSAGE });
 
 // [site].public_url: an http(s) origin and nothing else. Every URL built from it is
 // `${public_url}${path}`, so a path or even a trailing slash would end up in every
@@ -201,19 +217,19 @@ const InputSchema = z
 
 const SitemapExecutor = z.object({
   type: z.literal("sitemap_filter"),
-  sitemap_url: HttpsUrl,
+  sitemap_url: ExecutorUrl,
   max_results: z.number().int().positive().max(200).default(20),
 });
 
 const RssExecutor = z.object({
   type: z.literal("rss_feed"),
-  feed_url: HttpsUrl,
+  feed_url: ExecutorUrl,
   max_items: z.number().int().positive().max(200).default(20),
 });
 
 const DomExtractExecutor = z.object({
   type: z.literal("dom_extract"),
-  url_template: z.string().min(1),
+  url_template: UrlTemplate,
   // Both go straight to HTMLRewriter.on(), each on its own, so a comma list is fine here
   // (unlike a form selector, which is composed with its params).
   selector: z.string().superRefine(selectorIssue({ allowList: true })).default("main, article, [role=main]"),
@@ -230,14 +246,14 @@ const Projection = z.object({
 
 const HttpJsonExecutor = z.object({
   type: z.literal("http_json"),
-  url_template: z.string().min(1),
+  url_template: UrlTemplate,
   method: z.enum(["GET", "POST"]).default("GET"),
   project: Projection.optional(),
 });
 
 const HttpGetExecutor = z.object({
   type: z.literal("http_get"),
-  url_template: z.string().min(1),
+  url_template: UrlTemplate,
   method: z.enum(["GET"]).default("GET"),
   max_bytes: z.number().int().positive().max(10_000_000).default(1_048_576), // 1 MiB
   allowed_content_types: z
