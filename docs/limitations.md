@@ -63,6 +63,10 @@ In a `url_template`, a placeholder in the path (`https://example.com/api/{{id}}`
 
 A `%2F` or `%5C` a caller writes is not decoded on the way out: the percent sign is escaped, so `a%2Fb` reaches origin as the literal text `a%252Fb`, never as a slash. The checks decode it only to see whether it would form a dot segment. Query-position values are not affected: `..` there is text. The query starts at the template's own first `?` (or `#`); a `?` or `#` inside a placeholder's `default:` or `map:` value does not count, so `https://example.com/api/{{a|default:v?1}}/{{b}}` still checks `b` as a path value.
 
+## A path that starts with `//` is answered 400
+
+A request whose path starts with `//` once the URL parser has read it (`//host/x`, `///x`, `/\host/x`, `/.//host/x`) gets `400` with the plain-text body `bad request path` and never reaches origin, so a page that origin serves at such a path is unreachable through the Worker; `/a//b` and every other path are proxied as before.
+
 ## Route-only mode loses in-page injection
 
 Two deployment modes are supported:

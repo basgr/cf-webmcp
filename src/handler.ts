@@ -116,6 +116,7 @@ export function createHandler(deps: HandlerDeps): Required<Pick<ExportedHandler<
 
   return {
     async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+      if (new URL(request.url).pathname.startsWith("//")) return doubleSlashPathResponse();
       const match = matchRoute(config, request, meta.BOOTSTRAP_ASSET, meta.WIDGET_ASSET);
 
       switch (match.kind) {
@@ -443,6 +444,20 @@ export function createHandler(deps: HandlerDeps): Required<Pick<ExportedHandler<
 }
 
 /**
+ * The answer to a request whose pathname, as the URL parser wrote it, starts with "//": from
+ * //host/x, ///x, /\host/x (the parser reads a backslash as a slash), /.//host/x or /..//host/x.
+ * No route has such a path (the schema refuses one in the config), and proxying it is how an
+ * origin's own open redirect is reached: an origin that adds a trailing slash by redirect answers
+ * //attacker.example/x with Location: //attacker.example/x/, a protocol-relative URL that the
+ * browser follows to that host, and the Worker would relay it. So nothing is fetched: 400 with
+ * a fixed plain-text body, for every method. No X-Robots-Tag: such a path is under neither the
+ * namespace nor /.well-known/ (src/robots-tag.ts).
+ */
+function doubleSlashPathResponse(): Response {
+  return new Response("bad request path", { status: 400, headers: { "content-type": "text/plain; charset=utf-8" } });
+}
+
+/**
  * The URL on the configured origin for a request's path and query: the origin of `baseUrl`
  * (scheme, host and port; a path in base_url is not used, as it never was) followed by the
  * pathname and search exactly as the request's URL parser wrote them. Null when the result
@@ -453,7 +468,9 @@ export function createHandler(deps: HandlerDeps): Required<Pick<ExportedHandler<
  * protocol-relative reference, which names its own host, so `new URL(pathname, base)` would
  * send the visitor's request, cookies and body to whatever host the path names. Behind an
  * http(s) origin a pathname always starts with "/", so the check after the concatenation
- * never fails for a real request; it is the backstop that keeps this so.
+ * never fails for a real request; it is the backstop that keeps this so. (A request whose
+ * pathname starts with "//" no longer gets this far: the handler answers it 400 first, see
+ * doubleSlashPathResponse. A merge route's own path never starts with "//".)
  */
 export function originTarget(baseUrl: string, path: { pathname: string; search: string }): URL | null {
   const origin = new URL(baseUrl).origin;

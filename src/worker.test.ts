@@ -271,12 +271,48 @@ describe("proxy: a request path never names the host the Worker fetches", () => 
     );
 
     await (await call(handler, "https://example.com/about?x=1")).text();
-    await (await call(handler, "https://example.com//attacker.example/x")).text();
+    await (await call(handler, "https://example.com/a//b")).text();
 
-    expect(seen.map((s) => s.url)).toEqual([
-      "https://origin.example.com/about?x=1",
-      "https://origin.example.com//attacker.example/x",
-    ]);
+    expect(seen.map((s) => s.url)).toEqual(["https://origin.example.com/about?x=1", "https://origin.example.com/a//b"]);
+  });
+
+  // An origin that adds a trailing slash by redirect would answer //attacker.example/x with
+  // Location: //attacker.example/x/, and the Worker would relay it: origin's own open redirect.
+  it.each([
+    "//attacker.example",
+    "//attacker.example/x",
+    "///x",
+    "/\\attacker.example/x",
+    "/.//attacker.example/x",
+    "/..//attacker.example/x",
+    "//_webmcp/exec/search_pages",
+    "//.well-known/agents.md",
+  ])("%s, a pathname that starts with // once parsed, is a 400 and nothing is fetched", async (path) => {
+    const seen = recordFetches();
+    const handler = createHandler(makeDeps());
+    const url = `https://example.com${path}`;
+    expect(new URL(url).pathname.startsWith("//")).toBe(true);
+
+    for (const method of ["GET", "POST"]) {
+      const res = await call(handler, url, { method, headers: visitorHeaders, body: method === "POST" ? "x=1" : undefined });
+      expect(res.status).toBe(400);
+      expect(res.headers.get("content-type")).toBe("text/plain; charset=utf-8");
+      expect(await res.text()).toBe("bad request path");
+      // Not under the namespace or /.well-known/, so no X-Robots-Tag (the house rule).
+      expect(res.headers.get("x-robots-tag")).toBeNull();
+    }
+    expect(seen).toEqual([]);
+  });
+
+  it.each([
+    ["/", "https://example.com/"],
+    ["/a//b", "https://example.com/a//b"],
+    ["/a/", "https://example.com/a/"],
+  ])("%s still goes to origin", async (path, expected) => {
+    const seen = recordFetches();
+    const res = await call(createHandler(makeDeps()), `https://example.com${path}`, { headers: visitorHeaders });
+    expect(res.status).toBe(200);
+    expect(seen.map((s) => s.url)).toEqual([expected]);
   });
 });
 
