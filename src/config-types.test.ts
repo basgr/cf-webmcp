@@ -112,6 +112,50 @@ describe("site.public_url validation", () => {
   });
 });
 
+describe("[origin].base_url and allowed_origins refuse userinfo", () => {
+  const withOrigin = (base_url: string, allowed_origins: string[]) => ({ ...minimal, origin: { base_url, allowed_origins } });
+  const issues = (base_url: string, allowed_origins: string[]) => {
+    const result = ConfigSchema.safeParse(withOrigin(base_url, allowed_origins));
+    return result.success ? [] : result.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`);
+  };
+
+  // The Worker fetches the origin of base_url (scheme, host and port), so credentials in it were
+  // dropped without a word; an allowed_origins entry is compared by origin, so its were ignored.
+  it.each([
+    ["a user and a password", "https://user:pw@example.com"],
+    ["a user", "https://user@example.com"],
+    ["an empty userinfo", "https://@example.com"],
+    ["a password only", "https://:pw@example.com"],
+    ["userinfo and a path", "https://user:pw@example.com/blog"],
+  ])("base_url with %s is refused, naming the field", (_label, url) => {
+    const found = issues(url, ["https://example.com"]);
+    expect(found).toHaveLength(1);
+    expect(found[0]).toMatch(/^origin\.base_url: /);
+    expect(found[0]).toContain("userinfo");
+  });
+
+  it.each([
+    ["a user and a password", "https://user:pw@example.com"],
+    ["an empty userinfo", "https://@cdn.example.com"],
+  ])("an allowed_origins entry with %s is refused, naming the entry", (_label, url) => {
+    const found = issues("https://example.com", ["https://example.com", url]);
+    expect(found).toHaveLength(1);
+    expect(found[0]).toMatch(/^origin\.allowed_origins\.1: /);
+    expect(found[0]).toContain("userinfo");
+  });
+
+  it.each([
+    ["https://example.com", ["https://example.com"]],
+    ["http://localhost:8080", ["http://localhost:8080"]],
+    ["https://example.com/blog", ["https://example.com", "https://cdn.example.com"]],
+    // An @ after the host is part of the path, not userinfo.
+    ["https://example.com/@team", ["https://example.com/@team"]],
+    ["https://example.com/?u=a@b", ["https://example.com#a@b"]],
+  ])("accepts %j with %j", (base, allowed) => {
+    expect(issues(base, allowed)).toEqual([]);
+  });
+});
+
 describe("[tools.annotations]", () => {
   const withAnnotations = (annotations: unknown) => ({
     ...minimal,

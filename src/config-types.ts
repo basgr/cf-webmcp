@@ -58,6 +58,30 @@ const HttpsUrl = z
   .url()
   .refine((s) => s.startsWith("https://") || s.startsWith("http://"), { message: "must be http(s) URL" });
 
+/**
+ * Whether an http(s) URL holds userinfo (`user:password@` in front of the host, an empty one
+ * included). Read from the text as the URL parser reads an http(s) URL: slashes and backslashes
+ * after the scheme are skipped, and the host part ends at the first `/`, `\`, `?` or `#`, so an
+ * `@` in the path, query or fragment does not count. (The parsed URL alone cannot tell: it reads
+ * `https://@example.com` as `https://example.com`.)
+ */
+function hasUserinfo(value: string): boolean {
+  const afterScheme = value.replace(/^[A-Za-z][A-Za-z0-9+.-]*:[/\\]*/, "");
+  const authority = afterScheme.split(/[/\\?#]/, 1)[0] ?? "";
+  return authority.includes("@");
+}
+
+// [origin].base_url and every [origin].allowed_origins entry. The Worker requests the origin of
+// base_url and compares origins with the list (scheme, host and port), so userinfo in either
+// would be dropped without a word, and the publisher would believe the Worker sends it. Refused,
+// as in [site].public_url.
+const OriginUrl = HttpsUrl.refine((s) => !hasUserinfo(s), {
+  message:
+    "must not hold userinfo (user:password@ in front of the host): the Worker uses only the scheme, host and port of an " +
+    "[origin] URL, so credentials there would be dropped without a word. Let origin recognise the Worker by its " +
+    "deploy-token headers instead (see docs/deployment.md)",
+});
+
 // [site].public_url: an http(s) origin and nothing else. Every URL built from it is
 // `${public_url}${path}`, so a path or even a trailing slash would end up in every
 // discovery URL, and the raw string goes into the Link header, robots.txt, llms.txt and
@@ -331,8 +355,8 @@ const Site = z.object({
 });
 
 const Origin = z.object({
-  base_url: HttpsUrl,
-  allowed_origins: z.array(HttpsUrl).min(1, "[origin].allowed_origins must contain at least one origin"),
+  base_url: OriginUrl,
+  allowed_origins: z.array(OriginUrl).min(1, "[origin].allowed_origins must contain at least one origin"),
   /**
    * No effect, kept so that old configs still parse. Executors and the Worker's other origin
    * fetches never send the visitor's cookies; the build warns when this is true
