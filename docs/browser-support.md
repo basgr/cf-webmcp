@@ -8,8 +8,8 @@ Where it runs, as of 4 October 2026:
 |---------|-------------------------|
 | Chrome 149 and later | The WebMCP origin trial: the page's response carries a trial token, the visitor does nothing. See [The Chrome origin trial](#the-chrome-origin-trial). |
 | Chrome without a token | The flag `chrome://flags/#enable-webmcp-testing`, for local development and testing. See [Local development: the flag](#local-development-the-flag). |
-| Cloudflare Kitesurf | Supports `document.modelContext` and runs declarative form tools. See [Cloudflare Kitesurf and Browser Run](#cloudflare-kitesurf-and-browser-run). |
-| Cloudflare Browser Run lab sessions | Expose `navigator.modelContextTesting`, the consumer side. |
+| Cloudflare Kitesurf | Its own WebMCP at `document.modelContext`; the bootstrap's tools register and run there, and stamped form tools are listed (tested 6 October 2026; form tools not invoked). See [Cloudflare Kitesurf and Browser Run](#cloudflare-kitesurf-and-browser-run). |
+| Cloudflare Browser Run lab sessions | Chrome with WebMCP turned on; the agent lists and calls tools over the DevTools protocol (tested 6 October 2026). |
 
 We have not checked other browsers. A visitor whose browser has no WebMCP runtime sees the default landing page's "Not connected" state, or "Pairing required" when the site has the fallback widget on (see [Visitors without WebMCP](#visitors-without-webmcp)).
 
@@ -98,8 +98,13 @@ Run this in the DevTools console:
 
 ## Cloudflare Kitesurf and Browser Run
 
-- **Kitesurf**, Cloudflare's agent browser (part of Browser Run, a free beta as of 4 October 2026), supports `document.modelContext`, so the bootstrap should register the site's tools there as it does in Chrome. Kitesurf also runs declarative form tools, so the attributes cf-webmcp stamps from `[[forms]]` should work there too. We have not tested cf-webmcp in Kitesurf.
-- **Browser Run lab sessions** expose `navigator.modelContextTesting` for the consumer side: the agent that drives the session lists and calls the tools a page registered. See [Cloudflare's WebMCP docs for Browser Run](https://developers.cloudflare.com/browser-run/features/webmcp/) (the address as of 4 October 2026).
+- **Kitesurf**, Cloudflare's agent browser (part of Browser Run, a free beta as of 4 October 2026), has its own WebMCP implementation at `document.modelContext` and needs no lab session. We tested cf-webmcp v0.6.0 there on 6 October 2026, on webmcp.basgr.com (user agent `Kitesurf/0.0.1`), driven by `chrome-devtools-mcp` 1.10.1 with `--category-experimental-webmcp` against `wss://api.cloudflare.com/client/v4/accounts/<ACCOUNT_ID>/browser-run/devtools/browser?browser=kitesurf`:
+  - The bootstrap registered the site's three `[[tools]]` on the home page, on a page with forms and on the landing page, and `getTools()` listed them.
+  - `search_pages`, `list_posts` and `get_page`, called with `execute_webmcp_tool`, completed and returned the executor's `ok: true` answer.
+  - Both forms on the forms page showed up as tools: the one cf-webmcp stamps from `[[forms]]` and one stamped by hand in the page's HTML, each with an input schema built from its params (all required, the email field with `format: "email"`). We did not call them; the test only listed them.
+  - The landing page showed its connected state with the pairing steps hidden, and `list_console_messages` returned no messages for it.
+  - `navigator.modelContext` had no `registerTool`, and `navigator.modelContextTesting` was undefined in the page.
+- **Browser Run lab sessions** (`wrangler browser create --lab`, or `lab=true` on the DevTools URL) run Chrome with WebMCP turned on. The same test in a lab session on 6 October 2026 (`HeadlessChrome/152`) gave the same results, `navigator.modelContextTesting` included (undefined in the page), except that the form tools' email field had no `format: "email"`. The agent lists and calls the page's tools over the DevTools protocol (`list_webmcp_tools` and `execute_webmcp_tool` in `chrome-devtools-mcp`). See [Cloudflare's WebMCP docs for Browser Run](https://developers.cloudflare.com/browser-run/features/webmcp/) (the address as of 6 October 2026).
 
 ## The `tools` Permissions Policy
 

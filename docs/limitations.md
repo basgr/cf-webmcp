@@ -82,7 +82,7 @@ In route-only mode, browser-native agents must discover tools via the manifest. 
 
 The W3C WebMCP draft (`webmachinelearning/webmcp`) is moving. The bootstrapper calls `registerTool` on `document.modelContext` (current draft), falling back to the deprecated `navigator.modelContext` alias for 146-149 builds. If the draft changes shape again, the bootstrapper is one file to update.
 
-Cloudflare Browser Run lab sessions expose `navigator.modelContextTesting` for the **consumer** side (the headless agent calling `listTools` / `executeTool`). That is a separate surface from the producer API we register against. We do not target it.
+In Cloudflare Browser Run lab sessions, the agent that drives the session lists and calls a page's tools over the DevTools protocol: the **consumer** side (`navigator.modelContextTesting` was undefined in the page in a lab session on 6 October 2026). That is a separate surface from the producer API we register against. We do not target it.
 
 ## Zone-level AI bot blocking runs in front of the Worker
 
