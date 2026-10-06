@@ -78,51 +78,53 @@ export function redactResponse(res: Response, secret: string): Response {
 
 /**
  * A byte stream transform that replaces the secret, as written or JSON-escaped, wherever the
- * chunks split it. It holds back at most the length of the longest form minus one byte between
- * chunks, the only bytes that could still begin an occurrence, and leaves every other byte as
- * it came (a body that is not UTF-8 included).
+ * chunks split it. From the left, wherever a form starts, the longest form that starts there is
+ * replaced and the scan goes on after it. It holds back at most the length of the longest form
+ * minus one byte between chunks, the only bytes that could still begin an occurrence, and leaves
+ * every other byte as it came (a body that is not UTF-8 included).
+ *
+ * Linear in the bytes it reads, whatever they hold: each form is found in its own pass with a
+ * Knuth-Morris-Pratt automaton, which never looks at a byte twice, and outside a partial match
+ * the pass jumps to the next byte that can begin the form (see occurrences). The search it
+ * replaces was quadratic: for a token that starts with a quote, 1 MiB of quotes took minutes.
  */
 export function redactingStream(secret: string): TransformStream<Uint8Array, Uint8Array> {
   const encoder = new TextEncoder();
-  const forms = needles(secret).map((n) => encoder.encode(n));
+  // Longest first, as needles() orders them: at a position where both start, the longer wins.
+  const forms = needles(secret).map((n) => compilePattern(encoder.encode(n)));
   const replacement = encoder.encode(REDACTED);
-  const longest = Math.max(...forms.map((f) => f.byteLength));
-  const firstBytes = [...new Set(forms.map((f) => f[0]!))];
+  const longest = Math.max(...forms.map((f) => f.bytes.byteLength));
   let carry: Uint8Array = new Uint8Array(0);
 
   /** Replace what can be decided in `data`; return the output and the undecided tail. */
   const scan = (data: Uint8Array, final: boolean): { out: Uint8Array; rest: Uint8Array } => {
-    // Before `stop` every form fits, so a match (longest form first) is decided there.
+    // A form that starts before `stop` fits in `data`, so whether one starts there is decided.
     const stop = final ? data.byteLength : Math.max(0, data.byteLength - longest + 1);
+    const found = forms.map((f) => occurrences(data, f));
+    const next = forms.map(() => 0);
     const pieces: Uint8Array[] = [];
-    let last = 0;
     let i = 0;
-    while (i < stop) {
-      // Jump to the next byte that can begin a form; nothing before it can.
-      let next = stop;
-      for (const b of firstBytes) {
-        const at = data.indexOf(b, i);
-        if (at !== -1 && at < next) next = at;
-      }
-      i = next;
-      if (i >= stop) break;
-      let hit: Uint8Array | undefined;
-      for (const f of forms) {
-        if (startsWith(data, i, f)) {
-          hit = f;
-          break;
+    for (;;) {
+      // The leftmost occurrence at or after i; at equal starts the earlier (longer) form.
+      let start = Number.POSITIVE_INFINITY;
+      let which = -1;
+      for (let f = 0; f < forms.length; f++) {
+        const starts = found[f]!;
+        let k = next[f]!;
+        while (k < starts.length && starts[k]! < i) k++;
+        next[f] = k;
+        if (k < starts.length && starts[k]! < start) {
+          start = starts[k]!;
+          which = f;
         }
       }
-      if (hit === undefined) {
-        i++;
-        continue;
-      }
-      pieces.push(data.subarray(last, i), replacement);
-      i += hit.byteLength;
-      last = i;
+      if (which === -1 || start >= stop) break;
+      pieces.push(data.subarray(i, start), replacement);
+      i = start + forms[which]!.bytes.byteLength;
     }
-    const end = Math.max(i, last);
-    pieces.push(data.subarray(last, end));
+    // No form starts in [i, stop): those bytes are decided and go out as they came.
+    const end = Math.max(i, stop);
+    pieces.push(data.subarray(i, end));
     return { out: concat(pieces), rest: data.slice(end) };
   };
 
@@ -139,10 +141,54 @@ export function redactingStream(secret: string): TransformStream<Uint8Array, Uin
   });
 }
 
-function startsWith(data: Uint8Array, at: number, form: Uint8Array): boolean {
-  if (at + form.byteLength > data.byteLength) return false;
-  for (let k = 0; k < form.byteLength; k++) if (data[at + k] !== form[k]) return false;
-  return true;
+/** A byte pattern with its Knuth-Morris-Pratt failure table. */
+interface Pattern {
+  bytes: Uint8Array;
+  /** fail[k]: the length of the longest proper prefix of bytes[0..k] that is also a suffix of it. */
+  fail: Int32Array;
+}
+
+function compilePattern(bytes: Uint8Array): Pattern {
+  const fail = new Int32Array(bytes.byteLength);
+  let k = 0;
+  for (let i = 1; i < bytes.byteLength; i++) {
+    while (k > 0 && bytes[i] !== bytes[k]) k = fail[k - 1]!;
+    if (bytes[i] === bytes[k]) k++;
+    fail[i] = k;
+  }
+  return { bytes, fail };
+}
+
+/**
+ * The start of every occurrence of `pattern` in `data`, overlapping ones included, in ascending
+ * order. The automaton takes each byte once (its fallbacks are paid for by the bytes that
+ * advanced it). Outside a partial match, the bytes before the next one that begins the pattern
+ * change nothing, so the pass jumps there; each such search starts where the pass stands, after
+ * the previous hit, so the searches read each byte at most once too.
+ */
+function occurrences(data: Uint8Array, pattern: Pattern): number[] {
+  const { bytes, fail } = pattern;
+  const m = bytes.byteLength;
+  const n = data.byteLength;
+  const first = bytes[0]!;
+  const found: number[] = [];
+  let k = 0;
+  let i = 0;
+  while (i < n) {
+    if (k === 0) {
+      i = data.indexOf(first, i);
+      if (i === -1) break;
+    }
+    const b = data[i]!;
+    while (k > 0 && bytes[k] !== b) k = fail[k - 1]!;
+    if (bytes[k] === b) k++;
+    if (k === m) {
+      found.push(i - m + 1);
+      k = fail[m - 1]!;
+    }
+    i++;
+  }
+  return found;
 }
 
 function concat(parts: Uint8Array[]): Uint8Array {
