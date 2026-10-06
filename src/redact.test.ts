@@ -187,8 +187,8 @@ describe("redactingStream: a token JSON escapes, split everywhere", () => {
   it.each([
     ["a quote inside", 'tok"en-0123456789abcdef'],
     ["a quote first", '"token-0123456789abcdef'],
-    ["a backslash first", "\token-0123456789abcdef"],
-    ["two backslashes first, the forms overlap", "\\tok-0123456789abcdef"],
+    ["a backslash first", "\\token-0123456789abcdef"],
+    ["two backslashes first, the forms overlap", "\\\\tok-0123456789abcdef"],
     ["a control character", "tok\nen-0123456789abcdef"],
     // The only token whose two forms can start at the same byte: the literal one is a prefix of
     // the escaped one, and there the longer must win.
