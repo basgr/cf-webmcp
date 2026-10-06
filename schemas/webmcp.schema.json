@@ -864,7 +864,7 @@
                         "const": "rss_feed"
                       },
                       "feed_url": {
-                        "$ref": "#/definitions/WebMCPConfig/properties/origin/properties/base_url"
+                        "$ref": "#/definitions/WebMCPConfig/properties/tools/items/properties/executor/anyOf/0/properties/sitemap_url"
                       },
                       "max_items": {
                         "type": "integer",
@@ -929,8 +929,7 @@
                         "const": "http_json"
                       },
                       "url_template": {
-                        "type": "string",
-                        "minLength": 1
+                        "$ref": "#/definitions/WebMCPConfig/properties/tools/items/properties/executor/anyOf/2/properties/url_template"
                       },
                       "method": {
                         "type": "string",
@@ -976,8 +975,7 @@
                         "const": "http_get"
                       },
                       "url_template": {
-                        "type": "string",
-                        "minLength": 1
+                        "$ref": "#/definitions/WebMCPConfig/properties/tools/items/properties/executor/anyOf/2/properties/url_template"
                       },
                       "method": {
                         "type": "string",
