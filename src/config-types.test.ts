@@ -144,6 +144,13 @@ describe("executor URLs refuse userinfo: sitemap_url, feed_url and the static au
     ["http_get", "https://{{user}}@example.com/x"],
     // A / inside a placeholder's default does not end the authority before the @.
     ["http_get", "https://{{a|default:x/y}}@example.com/x"],
+    // Spellings the URL parser reads as the same URL: it drops leading and trailing spaces and
+    // controls, and every tab and line break, before it reads the scheme.
+    ["http_get", " https://user:pw@example.com/api/{{p}}"],
+    ["http_get", "https:\n//user:pw@example.com/api/{{p}}"],
+    ["http_get", "https://us\ter@example.com/api/{{p}}"],
+    ["http_get", "\u0001https://user@example.com/api/{{p}}"],
+    ["http_get", "HTTPS:user@example.com/api/{{p}}"],
   ])("a %s url_template %j is refused, naming the field", (type, url_template) => {
     const found = issues({ type, url_template });
     expect(found).toHaveLength(1);

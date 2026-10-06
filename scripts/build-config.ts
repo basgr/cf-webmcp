@@ -198,36 +198,57 @@ export function declaredInputWarnings(config: Config): string[] {
     );
 }
 
+type InputProperty = { type?: string; enum?: unknown[]; minimum?: number };
+
+/** The declared property `name` of a tool's input_schema, or undefined. */
+function propertyOf(tool: ToolConfig, name: string): InputProperty | undefined {
+  return Object.prototype.hasOwnProperty.call(tool.input_schema.properties, name)
+    ? (tool.input_schema.properties[name] as InputProperty)
+    : undefined;
+}
+
 /**
- * The keys of every `map:` placeholder of a template, by name (the first map of a name decides).
- * A probe that sets such a placeholder to anything else only learns that the map has no entry.
+ * The values of property `name` the probes send, as a call that passes validation sends them
+ * (the resolver looks a value up in a map as String(value)), or null when the probes may send any
+ * value of the type:
+ *   - every value, when the property allows only a few: its enum, or true and false for a boolean
+ *     (`complete`: each one must resolve, since a call may send any of them);
+ *   - else, when `map:` placeholders read it, the keys every one of those maps has and that a value
+ *     of the property's type can be written as (an integer property never sends "one"): any other
+ *     value is invalid input at call time, so the probes leave it out. Empty when no value works.
  */
-function mapKeysByName(compiled: CompiledTemplate): Map<string, readonly string[]> {
-  const out = new Map<string, readonly string[]>();
-  for (const slot of compiled.slots) {
-    if (slot.operator === "map" && !out.has(slot.name) && slot.mapKeys.length > 0) out.set(slot.name, slot.mapKeys);
-  }
-  return out;
+function probeValues(tool: ToolConfig, compiled: CompiledTemplate, name: string): { values: unknown[]; complete: boolean } | null {
+  const property = propertyOf(tool, name);
+  if (Array.isArray(property?.enum) && property.enum.length > 0) return { values: property.enum, complete: true };
+  if (property?.type === "boolean") return { values: [true, false], complete: true };
+  const maps = compiled.slots.filter((s) => s.name === name && s.operator === "map").map((s) => s.mapKeys);
+  if (maps.length === 0) return null;
+  const writable = (key: string): boolean => {
+    if (property?.type === "integer") return /^-?(0|[1-9][0-9]*)$/.test(key);
+    if (property?.type === "number") return Number.isFinite(Number(key)) && String(Number(key)) === key;
+    return true;
+  };
+  const values = maps[0]!
+    .filter((key) => maps.every((keys) => keys.includes(key)) && writable(key))
+    .map((key) => (property?.type === "integer" || property?.type === "number" ? Number(key) : property?.type === "array" ? [key] : key));
+  return { values, complete: false };
 }
 
 /**
  * The input of a call that sends only what the tool's input_schema requires, each value one a
- * valid call could send: the property's first enum value; else, for a property a `map:`
- * placeholder reads, the map's first key; else a value of its type: `text` for a string ("/x",
- * so that a path placeholder never runs into the host), its minimum (else 1) for an integer or a
- * number, true for a boolean, a one-element array for an array. pattern, minimum and maximum are
- * the exec route's to check; the resolver never reads them.
+ * valid call could send: the first of probeValues; else a value of its type: `text` for a string
+ * ("/x", so that a path placeholder never runs into the host), its minimum (else 1) for an
+ * integer or a number, a one-element array for an array. pattern, minimum and maximum are the
+ * exec route's to check; the resolver never reads them.
  */
-function requiredOnlyInput(tool: ToolConfig, maps: Map<string, readonly string[]>, text = "/x"): Record<string, unknown> {
+function requiredOnlyInput(tool: ToolConfig, compiled: CompiledTemplate, text = "/x"): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const name of tool.input_schema.required) {
-    if (!Object.prototype.hasOwnProperty.call(tool.input_schema.properties, name)) continue;
-    const property = tool.input_schema.properties[name] as { type?: string; enum?: unknown[]; minimum?: number };
-    const keys = maps.get(name);
-    if (Array.isArray(property.enum) && property.enum.length > 0) out[name] = property.enum[0];
-    else if (keys) out[name] = keys[0];
+    const property = propertyOf(tool, name);
+    if (property === undefined) continue;
+    const probe = probeValues(tool, compiled, name);
+    if (probe && probe.values.length > 0) out[name] = probe.values[0];
     else if (property.type === "integer" || property.type === "number") out[name] = property.minimum ?? 1;
-    else if (property.type === "boolean") out[name] = true;
     else if (property.type === "array") out[name] = [text];
     else out[name] = text;
   }
@@ -235,34 +256,69 @@ function requiredOnlyInput(tool: ToolConfig, maps: Map<string, readonly string[]
 }
 
 /**
- * Refuse a tool whose url_template cannot be resolved for a call that sends only its required
- * input (requiredOnlyInput). Such a call passes the exec route's validation and then fails every
- * time: a `{{name}}` placeholder of a property input_schema does not require, a `map:` on such a
- * property (a map has no entry for a missing value), or a required enum value the map does not
- * know. The WooCommerce template's filter_products was one: its in_stock map failed every call
- * that left in_stock out. Every offender is reported at once.
+ * Why a tool's url_template cannot be resolved for some call that passes validation, or null.
+ * Such a call fails with invalid_input every time it is made:
+ *   - a call that sends only the required input (requiredOnlyInput): a `{{name}}` placeholder of
+ *     a property input_schema does not require, or a `map:` on one (a map has no entry for a
+ *     missing value);
+ *   - a call that sends one of the few values a property allows (its enum, true or false), each
+ *     tried in turn: a value one of its maps has no entry for, or a dot segment in a path;
+ *   - a property that maps read with no value, of its type, that every one of those maps knows.
+ * The first such call per tool.
+ */
+function templateProblem(tool: ToolConfig, compiled: CompiledTemplate): string | null {
+  const required = tool.input_schema.required;
+  for (const name of compiled.params) {
+    if (probeValues(tool, compiled, name)?.values.length === 0) {
+      return `cannot be resolved for any call: no value of "${name}" that input_schema accepts has an entry in every map: of {{${name}}}`;
+    }
+  }
+  const base = requiredOnlyInput(tool, compiled);
+  const fails = (input: Record<string, unknown>): string | null => {
+    try {
+      compiled.resolver(input);
+      return null;
+    } catch (e) {
+      return (e as Error).message;
+    }
+  };
+  const baseFailure = fails(base);
+  if (baseFailure !== null) {
+    return `cannot be resolved for a call that sends only its required input (${required.length > 0 ? required.join(", ") : "none"}): ${baseFailure}`;
+  }
+  for (const name of compiled.params) {
+    const probe = probeValues(tool, compiled, name);
+    if (probe === null || !probe.complete) continue;
+    for (const value of probe.values) {
+      const failure = fails({ ...base, [name]: value });
+      if (failure !== null) return `cannot be resolved for a call that sends ${name} = ${JSON.stringify(value)}: ${failure}`;
+    }
+  }
+  return null;
+}
+
+/**
+ * Refuse a tool whose url_template cannot be resolved for some call that passes the exec route's
+ * validation (templateProblem): such a call fails every time it is made. The WooCommerce
+ * template's filter_products was one: its in_stock map failed every call that left in_stock out.
+ * Every offender is reported at once.
  */
 function checkTemplateResolves(config: Config): void {
   const problems: string[] = [];
   for (const tool of config.tools) {
     const executor = tool.executor;
     if (executor.type !== "dom_extract" && executor.type !== "http_json" && executor.type !== "http_get") continue;
-    const compiled = compileTemplate(executor.url_template);
-    try {
-      compiled.resolver(requiredOnlyInput(tool, mapKeysByName(compiled)));
-    } catch (e) {
-      const required = tool.input_schema.required;
-      problems.push(
-        `tool "${tool.name}" (${executor.type}) url_template ${JSON.stringify(executor.url_template)} cannot be resolved for a call ` +
-          `that sends only its required input (${required.length > 0 ? required.join(", ") : "none"}): ${(e as Error).message}`,
-      );
+    const problem = templateProblem(tool, compileTemplate(executor.url_template));
+    if (problem !== null) {
+      problems.push(`tool "${tool.name}" (${executor.type}) url_template ${JSON.stringify(executor.url_template)} ${problem}`);
     }
   }
   if (problems.length === 0) return;
   throw new Error(
-    `[build-config] ${problems.join("; ")}. Such a call passes validation and then fails every time. Add the property to ` +
+    `[build-config] ${problems.join("; ")}. Such a call passes validation and then fails. Add the property to ` +
       `input_schema.required, or give its placeholder |optional (as the whole value of a query parameter) or |default:VALUE; ` +
-      `a map: has no entry for a missing value, so a map needs a required property whose enum values are all keys of the map.`,
+      `a map: has no entry for a missing value, so a map needs a required property, and an entry for every value that ` +
+      `property's enum (or a boolean's true and false) allows.`,
   );
 }
 
@@ -271,14 +327,15 @@ function checkTemplateResolves(config: Config): void {
  * The check is paranoid by design: if a template can ever resolve outside
  * allowed_origins, build fails.
  *
- * Every placeholder is set, once to a benign and once to a hostile value, and a `map:`
- * placeholder to each of its keys in turn (one round per key of the longest map), so every value
- * a map writes is checked too; the call that sends only its required input checks the defaults
- * and the missing optional parameters. Every such input satisfies the template's operators, so a
- * resolver that throws on one is a template that cannot be resolved: a build error naming the
- * tool, never a skipped probe. (The probes used to set a map placeholder to "/x" as well, and to
- * send nothing at all, which threw, and the throw was skipped: map values were never checked.)
- * checkTemplateResolves runs first and names the required-input case on its own.
+ * Every placeholder is set, once to a benign and once to a hostile value; a property whose values
+ * probeValues lists (an enum, a boolean, the keys its maps share) is set to each of them in turn
+ * instead (one round per value of the longest list), since a call can send nothing else, so every
+ * value a map writes is checked too. The call that sends only its required input checks the
+ * defaults and the missing optional parameters. Every such input is one a valid call can send,
+ * and checkTemplateResolves (which runs first) has resolved those, so a resolver that throws on
+ * one is a build error naming the tool, never a skipped probe. (The probes used to set a map
+ * placeholder to "/x" as well, and to send nothing at all, which threw, and the throw was
+ * skipped: map values were never checked.)
  */
 function checkAllowList(config: Config): void {
   const allowed = new Set(config.origin.allowed_origins.map((u) => new URL(u).origin));
@@ -293,18 +350,22 @@ function checkAllowList(config: Config): void {
     }
     const template = tool.executor.url_template;
     const compiled = compileTemplate(template);
-    const maps = mapKeysByName(compiled);
-    const rounds = Math.max(1, ...[...maps.values()].map((keys) => keys.length));
+    const listed = new Map<string, unknown[]>();
+    for (const p of compiled.params) {
+      const probe = probeValues(tool, compiled, p);
+      if (probe !== null && probe.values.length > 0) listed.set(p, probe.values);
+    }
+    const rounds = Math.max(1, ...[...listed.values()].map((values) => values.length));
     const filled = (value: string, round: number): Record<string, unknown> =>
       Object.fromEntries(
         compiled.params.map((p) => {
-          const keys = maps.get(p);
-          return [p, keys ? keys[round % keys.length]! : value];
+          const values = listed.get(p);
+          return [p, values ? values[round % values.length] : value];
         }),
       );
 
     // Only the required input: the defaults and the missing optional parameters.
-    const tries: Array<Record<string, unknown>> = [requiredOnlyInput(tool, maps)];
+    const tries: Array<Record<string, unknown>> = [requiredOnlyInput(tool, compiled)];
     for (let round = 0; round < rounds; round++) {
       // Leading "/" so path-position params don't fuse with the host
       // (e.g. "https://example.com{{path}}" with path="x" → "example.comx").

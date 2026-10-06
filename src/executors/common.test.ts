@@ -136,6 +136,24 @@ describe("resolveUrl: a template cannot be steered out of its path prefix", () =
     expect(r.error.message).toContain("{{b|optional}}");
   });
 
+  it.each([
+    ["https://example.com\\api?q={{q}}", "/api"],
+    ["https://example.com/api ?q={{q}}", "/api%20"],
+    ["https:/example.com/api?q={{q}}", "/api"],
+  ])("resolves %s, a spelling the URL parser accepts, on its exact path %s", (template, pathname) => {
+    // The prefix was read from the text with its own rules (the authority ran on past a
+    // backslash; the trailing space was trimmed), so every call was refused.
+    const r = resolve(template, { q: "x" });
+    if (!r.ok) throw new Error(JSON.stringify(r));
+    expect(r.url.pathname).toBe(pathname);
+  });
+
+  it("refuses a .. the template contributes after a single-slash scheme (the prefix was null)", () => {
+    const r = resolve("https:/example.com/files/..{{x}}", { x: "/admin" });
+    if (r.ok) throw new Error(`resolved to ${r.url.href}`);
+    expect(r.error.message).toContain("path prefix /files/");
+  });
+
   it("keeps a query-only template on its exact path, whichever optional parameters are dropped", () => {
     for (const input of [{ a: "-admin" }, { a: "-admin", b: "x" }, { a: "/../admin" }]) {
       const r = resolve("https://example.com/api?q={{a}}&b={{b|optional}}", input);

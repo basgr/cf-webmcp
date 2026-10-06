@@ -256,6 +256,7 @@ describe("a path-position placeholder cannot carry a dot segment", () => {
     ["a%5c..%5cb", "encoded backslashes round .."],
     ["%252e%252e/x", "a doubly encoded .."],
     ["%25252e%25252e/x", "a triply encoded .."],
+    ["%252525252e%252525252e/x", "a .. encoded five times"],
   ])("refuses %j (%s)", (value) => {
     expect(() => path.resolver({ id: value })).toThrow(/must not contain a "\." or "\.\." path segment/);
   });
@@ -385,5 +386,20 @@ describe("the static path prefix of a template", () => {
   it("is the prefix as the URL parser writes it, so it compares with the pathname that new URL produced", () => {
     expect(compileTemplate("https://example.com/a/./b/{{x}}").pathPrefix).toBe("/a/b/");
     expect(compileTemplate("https://example.com/a/c/../b/{{x}}").pathPrefix).toBe("/a/b/");
+  });
+
+  it.each([
+    // The URL parser reads a backslash as a slash, any number of slashes after the scheme, and
+    // drops leading spaces; the prefix is read the same way.
+    ["https://example.com\\api?q={{q}}", "/api"],
+    ["https://example.com/api ?q={{q}}", "/api%20"],
+    ["https:/example.com/api?q={{q}}", "/api"],
+    ["https://example.com\\api\\{{x}}", "/api/"],
+    ["https:/example.com/files/..{{x}}", "/files/"],
+    ["https:example.com/api/{{id}}", "/api/"],
+    [" https://example.com/api/{{id}}", "/api/"],
+    ["https:example.com{{p}}", "/"],
+  ])("%s has the prefix %j, as the URL parser reads the template", (template, prefix) => {
+    expect(compileTemplate(template).pathPrefix).toBe(prefix);
   });
 });

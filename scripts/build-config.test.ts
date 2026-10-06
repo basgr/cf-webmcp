@@ -3071,6 +3071,81 @@ description = "Filter."
     expect(err.message).toContain('map operator for "in_stock" has no entry for key "c"');
   });
 
+  describe("every value a valid call can send to a map: is tried, not only the first", () => {
+    const sorter = (template: string, property: string) => `${MINIMAL}
+[[tools]]
+name        = "sorted"
+description = "Sorted."
+
+  [tools.input_schema]
+  type     = "object"
+  required = ["o"]
+
+    [tools.input_schema.properties.o]
+    ${property}
+
+  [tools.executor]
+  type         = "http_json"
+  url_template = ${JSON.stringify(template)}
+`;
+    const outcome = async (toml: string): Promise<string> =>
+      runBuild(await writeToml("sorted.toml", toml)).then(
+        () => "built",
+        (e: Error) => e.message,
+      );
+
+    it("refuses an enum value the map has no entry for, wherever it sits in the enum", async () => {
+      // Only enum[0] was tried: ["a", "b"] built, and every call with "b" failed.
+      for (const values of ['["a", "b"]', '["b", "a"]']) {
+        await fs.rm(path.join(tmpDir, "out"), { recursive: true, force: true });
+        const message = await outcome(sorter("https://example.com/p?s={{o|map:a=1}}", `type = "string"\n    enum = ${values}`));
+        expect(message, values).toContain('map operator for "o" has no entry for key "b"');
+      }
+    });
+
+    it("builds two maps of one name that resolve every enum value, though their keys differ", async () => {
+      // The allow-list probe filled the name with the first map's keys, and "top" broke the second.
+      const template = "https://example.com/p?sort={{o|map:new=date,old=date,top=rating}}&dir={{o|map:new=desc,old=asc}}";
+      expect(await outcome(sorter(template, 'type = "string"\n    enum = ["new", "old"]'))).toBe("built");
+      await fs.rm(path.join(tmpDir, "out"), { recursive: true, force: true });
+      // Without an enum, a value only one map knows is an invalid input at call time, not a broken template.
+      expect(await outcome(sorter(template, 'type = "string"'))).toBe("built");
+    });
+
+    it("refuses two maps of one name that share no key", async () => {
+      const message = await outcome(sorter("https://example.com/p?a={{o|map:x=1}}&b={{o|map:y=2}}", 'type = "string"'));
+      expect(message).toMatch(/tool "sorted".*no value of "o" that input_schema accepts has an entry in every map: of \{\{o\}\}/);
+    });
+
+    it("tries a boolean as true and false, the values a call sends, never the map's own spelling", async () => {
+      expect(await outcome(sorter("https://example.com/p?s={{o|map:yes=1,no=0}}", 'type = "boolean"'))).toContain(
+        'map operator for "o" has no entry for key "true"',
+      );
+      await fs.rm(path.join(tmpDir, "out"), { recursive: true, force: true });
+      expect(await outcome(sorter("https://example.com/p?s={{o|map:true=1}}", 'type = "boolean"'))).toContain(
+        'map operator for "o" has no entry for key "false"',
+      );
+      await fs.rm(path.join(tmpDir, "out"), { recursive: true, force: true });
+      expect(await outcome(sorter("https://example.com/p?s={{o|map:true=1,false=0}}", 'type = "boolean"'))).toBe("built");
+    });
+
+    it("tries an integer only with keys an integer can be written as", async () => {
+      expect(await outcome(sorter("https://example.com/p?s={{o|map:one=1,two=2}}", 'type = "integer"'))).toMatch(
+        /no value of "o" that input_schema accepts has an entry in every map/,
+      );
+      await fs.rm(path.join(tmpDir, "out"), { recursive: true, force: true });
+      expect(await outcome(sorter("https://example.com/p?s={{o|map:1=one,2=two}}", 'type = "integer"'))).toBe("built");
+    });
+
+    it("probes a host placeholder with its enum values, not with a free-form value the enum refuses", async () => {
+      const toml = sorter("https://{{o}}.example.com/x", 'type = "string"\n    enum = ["a", "b"]').replace(
+        'allowed_origins = ["https://example.com"]',
+        'allowed_origins = ["https://example.com", "https://a.example.com", "https://b.example.com"]',
+      );
+      expect(await outcome(toml)).toBe("built");
+    });
+  });
+
   it("builds a tool whose optional placeholders are optional and whose defaults default", async () => {
     await expect(
       runBuild(await writeToml("probe-opt.toml", filter("https://example.com/products?category={{category|optional}}&s={{in_stock|default:any}}"))),

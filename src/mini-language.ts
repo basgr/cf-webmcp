@@ -273,14 +273,28 @@ export function staticPathPrefix(template: string): string | null {
   const first = PLACEHOLDER_RE.exec(template);
   PLACEHOLDER_RE.lastIndex = 0;
   if (first === null) return null;
-  const head = template.slice(0, first.index);
-  const authority = /^[A-Za-z][A-Za-z0-9+.-]*:\/\/[^/?#]*/.exec(head);
+  // The text as the URL parser reads it: leading spaces and controls dropped, every tab and line
+  // break removed.
+  const head = template.slice(0, first.index).replace(/^[\x00-\x20]+/, "").replace(/[\t\n\r]/g, "");
+  const delimiter = head.search(/[?#]/);
+  if (delimiter !== -1) {
+    // The first placeholder is in the query (or fragment): the whole path is text, and the URL
+    // parser reads it here as it reads it in every resolved URL (a backslash as a slash, a single
+    // slash after the scheme, a space before the `?` as %20).
+    try {
+      return new URL(head.slice(0, delimiter + 1)).pathname;
+    } catch {
+      // Read below as before.
+    }
+  }
+  // Any number of slashes or backslashes after the scheme, and a host that ends at either.
+  const authority = /^[A-Za-z][A-Za-z0-9+.-]*:[/\\]*[^/\\?#]*/.exec(head);
   if (authority === null) return null;
   const rest = head.slice(authority[0].length);
   let prefix = "/";
-  if (rest.startsWith("/")) {
+  if (rest.startsWith("/") || rest.startsWith("\\")) {
     const query = rest.search(/[?#]/);
-    prefix = query === -1 ? rest.slice(0, rest.lastIndexOf("/") + 1) : rest.slice(0, query);
+    prefix = query === -1 ? rest.slice(0, Math.max(rest.lastIndexOf("/"), rest.lastIndexOf("\\")) + 1) : rest.slice(0, query);
   }
   try {
     return new URL(`http://x${prefix}`).pathname;
@@ -312,13 +326,14 @@ export function encodePath(value: string): string {
  */
 function hasDotSegment(value: string): boolean {
   let v = value;
-  for (let layer = 0; layer < 5; layer++) {
+  // The value as written, then after each of up to five decodings.
+  for (let layer = 0; ; layer++) {
     if (v.split(/[/\\]/).some((segment) => segment === "." || segment === "..")) return true;
+    if (layer === 5) return false;
     const decoded = v.replace(/%([0-9a-f]{2})/gi, (_, hex: string) => String.fromCharCode(parseInt(hex, 16)));
     if (decoded === v) return false;
     v = decoded;
   }
-  return false;
 }
 
 function resolvePlaceholder(p: Placeholder, input: Record<string, unknown>, isQuery: boolean): ResolvedValue {

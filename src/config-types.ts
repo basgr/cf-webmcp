@@ -61,13 +61,17 @@ const HttpsUrl = z
 
 /**
  * Whether an http(s) URL holds userinfo (`user:password@` in front of the host, an empty one
- * included). Read from the text as the URL parser reads an http(s) URL: slashes and backslashes
+ * included). Read from the text as the URL parser reads an http(s) URL: leading and trailing
+ * spaces and controls and every tab and line break are dropped, slashes and backslashes
  * after the scheme are skipped, and the host part ends at the first `/`, `\`, `?` or `#`, so an
  * `@` in the path, query or fragment does not count. (The parsed URL alone cannot tell: it reads
  * `https://@example.com` as `https://example.com`.)
  */
 function hasUserinfo(value: string): boolean {
-  const afterScheme = value.replace(/^[A-Za-z][A-Za-z0-9+.-]*:[/\\]*/, "");
+  // First as the URL parser does: leading and trailing spaces and controls dropped, every tab and
+  // line break removed (" https://u@x" and "https:\n//u@x" are both URLs with userinfo).
+  const url = value.replace(/^[\x00-\x20]+|[\x00-\x20]+$/g, "").replace(/[\t\n\r]/g, "");
+  const afterScheme = url.replace(/^[A-Za-z][A-Za-z0-9+.-]*:[/\\]*/, "");
   const authority = afterScheme.split(/[/\\?#]/, 1)[0] ?? "";
   return authority.includes("@");
 }
