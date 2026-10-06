@@ -6,6 +6,8 @@
  *   {{name|optional}}        omit the surrounding query parameter when input is missing
  *   {{name|map:k=v,k=v}}     explicit value mapping
  *
+ * One operator per placeholder: they do not combine.
+ *
  * Compile a template string into a `(input) => string` resolver plus a list of
  * referenced parameter names. The compile step is build-time; the returned
  * function is shipped into the Worker.
@@ -52,7 +54,15 @@ interface Placeholder {
 const PLACEHOLDER_RE = /\{\{\s*([^}]+?)\s*\}\}/g;
 
 export function parsePlaceholder(raw: string): Placeholder {
-  const [namePart, opPart] = raw.split("|").map((s) => s.trim());
+  const parts = raw.split("|").map((s) => s.trim());
+  // Operators do not combine, and a default: or map: value cannot hold a "|": the text after a
+  // second "|" used to be dropped without a word (`{{x|optional|map:...}}` read as optional).
+  if (parts.length > 2) {
+    throw new Error(
+      `a placeholder takes one operator, and a default: or map: value cannot hold "|": "{{${raw}}}" has ${parts.length - 1}`,
+    );
+  }
+  const [namePart, opPart] = parts;
   if (!namePart) throw new Error(`empty placeholder name in "{{${raw}}}"`);
   if (!/^[a-z][a-z0-9_]*$/.test(namePart)) {
     throw new Error(`invalid placeholder name "${namePart}" in "{{${raw}}}"`);

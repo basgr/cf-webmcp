@@ -254,9 +254,13 @@ description = "Filter products by category, price range, and stock status. Retur
     type    = "number"
     minimum = 0
 
-    [tools.input_schema.properties.in_stock]
-    type        = "boolean"
-    description = "If true, only products currently in stock."
+    # The Store API's stock_status filter; a call that leaves it out gets every status. Not a
+    # boolean with a map: (true=instock): a map has no entry for a missing value, so on an
+    # optional property it fails every call without it, and the build refuses that.
+    [tools.input_schema.properties.stock_status]
+    type        = "string"
+    description = "Only products with this stock status: instock, outofstock or onbackorder."
+    enum        = ["instock", "outofstock", "onbackorder"]
 
     [tools.input_schema.properties.limit]
     type    = "integer"
@@ -265,7 +269,7 @@ description = "Filter products by category, price range, and stock status. Retur
 
   [tools.executor]
   type         = "http_json"
-  url_template = "https://example.com/wp-json/wc/store/v1/products?category={{category|optional}}&min_price={{min_price|optional}}&max_price={{max_price|optional}}&stock_status={{in_stock|map:true=instock,false=outofstock}}&per_page={{limit|default:20}}"
+  url_template = "https://example.com/wp-json/wc/store/v1/products?category={{category|optional}}&min_price={{min_price|optional}}&max_price={{max_price|optional}}&stock_status={{stock_status|optional}}&per_page={{limit|default:20}}"
 
   [tools.executor.project]
   type   = "array"

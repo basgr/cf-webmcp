@@ -2843,7 +2843,8 @@ ${executor}
 
   it("accepts the same templates once the placeholders are declared, for every operator", async () => {
     const url = "https://example.com/api/{{id}}?q={{q|optional}}&n={{n|default:5}}&k={{k|map:a=1,b=2}}";
-    await expect(build(MINIMAL + tool("fetch_it", template(url), ["id", "q", "n", "k"]))).resolves.toBeDefined();
+    // id and k required: a call without them could not be resolved (checkTemplateResolves).
+    await expect(build(MINIMAL + tool("fetch_it", template(url), ["id", "q", "n", "k"], ["id", "k"]))).resolves.toBeDefined();
   });
 
   it("refuses an optional or defaulted placeholder that is not declared too", async () => {
@@ -2991,6 +2992,85 @@ description = "Hop."
 `;
     const err = await buildError(toml);
     expect(err.message).toMatch(/tool "hop" url_template can resolve to origin https:\/\/evil\.example\.net/);
+  });
+});
+
+describe("every url_template resolves for a call that sends only its required input", () => {
+  const filter = (template: string, required = "[]", inStock = 'type = "boolean"') => `${MINIMAL}
+[[tools]]
+name        = "filter_products"
+description = "Filter."
+
+  [tools.input_schema]
+  type     = "object"
+  required = ${required}
+
+    [tools.input_schema.properties.category]
+    type = "string"
+
+    [tools.input_schema.properties.in_stock]
+    ${inStock}
+
+  [tools.executor]
+  type         = "http_json"
+  url_template = ${JSON.stringify(template)}
+`;
+  const buildError = async (toml: string): Promise<Error> =>
+    (await runBuild(await writeToml("probe.toml", toml)).then(
+      () => new Error("built"),
+      (e: Error) => e,
+    )) as Error;
+
+  // The WooCommerce template's filter_products: in_stock is not required, so a call without it
+  // reached the map, which has no entry for a missing value, and every such call failed.
+  it("refuses a map: on a property that input_schema does not require, naming the tool", async () => {
+    const err = await buildError(filter("https://example.com/products?category={{category|optional}}&stock_status={{in_stock|map:true=instock,false=outofstock}}"));
+    expect(err.message).toMatch(/^\[build-config\] tool "filter_products" \(http_json\) url_template /);
+    expect(err.message).toContain("only its required input");
+    expect(err.message).toContain('map operator for "in_stock" has no entry for key ""');
+  });
+
+  it("refuses a required placeholder on a property that input_schema does not require", async () => {
+    const err = await buildError(filter("https://example.com/products/{{category}}"));
+    expect(err.message).toMatch(/tool "filter_products" \(http_json\)/);
+    expect(err.message).toContain('required parameter "category" missing');
+  });
+
+  it("builds the same templates once the property is required, filling it from its type, enum or map", async () => {
+    await expect(
+      runBuild(await writeToml("probe-ok.toml", filter("https://example.com/products/{{category}}?s={{in_stock|map:true=instock,false=outofstock}}", '["category", "in_stock"]'))),
+    ).resolves.toBeDefined();
+    await fs.rm(path.join(tmpDir, "out"), { recursive: true, force: true });
+    // An enum value is what a valid call sends: the first one must have an entry in the map.
+    const err = await buildError(
+      filter("https://example.com/products?s={{in_stock|map:a=1,b=2}}", '["in_stock"]', 'type = "string"\n    enum = ["c", "a"]'),
+    );
+    expect(err.message).toContain('map operator for "in_stock" has no entry for key "c"');
+  });
+
+  it("builds a tool whose optional placeholders are optional and whose defaults default", async () => {
+    await expect(
+      runBuild(await writeToml("probe-opt.toml", filter("https://example.com/products?category={{category|optional}}&s={{in_stock|default:any}}"))),
+    ).resolves.toBeDefined();
+  });
+
+  it("builds the four templates and resolves the WooCommerce filter without a stock filter", async () => {
+    const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+    for (const rel of ["templates/default.toml", "templates/wordpress.toml", "templates/woocommerce.toml", "templates/example-site/webmcp.toml"]) {
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+      await fs.rm(path.join(tmpDir, "out"), { recursive: true, force: true });
+      await expect(runBuild(path.join(repo, rel)), rel).resolves.toBeDefined();
+    }
+    const woo = TOML.parse(await fs.readFile(path.join(repo, "templates/woocommerce.toml"), "utf8")) as {
+      tools: Array<{ name: string; executor: { url_template?: string } }>;
+    };
+    const template = woo.tools.find((t) => t.name === "filter_products")!.executor.url_template!;
+    const { compileTemplate } = await import("../src/mini-language");
+    const compiled = compileTemplate(template);
+    expect(compiled.resolver({})).toBe("https://example.com/wp-json/wc/store/v1/products?per_page=20");
+    expect(compiled.resolver({ stock_status: "instock", category: "shoes" })).toBe(
+      "https://example.com/wp-json/wc/store/v1/products?category=shoes&stock_status=instock&per_page=20",
+    );
   });
 });
 
@@ -3169,7 +3249,8 @@ name        = "get_page"
 description = "Fetch a page."
 
   [tools.input_schema]
-  type = "object"
+  type     = "object"
+  required = ["path"]
 
     ${property}
 

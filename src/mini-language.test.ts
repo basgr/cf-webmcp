@@ -34,6 +34,18 @@ describe("parsePlaceholder", () => {
   it("rejects unknown operators", () => {
     expect(() => parsePlaceholder("x|foobar")).toThrow();
   });
+
+  it.each([
+    // Read as `optional`: the map was dropped and "true" went to origin unmapped.
+    ["in_stock|optional|map:true=instock"],
+    // Read as a map whose value was "instock": the |optional was dropped.
+    ["in_stock|map:true=instock|optional"],
+    // Read as the default "10": the rest was dropped.
+    ["limit|default:10|optional"],
+    ["sep|default:a|b"],
+  ])("takes one operator: %j is refused, never cut short without a word", (raw) => {
+    expect(() => parsePlaceholder(raw)).toThrow(/takes one operator/);
+  });
 });
 
 describe("compileTemplate", () => {

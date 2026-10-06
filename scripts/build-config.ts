@@ -211,17 +211,74 @@ function mapKeysByName(compiled: CompiledTemplate): Map<string, readonly string[
 }
 
 /**
+ * The input of a call that sends only what the tool's input_schema requires, each value one a
+ * valid call could send: the property's first enum value; else, for a property a `map:`
+ * placeholder reads, the map's first key; else a value of its type: `text` for a string ("/x",
+ * so that a path placeholder never runs into the host), its minimum (else 1) for an integer or a
+ * number, true for a boolean, a one-element array for an array. pattern, minimum and maximum are
+ * the exec route's to check; the resolver never reads them.
+ */
+function requiredOnlyInput(tool: ToolConfig, maps: Map<string, readonly string[]>, text = "/x"): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const name of tool.input_schema.required) {
+    if (!Object.prototype.hasOwnProperty.call(tool.input_schema.properties, name)) continue;
+    const property = tool.input_schema.properties[name] as { type?: string; enum?: unknown[]; minimum?: number };
+    const keys = maps.get(name);
+    if (Array.isArray(property.enum) && property.enum.length > 0) out[name] = property.enum[0];
+    else if (keys) out[name] = keys[0];
+    else if (property.type === "integer" || property.type === "number") out[name] = property.minimum ?? 1;
+    else if (property.type === "boolean") out[name] = true;
+    else if (property.type === "array") out[name] = [text];
+    else out[name] = text;
+  }
+  return out;
+}
+
+/**
+ * Refuse a tool whose url_template cannot be resolved for a call that sends only its required
+ * input (requiredOnlyInput). Such a call passes the exec route's validation and then fails every
+ * time: a `{{name}}` placeholder of a property input_schema does not require, a `map:` on such a
+ * property (a map has no entry for a missing value), or a required enum value the map does not
+ * know. The WooCommerce template's filter_products was one: its in_stock map failed every call
+ * that left in_stock out. Every offender is reported at once.
+ */
+function checkTemplateResolves(config: Config): void {
+  const problems: string[] = [];
+  for (const tool of config.tools) {
+    const executor = tool.executor;
+    if (executor.type !== "dom_extract" && executor.type !== "http_json" && executor.type !== "http_get") continue;
+    const compiled = compileTemplate(executor.url_template);
+    try {
+      compiled.resolver(requiredOnlyInput(tool, mapKeysByName(compiled)));
+    } catch (e) {
+      const required = tool.input_schema.required;
+      problems.push(
+        `tool "${tool.name}" (${executor.type}) url_template ${JSON.stringify(executor.url_template)} cannot be resolved for a call ` +
+          `that sends only its required input (${required.length > 0 ? required.join(", ") : "none"}): ${(e as Error).message}`,
+      );
+    }
+  }
+  if (problems.length === 0) return;
+  throw new Error(
+    `[build-config] ${problems.join("; ")}. Such a call passes validation and then fails every time. Add the property to ` +
+      `input_schema.required, or give its placeholder |optional (as the whole value of a query parameter) or |default:VALUE; ` +
+      `a map: has no entry for a missing value, so a map needs a required property whose enum values are all keys of the map.`,
+  );
+}
+
+/**
  * Sample inputs that exercise every URL template against the allow-list.
  * The check is paranoid by design: if a template can ever resolve outside
  * allowed_origins, build fails.
  *
  * Every placeholder is set, once to a benign and once to a hostile value, and a `map:`
  * placeholder to each of its keys in turn (one round per key of the longest map), so every value
- * a map writes is checked too. Such an input satisfies every operator, so a resolver that throws
- * on it is a template that cannot be resolved at all: a build error naming the tool, never a
- * skipped probe. (The probes used to set a map placeholder to "/x" as well, which threw, and
- * the throw was skipped: map values were never checked.) The empty input, which leaves out the
- * required values too, still throws by design and is skipped.
+ * a map writes is checked too; the call that sends only its required input checks the defaults
+ * and the missing optional parameters. Every such input satisfies the template's operators, so a
+ * resolver that throws on one is a template that cannot be resolved: a build error naming the
+ * tool, never a skipped probe. (The probes used to set a map placeholder to "/x" as well, and to
+ * send nothing at all, which threw, and the throw was skipped: map values were never checked.)
+ * checkTemplateResolves runs first and names the required-input case on its own.
  */
 function checkAllowList(config: Config): void {
   const allowed = new Set(config.origin.allowed_origins.map((u) => new URL(u).origin));
@@ -246,23 +303,22 @@ function checkAllowList(config: Config): void {
         }),
       );
 
-    // The empty input: defaults and missing optional parameters (the required ones throw).
-    const tries: Array<{ input: Record<string, unknown>; mustResolve: boolean }> = [{ input: {}, mustResolve: false }];
+    // Only the required input: the defaults and the missing optional parameters.
+    const tries: Array<Record<string, unknown>> = [requiredOnlyInput(tool, maps)];
     for (let round = 0; round < rounds; round++) {
       // Leading "/" so path-position params don't fuse with the host
       // (e.g. "https://example.com{{path}}" with path="x" → "example.comx").
-      tries.push({ input: filled("/x", round), mustResolve: true });
-      tries.push({ input: filled("https://evil.example.com/", round), mustResolve: true });
+      tries.push(filled("/x", round));
+      tries.push(filled("https://evil.example.com/", round));
     }
-    for (const { input, mustResolve } of tries) {
+    for (const input of tries) {
       let resolved: string;
       try {
         resolved = compiled.resolver(input);
       } catch (e) {
-        if (!mustResolve) continue;
         throw new Error(
           `[build-config] tool "${tool.name}" (${tool.executor.type}) url_template ${JSON.stringify(template)} cannot be resolved ` +
-            `with every placeholder set, so the allow-list check cannot judge it: ${(e as Error).message}`,
+            `for the allow-list check, so the check cannot judge it: ${(e as Error).message}`,
         );
       }
       let parsed: URL;
@@ -2080,6 +2136,7 @@ export async function buildConfig(opts: BuildOptions): Promise<void> {
   }
   checkBaseUrlAllowed(config);
   checkDeclaredInputs(config);
+  checkTemplateResolves(config);
   checkAllowList(config);
   checkPathCollisions(config);
   checkSkillName(config);
