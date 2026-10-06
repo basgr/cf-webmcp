@@ -76,7 +76,7 @@ Before the first deploy, check that the paths the Worker wants to claim are free
 npm run preflight -- --config=webmcp.toml
 ```
 
-Reports OK / merge / COLLISION per path. Exits non-zero on hard collisions. Pass `--force` to override. Each probe gets 10 seconds. A probe that fails, or gets no response headers in that time, is an ERROR row and a warning, not a collision; so is a merge row whose body (which preflight reads to judge it) does not finish in time. Any other row is judged by the status and headers alone.
+Reports OK / merge / COLLISION per path. Exits non-zero on hard collisions. Pass `--force` to override. Each probe gets 10 seconds. A path probe that fails, or gets no response headers in that time, is an ERROR row and a warning, not a collision; so is a merge row whose body (which preflight reads to judge it) does not finish in time. Any other row is judged by the status and headers alone. The `POST initialize` probe described below is the exception: when it fails or times out, its row says "not checked" and adds no warning.
 
 The arguments are `--config`, `--origin` and `--force`, and nothing else. `--config` and `--origin` take a value, written `--config=webmcp.toml` or `--config webmcp.toml` (the two forms are the same). An unknown flag, a stray argument, a flag without a value (`--origin` alone, or `--origin` followed by another flag) and a flag given twice are usage errors: the message goes to stderr, nothing is read or requested, and the exit code is 2. The other exit codes are 0 (no hard collision, or `--force`) and 1 (a hard collision).
 
