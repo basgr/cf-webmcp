@@ -1251,6 +1251,57 @@ describe("preflight: User-Agent", () => {
   });
 });
 
+describe("preflight: a GET probe that gets no answer times out", () => {
+  /**
+   * An origin that never answers: every request waits for its signal, and fails with the signal's
+   * reason when it aborts. /robots.txt (a merge row) sends its headers and then a body that never
+   * ends. AbortSignal.timeout is spied on: the probes ask for 10 s, the spy hands out a signal that
+   * fires after 20 ms, so the test does not wait.
+   */
+  function stallingOrigin() {
+    const realTimeout = AbortSignal.timeout.bind(AbortSignal);
+    const timeout = vi.spyOn(AbortSignal, "timeout").mockImplementation(() => realTimeout(20));
+    const calls: FetchCall[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string | URL, init: RequestInit = {}) => {
+        const url = String(input);
+        calls.push({ url, init });
+        const signal = init.signal;
+        if (!signal) return new Promise<Response>(() => {});
+        if (init.method === "GET" && new URL(url).pathname === "/robots.txt") {
+          const body = new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(new TextEncoder().encode("User-agent: *\n"));
+              signal.addEventListener("abort", () => controller.error(signal.reason), { once: true });
+            },
+          });
+          return Promise.resolve(new Response(body, { status: 200, headers: { "content-type": "text/plain" } }));
+        }
+        return new Promise<Response>((_, reject) => signal.addEventListener("abort", () => reject(signal.reason), { once: true }));
+      }),
+    );
+    return { calls, timeout };
+  }
+
+  it("ends every GET probe with an ERROR row and a warning, never hangs, and exits 0", async () => {
+    const { calls, timeout } = stallingOrigin();
+
+    const { code, result, lines } = await run(MINIMAL);
+
+    const gets = calls.filter((c) => c.init.method === "GET");
+    expect(gets.length).toBeGreaterThan(3);
+    for (const c of gets) expect(c.init.signal, c.url).toBeInstanceOf(AbortSignal);
+    expect(timeout.mock.calls.filter(([ms]) => ms === 10_000).length).toBeGreaterThanOrEqual(gets.length);
+    const errorRows = lines.filter((l) => l.includes("→ ERROR (no answer within 10 s)"));
+    expect(errorRows).toHaveLength(gets.length);
+    // The merge row whose body stalled after its headers times out the same way.
+    expect(errorRows.some((l) => l.includes("/robots.txt"))).toBe(true);
+    expect(result.warnings.filter((w) => w.endsWith(": no answer within 10 s"))).toHaveLength(gets.length);
+    expect(code).toBe(0);
+  });
+});
+
 describe("preflight: command-line arguments", () => {
   it("accepts --config and --origin written with a space instead of =", () => {
     expect(parseArgs(["--config", "a.toml", "--origin", "https://o.example", "--force"])).toEqual({

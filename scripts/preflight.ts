@@ -343,6 +343,17 @@ async function readForMerge(res: Response): Promise<Uint8Array | "too_large"> {
   return read.bytes;
 }
 
+/**
+ * How long one GET probe may take, its body included: an origin that never answers, or sends its
+ * headers and then never finishes the body, must not hang preflight. The row is an error then.
+ */
+const PROBE_TIMEOUT_MS = 10_000;
+
+/** Whether `e` is the rejection of a request whose AbortSignal.timeout fired. */
+function isTimeout(e: unknown): boolean {
+  return typeof e === "object" && e !== null && (e as { name?: unknown }).name === "TimeoutError";
+}
+
 async function probe(check: PathCheck, deployToken: string | undefined, version: string): Promise<Outcome> {
   const headers = originHeaders(deployToken, version);
   try {
@@ -350,6 +361,8 @@ async function probe(check: PathCheck, deployToken: string | undefined, version:
       method: "GET",
       headers,
       redirect: "manual",
+      // Also ends a body read that stalls: the body stream errors when the signal fires.
+      signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
     });
     const ct = res.headers.get("content-type") ?? "";
     if (res.status === 404) {
@@ -433,6 +446,7 @@ async function probe(check: PathCheck, deployToken: string | undefined, version:
     }
     return { kind: "ok", status: res.status, contentType: ct };
   } catch (e) {
+    if (isTimeout(e)) return { kind: "error", reason: `no answer within ${PROBE_TIMEOUT_MS / 1000} s` };
     return { kind: "error", reason: (e as Error).message };
   }
 }
