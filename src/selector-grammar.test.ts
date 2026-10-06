@@ -61,8 +61,6 @@ describe("checkSelector accepts what lol-html supports", () => {
     "form  input",
     "form .a #b",
     "div:not(.a, .b)",
-    "div:not(a b)",
-    "div:not(a > b)",
     "input:not(:first-child)",
     "li:not(:nth-child(2))",
     ":not(:not(.a))",
@@ -130,6 +128,13 @@ describe("checkSelector rejects what lol-html cannot handle", () => {
     ["div:not(:has(a))", /:has/],
     ["div:not(a::before)", /::|pseudo-element/],
     ["div:not(a + b)", /\+/],
+    // The rewriter takes compound selectors only inside :not(...) (workerd 1.20260815 on).
+    ["div:not(a b)", /compound selectors only/],
+    ["div:not(a > b)", /compound selectors only/],
+    ["div:not(.a .b)", /compound selectors only/],
+    [":not(a, b > c)", /compound selectors only/],
+    [":not( of .a)", /compound selectors only/],
+    [":not(:not(a b))", /compound selectors only/],
   ];
   for (const [sel, message] of rejected) {
     it(`rejects ${JSON.stringify(sel)}`, () => {
@@ -357,8 +362,9 @@ describe("size caps", () => {
   });
 
   it("counts compounds inside :not() against the same limit", () => {
-    // 31 outer compounds + the one carrying :not( + 32 inside = 64, then 65.
-    const inner = (n: number) => `${"a ".repeat(31)}:not(${compounds(n)})`;
+    // 31 outer compounds + the one carrying :not( + 32 inside = 64, then 65. Inside :not()
+    // the compounds form a list, since the rewriter takes no combinator there.
+    const inner = (n: number) => `${"a ".repeat(31)}:not(${compounds(n, ", ")})`;
     expect(checkSelector(inner(32), form)).toBeNull();
     expect(checkSelector(inner(33), form)).toMatch(/64/);
   });

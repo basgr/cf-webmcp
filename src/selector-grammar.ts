@@ -10,8 +10,9 @@
  * checks against the real rewriter) is one-directional: whatever this accepts,
  * lol-html accepts too. Being stricter than lol-html is fine.
  *
- *   selector      := complex ("," complex)*          (list only when allowed, or inside :not)
+ *   selector      := complex ("," complex)*          (list only when allowed)
  *   complex       := [">"] compound (combinator compound)*
+ *   not-list      := compound ("," compound)*        (inside :not; no combinators)
  *   combinator    := whitespace | ">"
  *   compound      := (type | "*") (#id | .class | [attr] | :pseudo)*
  *   type, id, class, attr name: CSS identifier, no escapes, no namespace (`ns|x`)
@@ -20,7 +21,7 @@
  *                    case flag ` i` or ` s`
  *   :pseudo       := :first-child | :first-of-type          (no argument)
  *                  | :nth-child(an+b) | :nth-of-type(an+b)  (an+b, odd, even)
- *                  | :not(<selector list>)                  (non-empty)
+ *                  | :not(not-list)                         (non-empty)
  *
  * Rejected: the sibling combinators `+` and `~`, `::pseudo-elements`, `:has()`
  * and every other pseudo-class, comments, backslash escapes, namespaces, unquoted
@@ -30,7 +31,8 @@
  * alphabet. Whitespace is space, tab, LF, CR and FF only.
  *
  * Also rejected, each because the real rewriter fails on it (see the ground-truth
- * test): uppercase ASCII letters in an attribute NAME (lol-html throws "explicit
+ * test): a combinator inside `:not()` (workerd 1.20260815 and 1.20261001 refuse
+ * `:not(a b)` and `:not(a > b)`; older builds took them), uppercase ASCII letters in an attribute NAME (lol-html throws "explicit
  * namespaces" once an operator follows; HTML attribute names match
  * case-insensitively, so lowercase loses nothing), lone UTF-16 surrogates, and
  * selectors over 1024 characters or 64 compounds (a chain of a few thousand
@@ -72,6 +74,8 @@ const LIST_MESSAGE =
   "selector lists (top-level commas) are not supported here; give each form its own [[forms]] entry and each param its own [[forms.params]] entry";
 const END_COMBINATOR_MESSAGE = "selector must not end with a combinator";
 const DOUBLE_COMBINATOR_MESSAGE = "selector has two combinators in a row";
+const NOT_COMBINATOR_MESSAGE =
+  "`:not()` takes compound selectors only in Cloudflare HTMLRewriter: write `:not(.a)` or `:not(.a, .b)`, not `:not(.a .b)` or `:not(a > b)`";
 const NAMESPACE_MESSAGE = "namespaced selectors (`ns|name`) are not supported by Cloudflare HTMLRewriter";
 const BACKSLASH_MESSAGE =
   'backslash escapes are not supported; match the attribute instead, e.g. [class~="sm:flex"] or [id="123"]';
@@ -164,7 +168,7 @@ class Parser {
   private list(inNot: boolean, leadingAllowed: boolean, depth: number): void {
     let leading = leadingAllowed;
     for (;;) {
-      this.complex(leading, depth);
+      this.complex(leading, depth, inNot);
       leading = false;
       this.ws();
       if (this.peek() !== ",") return;
@@ -175,7 +179,7 @@ class Parser {
     }
   }
 
-  private complex(leadingAllowed: boolean, depth: number): void {
+  private complex(leadingAllowed: boolean, depth: number, inNot: boolean): void {
     this.ws();
     const first = this.peek();
     if (first === ">") {
@@ -192,6 +196,8 @@ class Parser {
       const hadWhitespace = this.ws();
       if (this.atListEnd()) return;
       const c = this.peek()!;
+      if (c === "+" || c === "~") fail(siblingMessage(c));
+      if (inNot && (c === ">" || hadWhitespace)) fail(NOT_COMBINATOR_MESSAGE);
       if (c === ">") {
         this.i++;
         this.ws();
@@ -200,7 +206,6 @@ class Parser {
         this.compound(depth);
         continue;
       }
-      if (c === "+" || c === "~") fail(siblingMessage(c));
       if (!hadWhitespace) this.unexpected();
       this.compound(depth);
     }
