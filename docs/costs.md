@@ -13,6 +13,8 @@ Rough numbers for `cf-webmcp` on Cloudflare. These are publisher-facing operatio
 
 Workers Paid includes 50ms CPU per request and faster cold starts. CPU time per Worker invocation in this project is well under 10ms for the manifest, landing, bootstrap, and health routes. Executor calls that fetch from origin spend most of their time waiting on the network, not on CPU.
 
+With `CF_WEBMCP_DEPLOY_TOKEN` set, the merge routes search everything they answer for the token as it streams (see [Merge routes and the 1 MiB cap](deployment.md#merge-routes-and-the-1-mib-cap)), at about 3 ms of CPU per MiB (2 to 5 ms measured in the local Workers runtime for JSON, HTML and text, up to 7 ms for a body of hex digits). The Free plan allows 10 ms of CPU per request, and a relay of an origin file over the 1 MiB cap pays this for every MiB it relays, so a relay of a few MiB can go over on the search alone.
+
 ### Sketch math
 
 - Small blog, 10k pageviews/day, full-proxy mode: ~10k Worker requests/day. Free tier.
