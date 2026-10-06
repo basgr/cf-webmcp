@@ -113,7 +113,14 @@ describe("apiCatalogResponse", () => {
       new Response(text, { status: 200, headers: { "content-type": PROFILE } }),
     );
     expect(again.headers.get("content-type")).toBe(PROFILE);
-    expect(await again.text()).toBe(text);
+    // The same document. A merged catalog is written without indentation, the synthesized one
+    // with it, so the bytes differ; merging the merged catalog again gives the same bytes.
+    const merged = await again.text();
+    expect(JSON.parse(merged)).toEqual(JSON.parse(text));
+    const third = await apiCatalogResponse(new Request("https://example.com/.well-known/api-catalog"), config, async () =>
+      new Response(merged, { status: 200, headers: { "content-type": PROFILE } }),
+    );
+    expect(await third.text()).toBe(merged);
   });
 
   it("synthesize mode ignores origin entirely", async () => {
@@ -294,5 +301,43 @@ describe("tryMerge", () => {
     const first = tryMerge(empty, our)!;
     const second = tryMerge(first, our)!;
     expect(second).toBe(first);
+  });
+});
+
+describe("origin JSON nested too deeply", () => {
+  const PROFILE = 'application/linkset+json; profile="https://www.rfc-editor.org/info/rfc9727"';
+  /** A valid linkset nested `depth` levels deep: object, linkset array, entry object, then arrays. */
+  const nestedLinkset = (depth: number) =>
+    `{"linkset":[{"anchor":"https://other.example/","x":${"[".repeat(depth - 3)}${"]".repeat(depth - 3)}}]}`;
+  const serve = (text: string) => async () =>
+    new Response(text, { status: 200, headers: { "content-type": "application/linkset+json" } });
+  const call = (text: string) =>
+    apiCatalogResponse(new Request("https://example.com/.well-known/api-catalog"), makeConfig(), serve(text));
+
+  // 2,000 levels in 4 KB made JSON.stringify throw RangeError, and the route threw with it.
+  it.each([2_000, 65])("tryMerge refuses a document %i levels deep, without throwing", (depth) => {
+    expect(tryMerge(nestedLinkset(depth), OUR_ENTRY)).toBeNull();
+  });
+
+  it.each([2_000, 65])("a document %i levels deep gets the synthesized catalog, as one that does not parse", async (depth) => {
+    const res = await call(nestedLinkset(depth));
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toBe(PROFILE);
+    expect(res.headers.get("x-robots-tag")).toBe("noindex");
+    expect(JSON.parse(await res.text())).toEqual({ linkset: [OUR_ENTRY] });
+  });
+
+  it("a document exactly 64 levels deep is merged", async () => {
+    const res = await call(nestedLinkset(64));
+    const anchors = JSON.parse(await res.text()).linkset.map((e: { anchor: string }) => e.anchor);
+    expect(anchors).toEqual(["https://other.example/", OUR_ENTRY.anchor]);
+  });
+
+  it("the merged catalog is written without indentation, so its size follows origin's", () => {
+    const text = JSON.stringify({ linkset: [{ anchor: "https://other.example/", x: [[[[[[[[Array(5_000).fill(0)]]]]]]]] }] });
+    const merged = tryMerge(text, OUR_ENTRY)!;
+    expect(merged.endsWith("\n")).toBe(true);
+    expect(merged.slice(0, -1)).not.toContain("\n");
+    expect(merged.length).toBeLessThan(text.length + 200);
   });
 });

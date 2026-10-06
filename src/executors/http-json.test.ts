@@ -204,6 +204,41 @@ describe("runHttpJson", () => {
   });
 });
 
+describe("runHttpJson: origin JSON nested too deeply", () => {
+  const nested = (depth: number) => "[".repeat(depth) + "]".repeat(depth);
+  const answer = (text: string) =>
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(text, { status: 200, headers: { "content-type": "application/json" } })),
+    );
+  const raw = { url_template: "https://example.com/x", method: "GET" as const };
+
+  // 2,000 levels in 4 KB are enough to make a serialiser that recurses per level throw.
+  it.each([2_000, 65])("an answer %i levels deep is schema_mismatch with a fixed message", async (depth) => {
+    answer(nested(depth));
+    const r = await runHttpJson(ctx, raw, {});
+    expect(r).toEqual({
+      ok: false,
+      error: { code: "schema_mismatch", message: "origin's JSON is nested more than 64 levels deep", retriable: false },
+    });
+  });
+
+  it("an answer exactly 64 levels deep is returned", async () => {
+    answer(nested(64));
+    const r = await runHttpJson(ctx, raw, {});
+    if (!r.ok) throw new Error(JSON.stringify(r));
+    let depth = 0;
+    for (let v: unknown = r.data; Array.isArray(v); v = v[0]) depth++;
+    expect(depth).toBe(64);
+  });
+
+  it("brackets inside strings do not count, escaped quotes included", async () => {
+    answer(JSON.stringify({ text: "[".repeat(500) + '\\"' + "{".repeat(500) }));
+    const r = await runHttpJson(ctx, raw, {});
+    expect(r.ok).toBe(true);
+  });
+});
+
 describe("runHttpJson: POST", () => {
   const post = { url_template: "https://example.com/wp-json/contact/v1/send", method: "POST" as const };
   /** What the tool declares: the body is built from these properties only. */

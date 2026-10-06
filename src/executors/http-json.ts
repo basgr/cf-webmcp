@@ -9,6 +9,9 @@
  *
  * `fields` maps agent-facing names to dotted paths into the response.
  *
+ * An answer that nests arrays and objects more than 64 levels deep is not parsed: it answers
+ * schema_mismatch with a fixed message (src/origin-json.ts).
+ *
  * method:
  *   - "GET"  : no body.
  *   - "POST" : the properties of the validated tool input that the tool's input_schema declares
@@ -26,6 +29,7 @@ import type { ExecutorContext } from "./common";
 import { fromErr, mapOriginStatus, originFetch, readFailure, readWithLimit, resolveUrl } from "./common";
 import { err, ok, type Envelope } from "../envelope";
 import { declaredProperties, type DeclaredProperties } from "../validate";
+import { MAX_JSON_DEPTH, parseOriginJson } from "../origin-json";
 
 /** Largest JSON body we will read and parse. */
 export const MAX_JSON_BYTES = 2 * 1024 * 1024;
@@ -64,15 +68,19 @@ export async function runHttpJson(
   const body = await readWithLimit(res, MAX_JSON_BYTES, ctx.signal);
   if (!body.ok) return fromErr(readFailure(body, ctx, MAX_JSON_BYTES, "response"));
 
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(body.text);
-  } catch (e) {
+  // Nesting is bounded before the parse: the answer goes back out in the envelope, and a
+  // serialiser recurses once per level (src/origin-json.ts).
+  const json = parseOriginJson(body.text);
+  if (!json.ok && json.reason === "too_deep") {
+    return err("schema_mismatch", `origin's JSON is nested more than ${MAX_JSON_DEPTH} levels deep`, false);
+  }
+  if (!json.ok) {
     // The parser's message quotes the origin's bytes ("Unexpected token <, ..."); keep it
     // out of the envelope the agent sees and log it instead.
-    console.error(`cf-webmcp: http_json origin response is not valid JSON: ${(e as Error).message}`);
+    console.error(`cf-webmcp: http_json origin response is not valid JSON: ${json.message}`);
     return err("schema_mismatch", "origin did not return valid JSON", false);
   }
+  const parsed = json.value;
 
   const proj = config.project ?? { type: "raw" };
   switch (proj.type) {

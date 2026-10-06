@@ -53,7 +53,7 @@ api_catalog_sie      = 86400
 
 | Mode | What happens | When to use |
 |------|--------------|-------------|
-| `merge` (default) | Fetch origin's `/.well-known/api-catalog`. If it returns valid Linkset JSON, splice our entry in (idempotent: re-running produces byte-identical output). On 404, unparseable JSON, or non-linkset JSON, fall back to synthesize. Origin's catalog is read up to 1 MiB: a larger one is relayed as it came, and one whose body fails mid-read is answered with the synthesized catalog for a minute (see [Merge routes and the 1 MiB cap](deployment.md#merge-routes-and-the-1-mib-cap)). | You may already publish other APIs (OpenAPI, AsyncAPI, etc.) in the same catalog. cf-webmcp adds itself without overwriting them. |
+| `merge` (default) | Fetch origin's `/.well-known/api-catalog`. If it returns valid Linkset JSON, splice our entry in (idempotent: re-running produces byte-identical output). On 404, unparseable JSON, JSON nested more than 64 levels deep, or non-linkset JSON, fall back to synthesize. Origin's catalog is read up to 1 MiB: a larger one is relayed as it came, and one whose body fails mid-read is answered with the synthesized catalog for a minute (see [Merge routes and the 1 MiB cap](deployment.md#merge-routes-and-the-1-mib-cap)). | You may already publish other APIs (OpenAPI, AsyncAPI, etc.) in the same catalog. cf-webmcp adds itself without overwriting them. |
 | `synthesize` | Ignore origin. Emit a fresh catalog with only our entry. | You don't publish other APIs in a catalog. Simplest setup. |
 | `replace` | Same as `synthesize`. (cf-webmcp emits exactly one entry, so the difference between replace and synthesize would only matter for multi-entry generators; kept for parity with other discovery routes.) | Use `synthesize` for clarity. |
 | `passthrough` | The route is not registered. Origin owns the file 100%. | You want to manage the catalog entirely outside cf-webmcp. |
@@ -69,9 +69,9 @@ When `mode = "merge"`:
    - If not found, appends our entry as a new linkset element.
 3. If origin returns **404**, the Worker emits a fresh single-entry catalog (same as synthesize).
 4. If origin returns **200 with a non-JSON content-type** (e.g. `text/html`, suggesting a SPA 404 page), the Worker passes the response through unchanged rather than risk overwriting publisher content.
-5. If origin returns **valid JSON that is not a linkset** (no `linkset` array, or malformed entries), the Worker falls back to synthesize.
+5. If origin returns **valid JSON that is not a linkset** (no `linkset` array, or malformed entries), the Worker falls back to synthesize. So does JSON nested more than 64 levels deep (arrays and objects counted together): the Worker does not parse it, since writing such a document out again can exhaust the runtime's stack.
 
-Output is canonicalised: 2-space indent, object keys sorted alphabetically, trailing newline. Byte-stable across re-runs.
+Output is canonicalised: object keys sorted alphabetically and a trailing newline. The synthesized catalog has a 2-space indent; a merged one has no indentation, so it stays about as large as origin's document. Byte-stable across re-runs: merging the merged catalog again gives the same bytes.
 
 The `Content-Type` follows RFC 9727 section 4.2: `application/linkset+json` (a MUST) with the `profile` parameter naming the RFC (a SHOULD; the example in appendix A.1 shows the header above). Origin's own catalog is accepted with or without the parameter.
 

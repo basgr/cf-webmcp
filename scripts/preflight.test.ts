@@ -634,8 +634,32 @@ describe("preflight: the ARD manifest (ard.json) and its aliases", () => {
     expect(code).toBe(0);
     expect(result.collisions).toEqual([]);
     expect(result.warnings.filter((w) => w.startsWith("/.well-known/ard.json"))).toEqual([
-      "/.well-known/ard.json: origin's JSON is not an ARD manifest (an object with an entries array of objects with a string identifier); the Worker relays it unchanged and adds no entry",
+      "/.well-known/ard.json: origin's JSON is not an ARD manifest (an object with an entries array of objects with a string identifier, nested at most 64 levels deep); the Worker relays it unchanged and adds no entry",
     ]);
+  });
+
+  it("merge: an ARD document nested more than 64 levels deep is judged as the Worker judges it: relayed unchanged", async () => {
+    const rowOf = (lines: string[], label: string) => lines.find((l) => l.trimStart().startsWith(label));
+    const deep = (depth: number) =>
+      () =>
+        new Response(`{"entries":[{"identifier":"urn:air:example.com:agent:deep","x":${"[".repeat(depth - 3)}${"]".repeat(depth - 3)}}]}`, {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+    for (const depth of [2_000, 65]) {
+      vi.unstubAllGlobals();
+      stubGets({ [ARD]: deep(depth) });
+      const { code, result, lines } = await run(withMode("merge"));
+      expect(code, String(depth)).toBe(0);
+      expect(result.collisions).toEqual([]);
+      expect(rowOf(lines, "/.well-known/ard.json"), String(depth)).toContain("merge refused");
+      expect(result.warnings.filter((w) => w.startsWith("/.well-known/ard.json"))).toHaveLength(1);
+    }
+    vi.unstubAllGlobals();
+    stubGets({ [ARD]: deep(64) });
+    const { lines, result } = await run(withMode("merge"));
+    expect(rowOf(lines, "/.well-known/ard.json")).not.toContain("refused");
+    expect(result.warnings.filter((w) => w.startsWith("/.well-known/ard.json"))).toEqual([]);
   });
 
   it("merge: probes the predecessor path even when aliases is empty, because the merge reads it", async () => {
@@ -975,8 +999,24 @@ describe("preflight: a row is a merge only in a mode where the Worker merges, an
       expect(result.collisions).toEqual([]);
       expect(rowOf(lines, "/.well-known/api-catalog")).toContain("WARNING");
       expect(result.warnings.filter((w) => w.startsWith("/.well-known/api-catalog"))).toEqual([
-        "/.well-known/api-catalog: origin's JSON is not an RFC 9264 linkset (an object with a linkset array of objects with a string anchor); the Worker serves its generated catalog instead of it",
+        "/.well-known/api-catalog: origin's JSON is not an RFC 9264 linkset (an object with a linkset array of objects with a string anchor, nested at most 64 levels deep); the Worker serves its generated catalog instead of it",
       ]);
+    });
+
+    it("a linkset nested more than 64 levels deep is the same warning, as the Worker serves its own catalog for it", async () => {
+      const nested = (depth: number) =>
+        `{"linkset":[{"anchor":"https://example.com/api","x":${"[".repeat(depth - 3)}${"]".repeat(depth - 3)}}]}`;
+      for (const depth of [2_000, 65]) {
+        vi.unstubAllGlobals();
+        stubGets({ [API]: answer(bytes(nested(depth)), "application/json") });
+        const { code, result, lines } = await run(MINIMAL);
+        expect(code, String(depth)).toBe(0);
+        expect(rowOf(lines, "/.well-known/api-catalog"), String(depth)).toContain("WARNING");
+        expect(result.warnings.filter((w) => w.startsWith("/.well-known/api-catalog"))).toHaveLength(1);
+      }
+      vi.unstubAllGlobals();
+      stubGets({ [API]: answer(bytes(nested(64)), "application/json") });
+      expect(rowOf((await run(MINIMAL)).lines, "/.well-known/api-catalog")).toMatch(/ merge \(linkset/);
     });
 
     it("a body that is not JSON is the same warning", async () => {

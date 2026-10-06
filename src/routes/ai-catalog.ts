@@ -17,9 +17,10 @@
  *      object with an entries array of objects with a string identifier) gets
  *      our entry appended, unless origin already has an entry with our
  *      identifier or our url: origin's entry wins and ours is not added.
- *   3. A 200 declared as JSON that fails the check, one over 1 MiB, and any
- *      other 200 (HTML, text) is relayed unchanged (origin's bytes and headers)
- *      with noindex. It is origin's document, not ours to replace.
+ *   3. A 200 declared as JSON that fails the check or nests more than 64 levels
+ *      deep (src/origin-json.ts), one over 1 MiB, and any other 200 (HTML, text)
+ *      is relayed unchanged (origin's bytes and headers) with noindex. It is
+ *      origin's document, not ours to replace.
  *   4. A 404 at both paths gets the generated document with the normal cache.
  *      Any other final answer (a relayed redirect, a 4xx, a 5xx, the proxy's 502
  *      or 504) and a body that fails while it is read mean origin failed: the
@@ -33,6 +34,7 @@ import { buildCacheControl, sha256Hex } from "../cache";
 import { ARD_PREDECESSOR_PATH, isArdContentType, isArdDocument, type ArdEntryLike } from "../ard";
 import { MERGE_MAX_BYTES, ORIGIN_FAILURE_CACHE_CONTROL, declaredLength, readCapped, type CappedRead } from "./read-capped";
 import { redactBody, redactText } from "../redact";
+import { parseOriginJson } from "../origin-json";
 
 /**
  * `synthesizedEtag` is the strong ETag of `synthesizedBody`, computed at build time
@@ -181,17 +183,17 @@ async function mergeWithOrigin(
  * with the same identifier or the same url as one of ours is kept and ours is
  * not added, so nothing is duplicated and the publisher's own description wins.
  * Origin's other top-level members are kept as they are. Returns null when the
- * origin document is unparseable or fails the structural check (an object with
- * an entries array of objects with a string identifier; see isArdDocument for
- * why it is not a full schema validation).
+ * origin document is unparseable, nests arrays and objects more than
+ * MAX_JSON_DEPTH levels deep (src/origin-json.ts), or fails the structural check
+ * (an object with an entries array of objects with a string identifier; see
+ * isArdDocument for why it is not a full schema validation), and when the merged
+ * document cannot be written out: the route then relays origin's document, so
+ * nothing thrown here can escape it.
  */
 export function tryMergeAiCatalog(originText: string, synthesizedBody: string): string | null {
-  let origin: unknown;
-  try {
-    origin = JSON.parse(originText);
-  } catch {
-    return null;
-  }
+  const json = parseOriginJson(originText);
+  if (!json.ok) return null;
+  const origin = json.value;
   if (!isArdDocument(origin)) return null;
 
   const merged: ArdEntryLike[] = origin.entries.slice();
@@ -200,7 +202,11 @@ export function tryMergeAiCatalog(originText: string, synthesizedBody: string): 
     const listed = merged.some((e) => e.identifier === ours.identifier || (url !== undefined && e["url"] === url));
     if (!listed) merged.push(ours);
   }
-  return stringify({ ...origin, entries: merged });
+  try {
+    return stringify({ ...origin, entries: merged });
+  } catch {
+    return null;
+  }
 }
 
 /** The entries of our own generated document; none when it has none (agent_skills off) or cannot be read. */
@@ -214,12 +220,14 @@ function ourEntries(synthesizedBody: string): ArdEntryLike[] {
 }
 
 /**
- * Canonical JSON output: 2-space indent, sorted object keys, trailing newline.
- * Ensures re-running merge against our own output produces byte-identical
- * bytes (idempotency).
+ * Canonical JSON output of a merged document: sorted object keys, trailing newline,
+ * and no indentation, so it is about as large as origin's document (near the depth
+ * limit an indent multiplies it many times over). Ensures re-running merge against
+ * our own output produces byte-identical bytes (idempotency). The synthesized
+ * document is written at build time, with a 2-space indent.
  */
 function stringify(obj: unknown): string {
-  return JSON.stringify(obj, sortReplacer, 2) + "\n";
+  return JSON.stringify(obj, sortReplacer) + "\n";
 }
 
 function sortReplacer(_key: string, value: unknown): unknown {

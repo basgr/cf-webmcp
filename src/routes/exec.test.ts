@@ -110,6 +110,63 @@ describe("exec: executor exceptions", () => {
   });
 });
 
+describe("exec: an answer that cannot be serialised never throws out of the route", () => {
+  const JSON_TOOL: ConfigOverrides = {
+    tools: [{ name: "deep_json", description: "d", executor: { type: "http_json", url_template: "https://example.com/api/deep" } }],
+  };
+  const deepPost = () =>
+    new Request("https://example.com/_webmcp/exec/deep_json", { method: "POST", body: "{}", headers: { "content-type": "application/json" } });
+
+  it("an http_json answer 2,000 levels deep is schema_mismatch, with and without a deploy token", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response("[".repeat(2_000) + "]".repeat(2_000), { status: 200, headers: { "content-type": "application/json" } })),
+    );
+    for (const deployToken of ["", "0123456789abcdef0123456789abcdef"]) {
+      const res = await run(deepPost(), JSON_TOOL, { deployToken }, "deep_json");
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as ErrorBody).error).toEqual({
+        code: "schema_mismatch",
+        message: "origin's JSON is nested more than 64 levels deep",
+        retriable: false,
+      });
+    }
+  });
+
+  it("an envelope whose serialisation throws answers internal with a fixed message, and is not cached", async () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.stubGlobal("fetch", vi.fn(async () => sitemapOk()));
+    const original = JSON.stringify;
+    // A RangeError from the serialiser, as a document nested too deeply for it raises.
+    vi.spyOn(JSON, "stringify").mockImplementation(((value: unknown, ...rest: unknown[]) => {
+      if (value !== null && typeof value === "object" && (value as { ok?: unknown }).ok === true) {
+        throw new RangeError("Maximum call stack size exceeded");
+      }
+      return (original as (...args: unknown[]) => string).call(JSON, value, ...rest);
+    }) as typeof JSON.stringify);
+    const waitUntil = vi.fn();
+
+    for (const deployToken of ["", "0123456789abcdef0123456789abcdef"]) {
+      const res = await execResponse(
+        post(original({ query: "a" })),
+        makeConfig(),
+        "search_pages",
+        { domain: "example.com", deployToken, configHash: CONFIG_HASH, version: VERSION },
+        waitUntil,
+      );
+      expect(res.status).toBe(502);
+      expect(res.headers.get("x-robots-tag")).toBe("noindex");
+      expect(((await res.json()) as ErrorBody).error).toEqual({
+        code: "internal",
+        message: "the tool's answer could not be returned",
+        retriable: false,
+      });
+    }
+    expect(waitUntil).not.toHaveBeenCalled();
+    expect(errors).toHaveBeenCalled();
+  });
+});
+
 describe("exec: request body limit", () => {
   it("rejects a body over 64 KiB with invalid_input and never calls the origin", async () => {
     const fetchMock = vi.fn(async () => new Response("unexpected"));

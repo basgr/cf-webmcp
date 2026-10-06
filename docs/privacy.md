@@ -17,6 +17,7 @@ By default, **nothing identifying**. The Worker logs nothing about visitors (no 
 - a tool URL the Worker refused after resolving its `url_template`: for one that does not parse, the URL cut at its first `?` or `#`; for one whose origin is not in `allowed_origins`, that origin. The same for a `sitemap_url` or `feed_url` the Worker cannot use (the origin only);
 - an executor that threw: the tool name and the error message;
 - an `http_json` origin answer that is not valid JSON: the parser's message, which can quote the start of origin's body;
+- a tool answer that could not be serialised: the tool name and the error message;
 - an HTML injection error, or a selector that HTMLRewriter rejected: the error message and the selector;
 - a `CF_WEBMCP_DEPLOY_TOKEN` under 16 characters, which the Worker does not search its answers for: one warning per isolate, naming neither the token nor its length.
 

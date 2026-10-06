@@ -61,6 +61,7 @@ import { isMarkdownish as isSkillContentType } from "../src/routes/agent-skills.
 import { isLinksetContentType, parseLinkset } from "../src/routes/api-catalog.js";
 import { apiCatalogServed, skillsIndexServed } from "../src/served.js";
 import { MIN_REDACTED_LENGTH } from "../src/redact.js";
+import { MAX_JSON_DEPTH, parseOriginJson } from "../src/origin-json.js";
 import { preflightUserAgent } from "../src/user-agent.js";
 import { checkBaseUrlAllowed, configHashOf, resolveInherits } from "./build-config.js";
 
@@ -365,10 +366,10 @@ async function probe(check: PathCheck, deployToken: string | undefined, version:
         // Size first, as in the Worker: a document over the cap is relayed whatever it holds.
         const bytes = await readForMerge(res);
         if (bytes === "too_large") return { kind: "too_large", status: 200, contentType: ct, what: "document" };
-        let parsed: unknown;
-        try {
-          parsed = JSON.parse(new TextDecoder().decode(bytes));
-        } catch {
+        // Parsed as the Worker parses it (src/origin-json.ts): JSON nested more than 64 levels
+        // deep is relayed unchanged, like JSON that is not an ARD document.
+        const json = parseOriginJson(new TextDecoder().decode(bytes));
+        if (!json.ok && json.reason === "syntax") {
           return {
             kind: "collision",
             status: 200,
@@ -376,7 +377,7 @@ async function probe(check: PathCheck, deployToken: string | undefined, version:
             reason: `origin answers 200 ${ct || "(no content type)"} but the body is not JSON`,
           };
         }
-        return { kind: "merge_json", status: 200, contentType: ct, valid: isArdDocument(parsed) };
+        return { kind: "merge_json", status: 200, contentType: ct, valid: json.ok && isArdDocument(json.value) };
       }
       if (res.status !== 200) {
         // Not a document of origin's the Worker would shadow: on any other answer
@@ -666,13 +667,13 @@ export async function runPreflight(configPath: string, force: boolean, opts: Pre
       warnings.push(`${check.label}: merge marker absent at origin, will append on first deploy`);
     } else if (outcome.kind === "merge_json" && !outcome.valid) {
       warnings.push(
-        `${check.label}: origin's JSON is not an ARD manifest (an object with an entries array of objects with a string identifier); ` +
-          `the Worker relays it unchanged and adds no entry`,
+        `${check.label}: origin's JSON is not an ARD manifest (an object with an entries array of objects with a string identifier, ` +
+          `nested at most ${MAX_JSON_DEPTH} levels deep); the Worker relays it unchanged and adds no entry`,
       );
     } else if (outcome.kind === "merge_linkset" && !outcome.valid) {
       warnings.push(
-        `${check.label}: origin's JSON is not an RFC 9264 linkset (an object with a linkset array of objects with a string anchor); ` +
-          `the Worker serves its generated catalog instead of it`,
+        `${check.label}: origin's JSON is not an RFC 9264 linkset (an object with a linkset array of objects with a string anchor, ` +
+          `nested at most ${MAX_JSON_DEPTH} levels deep); the Worker serves its generated catalog instead of it`,
       );
     } else if (outcome.kind === "too_large") {
       warnings.push(

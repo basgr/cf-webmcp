@@ -145,9 +145,7 @@ async function execAnswer(
     timeoutMs: opts.timeoutMs ?? DEFAULT_TIMEOUT_MS,
   };
 
-  // The deploy token went to origin with the fetch; an origin that echoes request headers must
-  // not hand it to the caller (src/redact.ts). Redacted before it is answered or cached.
-  const envelope = redactEnvelope(await runWithDeadline(ctx, tool as ToolConfig, input), opts.deployToken);
+  const result = await runWithDeadline(ctx, tool as ToolConfig, input);
 
   const ttl = tool.cache ?? {};
   // A tool that does not use the cache says so to everything downstream as well: no-store.
@@ -159,12 +157,30 @@ async function execAnswer(
         sie: ttl.sie ?? config.cache.executor_defaults.sie,
       })
     : "no-store";
-  const response = jsonResponse(envelope, {
+  const init = {
     headers: {
       "cache-control": cc,
       "x-webmcp-cache": useCache ? "MISS" : "BYPASS",
     },
-  });
+  };
+
+  // The deploy token went to origin with the fetch; an origin that echoes request headers must
+  // not hand it to the caller (src/redact.ts). Redacted before it is answered or cached.
+  // Both steps serialise what origin sent. A serialiser recurses once per level of nesting, and
+  // http_json bounds that (src/origin-json.ts), but whatever is thrown here still ends as a
+  // fixed `internal` envelope, never as an exception out of the route.
+  let envelope: Envelope;
+  let response: Response;
+  try {
+    envelope = redactEnvelope(result, opts.deployToken);
+    response = jsonResponse(envelope, init);
+  } catch (e) {
+    console.error(
+      `cf-webmcp: the answer of tool "${tool.name}" could not be serialised: ${e instanceof Error ? e.message : String(e)}`,
+    );
+    envelope = err("internal", "the tool's answer could not be returned", false);
+    response = jsonResponse(envelope, init);
+  }
 
   // Only cache successful envelopes. Stored without CORS: those headers belong to
   // one caller, and execResponse adds them for each request, hits included.

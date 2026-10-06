@@ -522,3 +522,39 @@ describe("aiCatalogResponse (merge)", () => {
     }
   });
 });
+
+describe("aiCatalogResponse (merge): origin JSON nested too deeply", () => {
+  const cfgMerge = { ...cfg, ai_catalog: { ...cfg.ai_catalog, mode: "merge" as const } };
+  /** A valid ARD document nested `depth` levels deep: object, entries array, entry object, then arrays. */
+  const nestedDoc = (depth: number) =>
+    `{"entries":[{"identifier":"urn:air:example.com:agent:deep","x":${"[".repeat(depth - 3)}${"]".repeat(depth - 3)}}]}`;
+  const serve = (text: string) => async () => new Response(text, { status: 200, headers: { "content-type": "application/json" } });
+
+  // 2,000 levels in 4 KB made JSON.stringify throw RangeError, and the route threw with it.
+  it.each([2_000, 65])("a document %i levels deep is relayed as origin sent it, with noindex", async (depth) => {
+    const text = nestedDoc(depth);
+    const res = await aiCatalogResponse(req, cfgMerge, SYNTH_ONE, serve(text));
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toBe("application/json");
+    expect(res.headers.get("x-robots-tag")).toBe("noindex");
+    expect(res.headers.get("etag")).toBeNull();
+    expect(await res.text()).toBe(text);
+  });
+
+  it("a document exactly 64 levels deep is merged", async () => {
+    const res = await aiCatalogResponse(req, cfgMerge, SYNTH_ONE, serve(nestedDoc(64)));
+    expect(res.headers.get("content-type")).toBe(JSON_UTF8);
+    const ids = JSON.parse(await res.text()).entries.map((e: { identifier: string }) => e.identifier);
+    expect(ids).toEqual(["urn:air:example.com:agent:deep", OUR_ID]);
+  });
+
+  it("the merged document is written without indentation, so its size follows origin's", async () => {
+    const wide = { entries: [{ identifier: "urn:air:example.com:agent:wide", x: [[[[[[[[Array(5_000).fill(0)]]]]]]]] }] };
+    const text = JSON.stringify(wide);
+    const res = await aiCatalogResponse(req, cfgMerge, SYNTH_ONE, serve(text));
+    const body = await res.text();
+    expect(body.endsWith("\n")).toBe(true);
+    expect(body.slice(0, -1)).not.toContain("\n");
+    expect(body.length).toBeLessThan(text.length + SYNTH_ONE.length);
+  });
+});

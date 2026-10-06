@@ -2965,3 +2965,38 @@ describe("a deploy token too short to search for", () => {
     expect(body).not.toContain(token);
   });
 });
+
+describe("origin JSON nested 2,000 levels deep never throws out of a merge route", () => {
+  const tokenEnv: Env = { ...env, CF_WEBMCP_DEPLOY_TOKEN: "0123456789abcdef0123456789abcdef" };
+  const deep = "[".repeat(2_000) + "]".repeat(2_000);
+
+  it("the API catalog answers its synthesized catalog", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(`{"linkset":[{"anchor":"https://other.example/","x":${deep}}]}`, {
+        headers: { "content-type": "application/linkset+json" },
+      })),
+    );
+    const res = await call(createHandler(makeDeps()), "https://example.com/.well-known/api-catalog", undefined, tokenEnv);
+    const body = JSON.parse(await res.text()) as { linkset: Array<{ anchor: string }> };
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("x-robots-tag")).toBe("noindex");
+    expect(body.linkset.map((e) => e.anchor)).toEqual(["https://example.com/"]);
+  });
+
+  it("the ARD manifest relays origin's document as it came, with noindex", async () => {
+    const text = `{"entries":[{"identifier":"urn:air:example.com:agent:deep","x":${deep}}]}`;
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(text, { headers: { "content-type": "application/json" } })));
+    const res = await call(
+      createHandler(makeDeps({ features: { ai_catalog: true }, ai_catalog: { mode: "merge" } })),
+      "https://example.com/.well-known/ard.json",
+      undefined,
+      tokenEnv,
+    );
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("x-robots-tag")).toBe("noindex");
+    expect(await res.text()).toBe(text);
+  });
+});

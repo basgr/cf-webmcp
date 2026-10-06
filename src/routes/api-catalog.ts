@@ -19,12 +19,14 @@
  *
  * Merge reads origin's catalog through a 1 MiB cap (src/routes/read-capped.ts): a larger one
  * is relayed as origin sent it, with noindex; one whose body fails mid-read is answered with
- * the synthesized catalog, as when origin has no file, but cached for a minute only.
+ * the synthesized catalog, as when origin has no file, but cached for a minute only. A catalog
+ * nested more than 64 levels deep counts as one that does not parse (src/origin-json.ts).
  */
 
 import type { Config } from "../config-types";
 import { buildCacheControl } from "../cache";
 import { ORIGIN_FAILURE_CACHE_CONTROL, readTextCapped } from "./read-capped";
+import { parseOriginJson } from "../origin-json";
 
 interface LinkObject {
   href: string;
@@ -85,7 +87,7 @@ export async function apiCatalogResponse(
       } else {
         const merged = tryMerge(read.text, ourEntry);
         if (merged === null) {
-          // Origin file unparseable or not a linkset; fall back to synthesize.
+          // Origin file unparseable, nested too deeply or not a linkset; fall back to synthesize.
           body = stringify({ linkset: [ourEntry] });
         } else {
           body = merged;
@@ -123,17 +125,15 @@ function buildOurEntry(config: Config): LinksetEntry {
 }
 
 /**
- * The entries of origin's catalog, or null when the document is unparseable or does not look
- * like an RFC 9264 linkset (an object with a `linkset` array of objects with a string `anchor`).
+ * The entries of origin's catalog, or null when the document is unparseable, nests arrays and
+ * objects more than MAX_JSON_DEPTH levels deep (src/origin-json.ts), or does not look like an
+ * RFC 9264 linkset (an object with a `linkset` array of objects with a string `anchor`).
  * Preflight judges origin's file with this test too.
  */
 export function parseLinkset(originText: string): LinksetEntry[] | null {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(originText);
-  } catch {
-    return null;
-  }
+  const json = parseOriginJson(originText);
+  if (!json.ok) return null;
+  const parsed = json.value;
   if (!parsed || typeof parsed !== "object") return null;
   const linkset = (parsed as { linkset?: unknown }).linkset;
   if (!Array.isArray(linkset)) return null;
@@ -146,8 +146,10 @@ export function parseLinkset(originText: string): LinksetEntry[] | null {
 }
 
 /**
- * Parse origin's catalog and merge our entry in. Returns null when the origin
- * document is unparseable or does not look like an RFC 9264 linkset.
+ * Parse origin's catalog and merge our entry in. Returns null when the origin document is
+ * unparseable, nested more than MAX_JSON_DEPTH levels deep, or does not look like an RFC 9264
+ * linkset, and when the merged document cannot be written out: the route then serves its
+ * synthesized catalog, so nothing thrown here can escape it.
  */
 export function tryMerge(originText: string, ourEntry: LinksetEntry): string | null {
   const parsedEntries = parseLinkset(originText);
@@ -172,16 +174,28 @@ export function tryMerge(originText: string, ourEntry: LinksetEntry): string | n
     }
   }
 
-  return stringify({ linkset: entries });
+  try {
+    return stringifyMerged({ linkset: entries });
+  } catch {
+    return null;
+  }
 }
 
 /**
- * Canonical JSON output: 2-space indent, sorted object keys, trailing newline.
- * Ensures re-running merge against our own output produces byte-identical
- * bytes (idempotency).
+ * The synthesized catalog: 2-space indent, sorted object keys, trailing newline. Built from
+ * the config alone, so its size is ours.
  */
 function stringify(obj: unknown): string {
   return JSON.stringify(obj, sortReplacer, 2) + "\n";
+}
+
+/**
+ * A merged catalog: sorted object keys, trailing newline, no indentation, so it is about as
+ * large as origin's document (near the depth limit an indent multiplies it many times over).
+ * Merging this output again gives the same bytes (idempotency).
+ */
+function stringifyMerged(obj: unknown): string {
+  return JSON.stringify(obj, sortReplacer) + "\n";
 }
 
 function sortReplacer(_key: string, value: unknown): unknown {
