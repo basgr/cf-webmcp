@@ -2631,6 +2631,54 @@ describe("exec: error messages name no host and carry no runtime text", () => {
   });
 });
 
+describe("exec: an |optional placeholder never moves a caller's value into the path", () => {
+  const TOKEN = "0123456789abcdef0123456789abcdef";
+  const lookup = (url_template: string) =>
+    makeDeps({
+      tools: [
+        {
+          name: "lookup",
+          description: "Lookup.",
+          input_schema: { type: "object", required: ["a"], properties: { a: { type: "string" }, b: { type: "string" } } },
+          executor: { type: "http_get", url_template },
+        },
+      ],
+    });
+
+  async function exec(deps: ReturnType<typeof makeDeps>, input: Record<string, unknown>) {
+    const seen: Array<{ url: string; token: string | null }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const req = new Request(input as RequestInfo, init);
+        seen.push({ url: req.url, token: req.headers.get("cf-webmcp-deploy-token") });
+        return new Response("ok", { status: 200, headers: { "content-type": "text/plain" } });
+      }),
+    );
+    const res = await call(
+      createHandler(deps),
+      "https://example.com/_webmcp/exec/lookup",
+      { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input) },
+      { ...env, CF_WEBMCP_DEPLOY_TOKEN: TOKEN },
+    );
+    return { status: res.status, body: await res.text(), seen };
+  }
+
+  it("refuses a template whose |optional shares a parameter, and fetches nothing (it fetched /api-admin with the token)", async () => {
+    const { status, body, seen } = await exec(lookup("https://example.com/api?q={{a}}{{b|optional}}"), { a: "-admin" });
+    expect(status).toBe(400);
+    expect(JSON.parse(body).error.code).toBe("invalid_input");
+    expect(seen).toEqual([]);
+  });
+
+  it("fetches exactly /api?q=-admin when the optional parameter stands alone", async () => {
+    const { status, seen } = await exec(lookup("https://example.com/api?q={{a}}&b={{b|optional}}"), { a: "-admin" });
+    expect(status).toBe(200);
+    expect(seen).toEqual([{ url: "https://example.com/api?q=-admin", token: TOKEN }]);
+    expect(seen.some((s) => new URL(s.url).pathname !== "/api")).toBe(false);
+  });
+});
+
 describe("makeDeps: the exec cache never carries an answer from one test config to another", () => {
   it("derives CONFIG_HASH from the config, unless a test passes one", () => {
     const a = makeDeps({ site: { name: "A" } }).meta.CONFIG_HASH;

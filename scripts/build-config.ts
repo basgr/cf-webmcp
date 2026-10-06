@@ -27,7 +27,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import TOML from "@iarna/toml";
 import { ConfigSchema, type Config, type ToolConfig, type ExecutorConfig } from "../src/config-types.js";
-import { compileTemplate } from "../src/mini-language.js";
+import { compileTemplate, type CompiledTemplate } from "../src/mini-language.js";
 import { decodeOriginTrialToken, type OriginTrialPayload } from "../src/origin-trial.js";
 import { buildFrontmatter, buildSkillBody, skillName } from "../src/routes/agent-skills.js";
 import {
@@ -199,16 +199,32 @@ export function declaredInputWarnings(config: Config): string[] {
 }
 
 /**
+ * The keys of every `map:` placeholder of a template, by name (the first map of a name decides).
+ * A probe that sets such a placeholder to anything else only learns that the map has no entry.
+ */
+function mapKeysByName(compiled: CompiledTemplate): Map<string, readonly string[]> {
+  const out = new Map<string, readonly string[]>();
+  for (const slot of compiled.slots) {
+    if (slot.operator === "map" && !out.has(slot.name) && slot.mapKeys.length > 0) out.set(slot.name, slot.mapKeys);
+  }
+  return out;
+}
+
+/**
  * Sample inputs that exercise every URL template against the allow-list.
  * The check is paranoid by design: if a template can ever resolve outside
  * allowed_origins, build fails.
+ *
+ * Every placeholder is set, once to a benign and once to a hostile value, and a `map:`
+ * placeholder to each of its keys in turn (one round per key of the longest map), so every value
+ * a map writes is checked too. Such an input satisfies every operator, so a resolver that throws
+ * on it is a template that cannot be resolved at all: a build error naming the tool, never a
+ * skipped probe. (The probes used to set a map placeholder to "/x" as well, which threw, and
+ * the throw was skipped: map values were never checked.) The empty input, which leaves out the
+ * required values too, still throws by design and is skipped.
  */
 function checkAllowList(config: Config): void {
   const allowed = new Set(config.origin.allowed_origins.map((u) => new URL(u).origin));
-  const probeInputs: Record<string, unknown>[] = [
-    {}, // missing-everything path (tests defaults and optional)
-    // single-attempt probe that fills every known param with an evil value
-  ];
 
   for (const tool of config.tools) {
     if (
@@ -220,25 +236,34 @@ function checkAllowList(config: Config): void {
     }
     const template = tool.executor.url_template;
     const compiled = compileTemplate(template);
+    const maps = mapKeysByName(compiled);
+    const rounds = Math.max(1, ...[...maps.values()].map((keys) => keys.length));
+    const filled = (value: string, round: number): Record<string, unknown> =>
+      Object.fromEntries(
+        compiled.params.map((p) => {
+          const keys = maps.get(p);
+          return [p, keys ? keys[round % keys.length]! : value];
+        }),
+      );
 
-    // Build a probe input that fills every param with both a benign and a hostile value.
-    const benign: Record<string, unknown> = {};
-    const hostile: Record<string, unknown> = {};
-    for (const p of compiled.params) {
+    // The empty input: defaults and missing optional parameters (the required ones throw).
+    const tries: Array<{ input: Record<string, unknown>; mustResolve: boolean }> = [{ input: {}, mustResolve: false }];
+    for (let round = 0; round < rounds; round++) {
       // Leading "/" so path-position params don't fuse with the host
       // (e.g. "https://example.com{{path}}" with path="x" → "example.comx").
-      benign[p] = "/x";
-      hostile[p] = "https://evil.example.com/";
+      tries.push({ input: filled("/x", round), mustResolve: true });
+      tries.push({ input: filled("https://evil.example.com/", round), mustResolve: true });
     }
-
-    const tries = [{}, benign, hostile, ...probeInputs];
-    for (const input of tries) {
+    for (const { input, mustResolve } of tries) {
       let resolved: string;
       try {
         resolved = compiled.resolver(input);
-      } catch {
-        // Missing required params throw; that is fine, not an allow-list failure.
-        continue;
+      } catch (e) {
+        if (!mustResolve) continue;
+        throw new Error(
+          `[build-config] tool "${tool.name}" (${tool.executor.type}) url_template ${JSON.stringify(template)} cannot be resolved ` +
+            `with every placeholder set, so the allow-list check cannot judge it: ${(e as Error).message}`,
+        );
       }
       let parsed: URL;
       try {
@@ -2035,7 +2060,8 @@ export async function buildConfig(opts: BuildOptions): Promise<void> {
   const config = parsed.data;
   noticeUnsetFallbackWidget(merged);
 
-  // Compile every url_template to surface mini-language errors at build time,
+  // Compile every url_template to surface mini-language errors at build time (an unknown
+  // operator, an |optional that is not the whole value of a query parameter), naming the tool,
   // and check allow-list.
   for (const tool of config.tools) {
     if (
@@ -2043,7 +2069,13 @@ export async function buildConfig(opts: BuildOptions): Promise<void> {
       tool.executor.type === "http_json" ||
       tool.executor.type === "http_get"
     ) {
-      compileTemplate(tool.executor.url_template); // throws on bad template
+      try {
+        compileTemplate(tool.executor.url_template);
+      } catch (e) {
+        throw new Error(
+          `[build-config] tool "${tool.name}" (${tool.executor.type}) url_template ${JSON.stringify(tool.executor.url_template)}: ${(e as Error).message}`,
+        );
+      }
     }
   }
   checkBaseUrlAllowed(config);

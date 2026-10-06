@@ -2921,6 +2921,79 @@ ${executor}
   });
 });
 
+describe("an |optional placeholder must be the whole value of its query parameter", () => {
+  const lookup = (template: string, extra = "") => `${MINIMAL}
+[[tools]]
+name        = "lookup"
+description = "Lookup."
+
+  [tools.input_schema]
+  type     = "object"
+  required = ["a"]
+
+    [tools.input_schema.properties.a]
+    type = "string"
+
+    [tools.input_schema.properties.b]
+    type = "string"
+${extra}
+  [tools.executor]
+  type         = "http_get"
+  url_template = ${JSON.stringify(template)}
+`;
+  const buildError = async (toml: string): Promise<Error> =>
+    (await runBuild(await writeToml("opt.toml", toml)).then(
+      () => new Error("built"),
+      (e: Error) => e,
+    )) as Error;
+
+  // The resolver cut a dropped parameter out with offsets from the template, after an earlier
+  // splice had moved the text: the first of these sent a caller's "-admin" into the path
+  // (https://example.com/api-admin, with the deploy token); the others dropped a fixed parameter,
+  // a required value or the whole query.
+  it.each([
+    ["https://example.com/api?q={{a}}{{b|optional}}", "must be the whole value of its query parameter"],
+    ["https://example.com/api?q={{a}}-{{b|optional}}&z=1", "must be the whole value of its query parameter"],
+    ["https://example.com/api?q={{b|optional}}{{a}}", "must be the whole value of its query parameter"],
+    ["https://example.com/api?x=1#{{b|optional}}", "sits in the fragment"],
+    ["https://example.com/api?x=1&q={{a}}#{{b|optional}}", "sits in the fragment"],
+    ["https://example.com/api/{{b|optional}}?q={{a}}", "sits in the path"],
+  ])("refuses %s, naming the tool and the placeholder", async (template, why) => {
+    const err = await buildError(lookup(template));
+    expect(err.message).toMatch(/^\[build-config\] tool "lookup" \(http_get\) url_template /);
+    expect(err.message).toContain(JSON.stringify(template));
+    expect(err.message).toContain(`{{b|optional}} ${why}`);
+  });
+
+  it("builds optional parameters that stand alone, any number of them", async () => {
+    await expect(
+      runBuild(await writeToml("opt-ok.toml", lookup("https://example.com/api?q={{a}}&b={{b|optional}}&c={{c|optional}}#top", "    [tools.input_schema.properties.c]\n    type = \"string\"\n"))),
+    ).resolves.toBeDefined();
+  });
+
+  it("checks every value of a map: against allowed_origins (the probes used to throw on a map and skip it)", async () => {
+    const toml = `${MINIMAL}
+[[tools]]
+name        = "hop"
+description = "Hop."
+
+  [tools.input_schema]
+  type     = "object"
+  required = ["site"]
+
+    [tools.input_schema.properties.site]
+    type = "string"
+    enum = ["main", "other"]
+
+  [tools.executor]
+  type         = "http_get"
+  url_template = "https://{{site|map:main=example.com,other=evil.example.net}}/api?q=1"
+`;
+    const err = await buildError(toml);
+    expect(err.message).toMatch(/tool "hop" url_template can resolve to origin https:\/\/evil\.example\.net/);
+  });
+});
+
 describe("input_schema property names that no object may carry", () => {
   const withProperty = (name: string): string =>
     MINIMAL.replace(

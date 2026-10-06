@@ -107,9 +107,98 @@ describe("compileTemplate", () => {
     expect(() => c.resolver({ s: "c" })).toThrow(/no entry for key "c"/);
   });
 
-  it("forbids optional in path position", () => {
-    const c = compileTemplate("https://example.com/{{slug|optional}}/x");
-    expect(() => c.resolver({})).toThrow(/cannot omit/);
+  it("forbids optional in path position, when the template is compiled", () => {
+    expect(() => compileTemplate("https://example.com/{{slug|optional}}/x")).toThrow(/\{\{slug\|optional\}\} sits in the path/);
+  });
+});
+
+describe("an |optional placeholder must be the whole value of its query parameter", () => {
+  // Dropping the parameter takes everything between its `?` or `&` and the next `&` with it, so
+  // anything else in that parameter would go too, and the old resolver cut it out with offsets
+  // taken from the template after an earlier splice had moved the text (a caller's "-admin" ended
+  // up in the path).
+  it.each([
+    ["shares its parameter with a required placeholder before it", "https://example.com/api?q={{a}}{{b|optional}}"],
+    ["shares its parameter with text and a later parameter", "https://example.com/api?q={{a}}-{{b|optional}}&z=1"],
+    ["shares its parameter with a required placeholder after it", "https://example.com/api?q={{b|optional}}{{a}}"],
+    ["has fixed text after it in its parameter", "https://example.com/api?q={{b|optional}}x"],
+    ["has fixed text in front of it in its value", "https://example.com/api?q=x{{b|optional}}"],
+    ["is a value after a second =", "https://example.com/api?q=a={{b|optional}}"],
+    ["has no key", "https://example.com/api?{{b|optional}}"],
+    ["has an empty key", "https://example.com/api?={{b|optional}}"],
+    ["has a placeholder for a key", "https://example.com/api?{{k}}={{b|optional}}"],
+  ])("refuses one that %s, naming the placeholder", (_label, template) => {
+    expect(() => compileTemplate(template)).toThrow(/\{\{b\|optional\}\} must be the whole value of its query parameter/);
+  });
+
+  it("refuses one in the fragment", () => {
+    expect(() => compileTemplate("https://example.com/api?x=1#{{b|optional}}")).toThrow(/\{\{b\|optional\}\} sits in the fragment/);
+    expect(() => compileTemplate("https://example.com/api#k={{b|optional}}")).toThrow(/\{\{b\|optional\}\} sits in the fragment/);
+  });
+
+  it("refuses one in the path, also after another placeholder", () => {
+    expect(() => compileTemplate("https://example.com/api/{{a}}/{{b|optional}}?q=1")).toThrow(/\{\{b\|optional\}\} sits in the path/);
+  });
+
+  it("never echoes the rest of the template's query beyond the parameter", () => {
+    let message = "";
+    try {
+      compileTemplate("https://example.com/api?q={{a}}{{b|optional}}&secret=1");
+    } catch (e) {
+      message = (e as Error).message;
+    }
+    expect(message).toContain('"q={{a}}{{b|optional}}"');
+    expect(message).not.toContain("secret");
+  });
+
+  const three = compileTemplate("https://example.com/p?a={{a|optional}}&b={{b|optional}}&c={{c|optional}}");
+  it.each([
+    [{}, "https://example.com/p"],
+    [{ a: "1" }, "https://example.com/p?a=1"],
+    [{ b: "2" }, "https://example.com/p?b=2"],
+    [{ c: "3" }, "https://example.com/p?c=3"],
+    [{ a: "1", b: "2" }, "https://example.com/p?a=1&b=2"],
+    [{ a: "1", c: "3" }, "https://example.com/p?a=1&c=3"],
+    [{ b: "2", c: "3" }, "https://example.com/p?b=2&c=3"],
+    [{ a: "1", b: "2", c: "3" }, "https://example.com/p?a=1&b=2&c=3"],
+    [{ a: "", b: null, c: "3" }, "https://example.com/p?c=3"],
+  ])("three optional parameters, %j, resolve to %s", (input, expected) => {
+    expect(three.resolver(input)).toBe(expected);
+  });
+
+  const mixed = compileTemplate("https://example.com/p/{{id}}?x=1&a={{a|optional}}&q={{q}}&b={{b|optional}}&n={{n|default:5}}#top");
+  it.each([
+    [{ id: "7", q: "-admin" }, "https://example.com/p/7?x=1&q=-admin&n=5#top"],
+    [{ id: "7", q: "s", a: "a b" }, "https://example.com/p/7?x=1&a=a%20b&q=s&n=5#top"],
+    [{ id: "7", q: "s", b: "&z=1" }, "https://example.com/p/7?x=1&q=s&b=%26z%3D1&n=5#top"],
+    [{ id: "7", q: "s", a: "1", b: "2", n: 9 }, "https://example.com/p/7?x=1&a=1&q=s&b=2&n=9#top"],
+  ])("optional parameters between fixed and required ones, %j, resolve to %s", (input, expected) => {
+    expect(mixed.resolver(input)).toBe(expected);
+  });
+
+  it("keeps the fragment when it drops the last parameter", () => {
+    const c = compileTemplate("https://example.com/p?a={{a|optional}}#top");
+    expect(c.resolver({})).toBe("https://example.com/p#top");
+    expect(c.resolver({ a: "1" })).toBe("https://example.com/p?a=1#top");
+  });
+
+  it("keeps the template's empty parameters as written", () => {
+    expect(compileTemplate("https://example.com/p?a={{a|optional}}&").resolver({})).toBe("https://example.com/p?");
+    expect(compileTemplate("https://example.com/p?&a={{a|optional}}").resolver({})).toBe("https://example.com/p?");
+    expect(compileTemplate("https://example.com/p?x=1&&a={{a|optional}}").resolver({})).toBe("https://example.com/p?x=1&");
+  });
+
+  it("splits parameters on the template's own &, never on one inside a default", () => {
+    const c = compileTemplate("https://example.com/p?d={{d|default:x&y}}&a={{a|optional}}");
+    expect(c.resolver({})).toBe("https://example.com/p?d=x%26y");
+    expect(c.resolver({ a: "1" })).toBe("https://example.com/p?d=x%26y&a=1");
+  });
+
+  it("never lets a caller's value reach the path, whichever parameters are dropped", () => {
+    const c = compileTemplate("https://example.com/api?a={{a|optional}}&q={{q}}&b={{b|optional}}");
+    for (const input of [{ q: "-admin" }, { q: "-admin", a: "x" }, { q: "-admin", b: "x" }, { q: "/../admin" }]) {
+      expect(new URL(c.resolver(input)).pathname, JSON.stringify(input)).toBe("/api");
+    }
   });
 });
 
@@ -186,10 +275,10 @@ describe("a path-position placeholder cannot carry a dot segment", () => {
     expect(new URL(path.resolver({ id: "a%2Fb" })).pathname).toBe("/api/a%252Fb");
   });
 
-  it("applies to every operator that takes the caller's value: required, optional and default", () => {
+  it("applies to every operator that takes the caller's value in a path: required and default (optional cannot sit there)", () => {
     expect(() => compileTemplate("https://example.com/a/{{x|default:safe}}").resolver({ x: ".." })).toThrow(/path segment/);
-    expect(() => compileTemplate("https://example.com/a/{{x|optional}}").resolver({ x: ".." })).toThrow(/path segment/);
     expect(() => compileTemplate("https://example.com/a/{{x}}").resolver({ x: ".." })).toThrow(/path segment/);
+    expect(() => compileTemplate("https://example.com/a/{{x|optional}}")).toThrow(/sits in the path/);
   });
 
   it("does not judge what the publisher wrote: a default and a map value are the template's own", () => {
@@ -264,6 +353,21 @@ describe("the static path prefix of a template", () => {
 
   it("has none for a template without a placeholder: there is nothing to contain", () => {
     expect(compileTemplate("https://example.com/static/page").pathPrefix).toBeNull();
+  });
+
+  it.each([
+    ["https://example.com/api/items?x={{q}}", true],
+    ["https://example.com/api?q={{a}}&b={{b|optional}}", true],
+    ["https://example.com/page#{{frag}}", true],
+    ["https://example.com?q={{q}}", true],
+    ["https://example.com/api/{{id}}?q={{q}}", false],
+    ["https://example.com{{path}}", false],
+    ["https://{{host}}.example.com/x?q={{q}}", false],
+    ["https://example.com/static/page", false],
+  ])("%s fixes the whole path: %s", (template, exact) => {
+    // No placeholder before the query means no caller value reaches the path: the resolved
+    // pathname must then equal the prefix, so /api can never pass for /api-admin.
+    expect(compileTemplate(template).pathExact).toBe(exact);
   });
 
   it("is the prefix as the URL parser writes it, so it compares with the pathname that new URL produced", () => {

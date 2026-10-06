@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
-import { resolveUrl, originFetch, mapOriginStatus, readWithLimit, isAbortError } from "./common";
+import { resolveUrl, originFetch, mapOriginStatus, readWithLimit, isAbortError, withinPathPrefix } from "./common";
 import { isAbortError as isAbortErrorFromSafeFetch } from "../safe-fetch";
 
 const ctx = {
@@ -127,6 +127,45 @@ describe("resolveUrl: a template cannot be steered out of its path prefix", () =
     const r = resolve("https://{{h}}/api/x", { h: "evil.example.com" });
     if (r.ok) throw new Error("expected rejection");
     expect(r.error.message).toContain("not in allowed_origins");
+  });
+
+  it("refuses an |optional placeholder that shares its query parameter, so a caller's -admin never reaches the path", () => {
+    const r = resolve("https://example.com/api?q={{a}}{{b|optional}}", { a: "-admin" });
+    if (r.ok) throw new Error(`resolved to ${r.url.href}`);
+    expect(r.error.code).toBe("invalid_input");
+    expect(r.error.message).toContain("{{b|optional}}");
+  });
+
+  it("keeps a query-only template on its exact path, whichever optional parameters are dropped", () => {
+    for (const input of [{ a: "-admin" }, { a: "-admin", b: "x" }, { a: "/../admin" }]) {
+      const r = resolve("https://example.com/api?q={{a}}&b={{b|optional}}", input);
+      if (!r.ok) throw new Error(JSON.stringify(r));
+      expect(r.url.pathname).toBe("/api");
+    }
+  });
+});
+
+describe("withinPathPrefix: the containment test is per segment", () => {
+  // A template whose first placeholder is in the query fixes its whole path: the resolved
+  // pathname must be that path, so /api-admin, /api/ and /apix never pass for /api.
+  it.each([
+    ["/api", "/api", true, true],
+    ["/api-admin", "/api", true, false],
+    ["/api/", "/api", true, false],
+    ["/api/x", "/api", true, false],
+    ["/apix", "/api", true, false],
+    ["/", "/", true, true],
+    ["/x", "/", true, false],
+    // A placeholder in the path: the pathname continues the prefix, but only at a segment boundary.
+    ["/api/x", "/api/", false, true],
+    ["/api/", "/api/", false, true],
+    ["/apix", "/api/", false, false],
+    ["/api-admin", "/api", false, false],
+    ["/api", "/api", false, true],
+    ["/api/x", "/api", false, true],
+    ["/anything", "/", false, true],
+  ])("%s within %s (exact %s): %s", (pathname, prefix, exact, inside) => {
+    expect(withinPathPrefix(pathname, prefix, exact)).toBe(inside);
   });
 });
 

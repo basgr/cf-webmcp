@@ -9,6 +9,11 @@
  * Compile a template string into a `(input) => string` resolver plus a list of
  * referenced parameter names. The compile step is build-time; the returned
  * function is shipped into the Worker.
+ *
+ * An `|optional` placeholder must be the whole value of a query parameter with a fixed key
+ * (`?key={{name|optional}}` or `&key={{name|optional}}`): dropping the parameter drops everything
+ * between its `?` or `&` and the next `&`, so anything else in it would go too. One in the path,
+ * the fragment or a shared parameter is refused when the template is compiled.
  */
 
 export type Resolver = (input: Record<string, unknown>) => string;
@@ -24,8 +29,17 @@ export interface CompiledTemplate {
    * (resolveUrl in src/executors/common.ts), after the URL parser has normalised the path.
    */
   pathPrefix: string | null;
-  /** Every placeholder in template order: its name, its operator, and whether it sits in the query (or fragment). */
-  slots: ReadonlyArray<{ name: string; operator: Placeholder["operator"]; isQuery: boolean }>;
+  /**
+   * True when the first placeholder sits in the query (or fragment): no placeholder reaches the
+   * path, pathPrefix is the whole path, and a resolved pathname must equal it, not merely start
+   * with it (`/api` is never `/api-admin`).
+   */
+  pathExact: boolean;
+  /**
+   * Every placeholder in template order: its name, its operator, whether it sits in the query (or
+   * fragment), and for a `map:` the keys it maps (empty for the other operators).
+   */
+  slots: ReadonlyArray<{ name: string; operator: Placeholder["operator"]; isQuery: boolean; mapKeys: readonly string[] }>;
 }
 
 interface Placeholder {
@@ -66,83 +80,161 @@ export function parsePlaceholder(raw: string): Placeholder {
 }
 
 /**
- * Determine whether a position in the URL is path or query.
- * Path: characters before the template's first `?` or `#`.
- * Query (or fragment): characters after.
- *
- * Only the template's own text counts: placeholders are masked before the search, so a `?` or
- * `#` inside a `default:` or `map:` value (`{{a|default:v?1}}`) does not turn the placeholders
- * after it into query values, which would exempt them from the dot-segment check.
+ * The template with every placeholder replaced by as many `_` as it is long: the same offsets,
+ * and only the template's own text left to search. A `?`, `#` or `&` inside a `default:` or
+ * `map:` value (`{{a|default:v?1}}`) is the placeholder's, so it never starts the query, the
+ * fragment or a parameter; a `?` there used to turn the placeholders after it into query
+ * values, which exempted them from the dot-segment check.
  */
-function findPositions(template: string): Array<{ start: number; end: number; isQuery: boolean }> {
+function maskPlaceholders(template: string): string {
   PLACEHOLDER_RE.lastIndex = 0;
   const masked = template.replace(PLACEHOLDER_RE, (whole) => "_".repeat(whole.length));
-  const queryStart = masked.search(/[?#]/);
   PLACEHOLDER_RE.lastIndex = 0;
-  const out: Array<{ start: number; end: number; isQuery: boolean }> = [];
-  let m: RegExpExecArray | null;
-  while ((m = PLACEHOLDER_RE.exec(template)) !== null) {
-    const start = m.index;
-    const end = start + m[0].length;
-    const isQuery = queryStart !== -1 && start > queryStart;
-    out.push({ start, end, isQuery });
-  }
-  return out;
+  return masked;
+}
+
+/** A piece of a compiled template: text as written, or the placeholder at this index. */
+type Piece = { text: string } | { slot: number };
+
+/** One query parameter of the template: the text between its `?` or `&` and the next `&`. */
+interface QueryParam {
+  pieces: Piece[];
+  /** The placeholder that is the parameter's whole value when it is `|optional`, else null. */
+  optional: number | null;
 }
 
 /**
  * Compile a template string into a resolver function plus list of parameters.
  * Throws on malformed templates at build time.
+ *
+ * The template is cut into its path (up to its own first `?` or `#`), its query parameters
+ * (split on its own `&`) and its fragment (from its own first `#`), each a list of pieces, once.
+ * The resolver writes every piece afresh and leaves out a parameter whose `|optional` value is
+ * missing; nothing is cut out of a string by offsets.
  */
 export function compileTemplate(template: string): CompiledTemplate {
-  PLACEHOLDER_RE.lastIndex = 0;
-  const placeholders: Array<Placeholder & { isQuery: boolean; rawMatch: string }> = [];
-  const positions = findPositions(template);
+  const placeholders: Array<Placeholder & { isQuery: boolean; rawMatch: string; start: number; end: number }> = [];
+  const masked = maskPlaceholders(template);
+  // The path ends at the template's own first `?` or `#`; a placeholder after that is a query
+  // (or fragment) value.
+  const queryOrFragment = masked.search(/[?#]/);
+  const pathEnd = queryOrFragment === -1 ? template.length : queryOrFragment;
+  const hasQuery = masked[pathEnd] === "?";
+  const hashAt = masked.indexOf("#", pathEnd);
+  const fragmentStart = hashAt === -1 ? template.length : hashAt;
+
   let m: RegExpExecArray | null;
   PLACEHOLDER_RE.lastIndex = 0;
-  let i = 0;
   while ((m = PLACEHOLDER_RE.exec(template)) !== null) {
     const inner = m[1];
     if (inner === undefined) {
       throw new Error(`internal: malformed regex match for "${m[0]}"`);
     }
-    const pos = positions[i];
-    if (!pos) {
-      throw new Error(`internal: position info missing for placeholder #${i}`);
-    }
     const parsed = parsePlaceholder(inner);
-    placeholders.push({ ...parsed, isQuery: pos.isQuery, rawMatch: m[0] });
-    i++;
+    const start = m.index;
+    placeholders.push({ ...parsed, isQuery: start > pathEnd, rawMatch: m[0], start, end: start + m[0].length });
   }
+  PLACEHOLDER_RE.lastIndex = 0;
+
+  // The pieces of template[from, to). A placeholder never straddles a boundary: the boundaries
+  // come from the masked text, where a placeholder holds no `?`, `#` or `&`.
+  const piecesOf = (from: number, to: number): Piece[] => {
+    const out: Piece[] = [];
+    let at = from;
+    placeholders.forEach((p, slot) => {
+      if (p.start < from || p.end > to) return;
+      if (p.start > at) out.push({ text: template.slice(at, p.start) });
+      out.push({ slot });
+      at = p.end;
+    });
+    if (at < to) out.push({ text: template.slice(at, to) });
+    return out;
+  };
+  const textOf = (pieces: Piece[]): string =>
+    pieces.map((piece) => ("text" in piece ? piece.text : placeholders[piece.slot]!.rawMatch)).join("");
+
+  const pathPieces = piecesOf(0, pathEnd);
+  const queryParams: QueryParam[] = [];
+  if (hasQuery) {
+    let from = pathEnd + 1;
+    for (;;) {
+      const amp = masked.indexOf("&", from);
+      const to = amp === -1 || amp > fragmentStart ? fragmentStart : amp;
+      const pieces = piecesOf(from, to);
+      queryParams.push({ pieces, optional: optionalValueOf(pieces) });
+      if (to === fragmentStart) break;
+      from = to + 1;
+    }
+  }
+  const fragmentPieces = piecesOf(fragmentStart, template.length);
+
+  // `key=` and the placeholder, and nothing else: the shape whose parameter can be left out.
+  function optionalValueOf(pieces: Piece[]): number | null {
+    if (pieces.length !== 2) return null;
+    const [key, value] = pieces;
+    if (!key || !value || !("text" in key) || !("slot" in value)) return null;
+    if (placeholders[value.slot]!.operator !== "optional") return null;
+    return key.text.length > 1 && key.text.indexOf("=") === key.text.length - 1 ? value.slot : null;
+  }
+
+  placeholders.forEach((p, slot) => {
+    if (p.operator !== "optional") return;
+    const label = `{{${p.name}|optional}}`;
+    if (!p.isQuery) {
+      throw new Error(
+        `${label} sits in the path, where it cannot be left out. |optional drops a query parameter: write it as the whole value of one, ` +
+          `?key=${label} or &key=${label}, or give the placeholder a default (|default:VALUE).`,
+      );
+    }
+    if (p.start > fragmentStart) {
+      throw new Error(
+        `${label} sits in the fragment, where it cannot be left out. |optional drops a query parameter: write it as the whole value of one, ` +
+          `?key=${label} or &key=${label}, before the #.`,
+      );
+    }
+    const param = queryParams.find((q) => q.pieces.some((piece) => "slot" in piece && piece.slot === slot));
+    if (param?.optional !== slot) {
+      throw new Error(
+        `${label} must be the whole value of its query parameter, as in ?key=${label} or &key=${label}, with a fixed key: ` +
+          `${JSON.stringify(param ? textOf(param.pieces) : "")} holds more, which leaving the parameter out would drop with it. ` +
+          `Give the other part a parameter of its own, or use |default:VALUE.`,
+      );
+    }
+  });
 
   const params = Array.from(new Set(placeholders.map((p) => p.name)));
 
   const resolver: Resolver = (input) => {
-    let result = template;
-    // Replace from right to left so earlier offsets stay valid.
+    // Every value first, right to left as the resolver always went, so that the first error
+    // thrown for an input is the same one as before.
+    const values: ResolvedValue[] = new Array<ResolvedValue>(placeholders.length);
     for (let idx = placeholders.length - 1; idx >= 0; idx--) {
-      const p = placeholders[idx];
-      if (!p) continue;
-      const pos = positions[idx];
-      if (!pos) continue;
-      const value = resolvePlaceholder(p, input, pos.isQuery);
-      if (value === OMIT) {
-        // Strip surrounding query param (`&key=` or `?key=` to the next `&` or end).
-        // Only valid in query positions.
-        if (!p.isQuery) {
-          throw new Error(`{{${p.name}|optional}} used in path position, cannot omit`);
-        }
-        result = stripQueryParam(result, pos.start, pos.end);
-      } else {
-        // Encode per position. Query positions escape every reserved char.
-        // Path positions preserve `/` so multi-segment paths like "/blog/hello"
-        // pass through cleanly. `?`, `#`, `&` stay encoded in both cases so
-        // input cannot break out of its placeholder into query/fragment/auth.
-        const encoded = p.isQuery ? encodeURIComponent(value) : encodePath(value);
-        result = result.slice(0, pos.start) + encoded + result.slice(pos.end);
-      }
+      const p = placeholders[idx]!;
+      values[idx] = resolvePlaceholder(p, input, p.isQuery);
     }
-    return result;
+    // Encode per position. Query positions escape every reserved char.
+    // Path positions preserve `/` so multi-segment paths like "/blog/hello"
+    // pass through cleanly. `?`, `#`, `&` stay encoded in both cases so
+    // input cannot break out of its placeholder into query/fragment/auth.
+    const write = (pieces: Piece[]): string =>
+      pieces
+        .map((piece) => {
+          if ("text" in piece) return piece.text;
+          const value = values[piece.slot];
+          if (value === OMIT || value === undefined) {
+            throw new Error(`internal: {{${placeholders[piece.slot]!.name}|optional}} left out outside its own query parameter`);
+          }
+          return placeholders[piece.slot]!.isQuery ? encodeURIComponent(value) : encodePath(value);
+        })
+        .join("");
+
+    let out = write(pathPieces);
+    if (hasQuery) {
+      const kept = queryParams.filter((q) => q.optional === null || values[q.optional] !== OMIT);
+      // A query whose every parameter was left out goes with its `?`.
+      if (kept.length > 0) out += `?${kept.map((q) => write(q.pieces)).join("&")}`;
+    }
+    return out + write(fragmentPieces);
   };
 
   return {
@@ -150,7 +242,8 @@ export function compileTemplate(template: string): CompiledTemplate {
     resolver,
     params,
     pathPrefix: staticPathPrefix(template),
-    slots: placeholders.map((p) => ({ name: p.name, operator: p.operator, isQuery: p.isQuery })),
+    pathExact: placeholders[0]?.isQuery ?? false,
+    slots: placeholders.map((p) => ({ name: p.name, operator: p.operator, isQuery: p.isQuery, mapKeys: [...(p.mapping?.keys() ?? [])] })),
   };
 }
 
@@ -160,9 +253,9 @@ export function compileTemplate(template: string): CompiledTemplate {
  * the placeholder continues). `https://example.com/api/{{id}}` has the prefix `/api/`, a template
  * rooted at the origin (`https://example.com{{path}}`, `https://example.com/{{path}}`) has `/` and
  * so keeps allowing any path, and when the first placeholder sits in the query the whole path is
- * fixed (`https://example.com/api/items?x={{q}}` has `/api/items`). The prefix is written the way
- * the URL parser writes a pathname, so that it compares with the one `new URL` produces.
- * Null for a template with no placeholder.
+ * fixed (`https://example.com/api/items?x={{q}}` has `/api/items`, which a resolved path must then
+ * equal: see pathExact). The prefix is written the way the URL parser writes a pathname, so that
+ * it compares with the one `new URL` produces. Null for a template with no placeholder.
  */
 export function staticPathPrefix(template: string): string | null {
   PLACEHOLDER_RE.lastIndex = 0;
@@ -250,35 +343,4 @@ function resolvePlaceholder(p: Placeholder, input: Record<string, unknown>, isQu
     return mapped;
   }
   throw new Error(`unknown operator on placeholder "${p.name}"`);
-}
-
-/**
- * Given the placeholder span [start, end) inside `result`, find the smallest
- * surrounding query parameter (`&key=…` or `?key=…`) and remove it. Preserves
- * the leading `?` of the query string if removing the first parameter.
- */
-function stripQueryParam(result: string, start: number, end: number): string {
-  // Walk left to find `&` or `?`.
-  let left = start;
-  while (left > 0 && result[left - 1] !== "&" && result[left - 1] !== "?") left--;
-  // Walk right to find `&` or end.
-  let right = end;
-  while (right < result.length && result[right] !== "&") right++;
-
-  const leadChar = left > 0 ? result[left - 1] : "";
-  if (leadChar === "?") {
-    // Remove `?key=...&` (including trailing `&`) or `?key=...` (no trailing).
-    if (right < result.length && result[right] === "&") {
-      // Convert `?...&` into `?` then keep the rest.
-      return result.slice(0, left) + result.slice(right + 1);
-    }
-    // Remove `?key=...` entirely including the leading `?`.
-    return result.slice(0, left - 1) + result.slice(right);
-  }
-  if (leadChar === "&") {
-    // Remove `&key=...` including the leading `&`.
-    return result.slice(0, left - 1) + result.slice(right);
-  }
-  // No surrounding delimiter found; just blank the placeholder.
-  return result.slice(0, start) + result.slice(end);
 }

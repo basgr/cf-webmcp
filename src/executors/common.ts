@@ -59,10 +59,12 @@ export function resolveUrl(
 ): { ok: true; url: URL } | { ok: false; error: ErrorPayload } {
   let resolved: string;
   let pathPrefix: string | null;
+  let pathExact: boolean;
   try {
     const compiled = compileTemplate(opts.urlTemplate);
     resolved = compiled.resolver(opts.input);
     pathPrefix = compiled.pathPrefix;
+    pathExact = compiled.pathExact;
   } catch (e) {
     return { ok: false, error: { code: "invalid_input", message: (e as Error).message, retriable: false } };
   }
@@ -86,11 +88,12 @@ export function resolveUrl(
       },
     };
   }
-  // Defence in depth behind the placeholder check (a value with a dot segment never gets here):
-  // the path the URL parser produced must still start with the path the template spells out before
-  // its first placeholder. A template rooted at the origin has the prefix "/", which any path has.
-  // The message names the prefix and nothing of the path, which came from the caller.
-  if (pathPrefix !== null && !url.pathname.startsWith(pathPrefix)) {
+  // Defence in depth behind the placeholder checks (a value with a dot segment never gets here, and
+  // a query value never reaches the path): the path the URL parser produced must still lie within
+  // the path the template spells out before its first placeholder, segment by segment. A template
+  // rooted at the origin has the prefix "/", which any path has. The message names the prefix and
+  // nothing of the path, which came from the caller.
+  if (pathPrefix !== null && !withinPathPrefix(url.pathname, pathPrefix, pathExact)) {
     return {
       ok: false,
       error: {
@@ -101,6 +104,19 @@ export function resolveUrl(
     };
   }
   return { ok: true, url };
+}
+
+/**
+ * Whether a resolved pathname lies within a template's static path prefix (staticPathPrefix in
+ * src/mini-language.ts). `exact` (the template's first placeholder sits in the query, so the whole
+ * path is fixed): the pathname must be the prefix itself. Otherwise it must start with the prefix
+ * at a segment boundary: the prefix ends in `/` (as a prefix cut after its last `/` does), or the
+ * pathname ends with it or goes on with `/`. Either way `/api` never lets `/api-admin` through.
+ */
+export function withinPathPrefix(pathname: string, prefix: string, exact: boolean): boolean {
+  if (exact) return pathname === prefix;
+  if (!pathname.startsWith(prefix)) return false;
+  return prefix.endsWith("/") || pathname.length === prefix.length || pathname[prefix.length] === "/";
 }
 
 export interface OriginFetchOptions {
