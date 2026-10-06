@@ -1,5 +1,13 @@
 # Upgrades and versioning
 
+## v0.6.1
+
+Patch release. No config changes, unless a selector has a combinator inside `:not()`.
+
+- **A combinator inside `:not()` fails the build.** The current Cloudflare HTMLRewriter refuses `:not(.a .b)`, `:not(a > b)` and every other `:not()` argument with a descendant or child combinator (checked on 6 October 2026 in workerd 1.20260815 and 1.20261001; older builds accepted them). v0.6.0's selector check accepted them, so a `[[forms]]` form or param with such a selector was skipped at request time, and a `dom_extract` tool with one answered `internal` on every call. Inside `:not()`, write compound selectors, alone or in a comma list: `:not(.a)`, `:not([type=hidden], .b)`. See [Selector limits](form-injection.md#selector-limits).
+- **`npm ci` works with npm 10 again.** The v0.6.0 lock file left out a package that npm 10 (bundled with Node.js 22) requires and npm 11 drops, so `npm ci` failed under Node.js 22. The test pool `@cloudflare/vitest-pool-workers` moves from 0.16.20 to 0.22.0, whose wrangler accepts the same `@cloudflare/workers-types` as the rest of the project, so npm 10 and npm 11 now write the same lock file.
+- **Docs:** cf-webmcp was tested in Cloudflare Kitesurf and in a Browser Run lab session; [`docs/browser-support.md`](browser-support.md#cloudflare-kitesurf-and-browser-run) records what worked.
+
 ## v0.6.0
 
 Some configs need changes, and most deployments need a step or two before the first deploy. The security fix comes first; the groups after it go from what needs action to what is new.
