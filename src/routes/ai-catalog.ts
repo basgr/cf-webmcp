@@ -232,7 +232,9 @@ function stringify(obj: unknown): string {
 
 function sortReplacer(_key: string, value: unknown): unknown {
   if (value && typeof value === "object" && !Array.isArray(value)) {
-    const sorted: Record<string, unknown> = {};
+    // No prototype: a "__proto__" member of origin's (an own member after JSON.parse) is then
+    // written as a member, where on a plain object the assignment would set the prototype.
+    const sorted: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
     for (const k of Object.keys(value as Record<string, unknown>).sort()) {
       sorted[k] = (value as Record<string, unknown>)[k];
     }

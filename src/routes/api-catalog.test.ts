@@ -302,6 +302,16 @@ describe("tryMerge", () => {
     const second = tryMerge(first, our)!;
     expect(second).toBe(first);
   });
+
+  it("keeps an origin member named __proto__, at the top level and in an entry", () => {
+    // JSON.parse makes "__proto__" an own member; the sorted copy set its prototype instead.
+    const text = '{"__proto__":{"note":"kept"},"linkset":[{"anchor":"https://other.example/","__proto__":[1,2]}]}';
+    const merged = tryMerge(text, our)!;
+    expect(merged).toContain('"__proto__":[1,2]');
+    // The top-level member is not kept by tryMerge itself, which writes { linkset } only.
+    expect(Object.keys(JSON.parse(merged) as object)).toEqual(["linkset"]);
+    expect(tryMerge(merged, our)).toBe(merged);
+  });
 });
 
 describe("origin JSON nested too deeply", () => {

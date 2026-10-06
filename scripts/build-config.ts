@@ -1564,7 +1564,8 @@ async function computeAgentSkillsDigest(config: Config, widget: boolean): Promis
 export function stringifyCanonical(obj: unknown): string {
   const sortReplacer = (_key: string, value: unknown): unknown => {
     if (value && typeof value === "object" && !Array.isArray(value)) {
-      const sorted: Record<string, unknown> = {};
+      // No prototype, as in the merge routes: a "__proto__" key stays a member.
+      const sorted: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
       for (const k of Object.keys(value as Record<string, unknown>).sort()) {
         sorted[k] = (value as Record<string, unknown>)[k];
       }

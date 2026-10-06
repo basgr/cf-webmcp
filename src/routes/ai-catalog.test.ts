@@ -227,6 +227,24 @@ describe("aiCatalogResponse (merge)", () => {
     expect(await res2.text()).toBe(body1);
   });
 
+  it("keeps an origin member named __proto__, at the top level and in an entry", async () => {
+    // JSON.parse makes "__proto__" an own member; writing the sorted copy with plain assignment
+    // set the copy's prototype instead, and the member was gone from the merged document.
+    const text =
+      '{"__proto__":{"note":"kept"},"entries":[{"identifier":"urn:air:other.example:skill:x","__proto__":"entry member"}],"host":{"displayName":"O","identifier":"did:web:example.com"}}';
+    const res = await aiCatalogResponse(req, cfgMerge, SYNTH_ONE, async () =>
+      new Response(text, { status: 200, headers: { "content-type": "application/json" } }));
+    const body = await res.text();
+    expect(body).toContain('"__proto__":{"note":"kept"}');
+    expect(body).toContain('"__proto__":"entry member"');
+    const doc = JSON.parse(body) as Record<string, unknown>;
+    expect(Object.keys(doc).sort()).toEqual(["__proto__", "entries", "host"]);
+    // Idempotent with the member in place.
+    const again = await aiCatalogResponse(req, cfgMerge, SYNTH_ONE, async () =>
+      new Response(body, { status: 200, headers: { "content-type": "application/json" } }));
+    expect(await again.text()).toBe(body);
+  });
+
   it("keeps origin's entry when it already has our identifier, and does not duplicate it", async () => {
     const theirs = { identifier: OUR_ID, displayName: "Their own skill", type: "application/ai-skill+md", url: "https://example.com/theirs/SKILL.md" };
     const res = await aiCatalogResponse(req, cfgMerge, SYNTH_ONE, async () => originDoc([theirs, OTHER]));
