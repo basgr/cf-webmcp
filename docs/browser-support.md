@@ -2,7 +2,7 @@
 
 WebMCP is the W3C draft at [`webmachinelearning/webmcp`](https://github.com/webmachinelearning/webmcp). A page registers tools with the browser's WebMCP runtime at `document.modelContext`. cf-webmcp's injected bootstrap does that for the `[[tools]]` in your TOML, and a browser that implements the declarative part of the draft turns the form attributes stamped from `[[forms]]` into tools of its own.
 
-Where it runs, as of 4 October 2026:
+Where it runs, as of 4 October 2026 (Kitesurf and lab sessions tested on 6 October 2026):
 
 | Runtime | How WebMCP is turned on |
 |---------|-------------------------|
@@ -103,7 +103,7 @@ Run this in the DevTools console:
   - `search_pages`, `list_posts` and `get_page`, called with `execute_webmcp_tool`, completed and returned the executor's `ok: true` answer.
   - Both forms on the forms page showed up as tools: the one cf-webmcp stamps from `[[forms]]` and one stamped by hand in the page's HTML, each with an input schema built from its params (all required, the email field with `format: "email"`). We did not call them; the test only listed them.
   - The landing page showed its connected state with the pairing steps hidden, and `list_console_messages` returned no messages for it.
-  - `navigator.modelContext` had no `registerTool`, and `navigator.modelContextTesting` was undefined in the page.
+  - `navigator.modelContext.registerTool` was undefined, and `navigator.modelContextTesting` was undefined in the page.
 - **Browser Run lab sessions** (`wrangler browser create --lab`, or `lab=true` on the DevTools URL) run Chrome with WebMCP turned on. The same test in a lab session on 6 October 2026 (`HeadlessChrome/152`) gave the same results, `navigator.modelContextTesting` included (undefined in the page), except that the form tools' email field had no `format: "email"`. The agent lists and calls the page's tools over the DevTools protocol (`list_webmcp_tools` and `execute_webmcp_tool` in `chrome-devtools-mcp`). See [Cloudflare's WebMCP docs for Browser Run](https://developers.cloudflare.com/browser-run/features/webmcp/) (the address as of 6 October 2026).
 
 ## The `tools` Permissions Policy
