@@ -120,6 +120,51 @@ describe("widgetResponse", () => {
     expect(text).toBe("");
   });
 
+  it("returns 503 with no-store and noindex when the R2 binding is missing", async () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    const res = await widgetResponse(
+      new Request("https://example.com/_webmcp/widget.abc.js"),
+      makeConfig(),
+      undefined,
+      "widget.abc.js",
+    );
+    expect(res.status).toBe(503);
+    expect(res.headers.get("cache-control")).toBe("no-store");
+    expect(res.headers.get("x-robots-tag")).toBe("noindex");
+    expect(errors.mock.calls.map((c) => String(c[0])).join("\n")).toContain("CF_WEBMCP_ASSETS");
+    errors.mockRestore();
+  });
+
+  it("returns 503 with no-store and noindex when bucket.get rejects, and logs the error", async () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    const get = vi.fn(async (_key: string) => {
+      throw new Error("R2 is unavailable");
+    });
+    const res = await widgetResponse(
+      new Request("https://example.com/_webmcp/widget.abc.js"),
+      makeConfig(),
+      { get } as unknown as R2Bucket,
+      "widget.abc.js",
+    );
+    expect(res.status).toBe(503);
+    expect(res.headers.get("cache-control")).toBe("no-store");
+    expect(res.headers.get("x-robots-tag")).toBe("noindex");
+    expect(await res.text()).not.toContain("R2 is unavailable");
+    expect(errors.mock.calls.map((c) => String(c[0])).join("\n")).toContain("R2 is unavailable");
+    errors.mockRestore();
+  });
+
+  it("answers a missing object with no-store too", async () => {
+    const res = await widgetResponse(
+      new Request("https://example.com/_webmcp/widget.abc.js"),
+      makeConfig(),
+      fakeBucket(null),
+      "widget.abc.js",
+    );
+    expect(res.status).toBe(503);
+    expect(res.headers.get("cache-control")).toBe("no-store");
+  });
+
   it("answers non-GET/HEAD methods with 405", async () => {
     const res = await widgetResponse(
       new Request("https://example.com/_webmcp/widget.abc.js", { method: "POST" }),

@@ -14,6 +14,8 @@ By default, **nothing identifying**. The Worker logs nothing about visitors (no 
 
 - an origin redirect the Worker refused or could not follow: on an executor every such redirect (a target outside `allowed_origins`, more than 5 hops, an unusable `Location`), on a merge route all but a redirect to an origin outside `allowed_origins`, which is relayed to the client there and not logged. The line holds the origin and path of the start URL and of a refused target, or the unusable `Location` cut at its first `?` or `#`;
 - a failed origin fetch on a merge route or an executor: the origin and path, and the error message;
+- a failed origin fetch for a proxied request (a visitor's page or form post): the path, without its query string, and the error message;
+- a widget request the Worker could not answer from R2: a missing `CF_WEBMCP_ASSETS` binding, or a failed read with the object key and the error message;
 - a tool URL the Worker refused after resolving its `url_template`: for one that does not parse, the URL cut at its first `?` or `#`; for one whose origin is not in `allowed_origins`, that origin. The same for a `sitemap_url` or `feed_url` the Worker cannot use (the origin only);
 - an executor that threw: the tool name and the error message;
 - an `http_json` origin answer that is not valid JSON: the parser's message, which can quote the start of origin's body;

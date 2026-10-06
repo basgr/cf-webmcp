@@ -34,6 +34,7 @@ import { fetchWithManualRedirects, isAbortError, logRedirectFailure, type Redire
 import { widgetEnabled } from "./widget-state";
 import { userAgent } from "./user-agent";
 import { holdsSecret, redactBody, withoutSecretHeaders } from "./redact";
+import { isProtectedPath } from "./robots-tag";
 
 /**
  * One deadline for a whole proxyToOrigin redirect chain, up to the moment the final
@@ -43,7 +44,8 @@ import { holdsSecret, redactBody, withoutSecretHeaders } from "./redact";
 export const PROXY_ORIGIN_TIMEOUT_MS = 10_000;
 
 export interface Env {
-  CF_WEBMCP_ASSETS: R2Bucket;
+  /** Undefined when wrangler.toml does not bind it: the widget route answers 503, health reports null. */
+  CF_WEBMCP_ASSETS?: R2Bucket;
   CF_WEBMCP_DEPLOY_TOKEN?: string;
   CF_WEBMCP_HEALTH_TOKEN?: string;
 }
@@ -322,6 +324,24 @@ export function createHandler(deps: HandlerDeps): Required<Pick<ExportedHandler<
     }
   }
 
+  /**
+   * The answer when the proxy's own fetch of a visitor's request rejects (a connection reset, a
+   * DNS or TLS failure): 502 with a fixed plain-text body, instead of a rejected handler, which
+   * the platform answers with its own 500 page (error 1101). no-store: the failure is not the
+   * page. X-Robots-Tag follows the request path: noindex under the namespace or /.well-known/,
+   * none elsewhere (the path is the site's, and an apex llms.txt or robots.txt left to origin
+   * must never carry it). One log line with the path (no query string) and the runtime's
+   * message, which can name a host or an address; no stack, and nothing of it in the body.
+   */
+  function proxyFetchFailed(pathname: string, e: unknown): Response {
+    console.error(
+      `cf-webmcp: proxy fetch failed: ${JSON.stringify({ path: pathname, error: (e as Error | null)?.message ?? String(e) })}`,
+    );
+    const headers: Record<string, string> = { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" };
+    if (isProtectedPath(config, pathname)) headers["x-robots-tag"] = "noindex";
+    return new Response("origin request failed", { status: 502, headers });
+  }
+
   function plainError(status: number, message: string): Response {
     return new Response(message, {
       status,
@@ -361,7 +381,12 @@ export function createHandler(deps: HandlerDeps): Required<Pick<ExportedHandler<
     const forwarded = validators.headers
       ? new Request(request, { redirect: "manual", headers: validators.headers })
       : new Request(request, { redirect: "manual" });
-    const upstream = await fetch(target.toString(), forwarded);
+    let upstream: Response;
+    try {
+      upstream = await fetch(target.toString(), forwarded);
+    } catch (e) {
+      return proxyFetchFailed(reqUrl.pathname, e);
+    }
 
     // Origin-Trial tokens go on the top-level HTML document, so they follow the status and
     // content type of what origin sent, not whether this response is injected below:

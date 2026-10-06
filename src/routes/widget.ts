@@ -20,10 +20,27 @@
 import type { Config } from "../config-types";
 import { buildCacheControl } from "../cache";
 
+/**
+ * 503 for a widget the Worker cannot read: no-store, so neither a browser nor the edge keeps the
+ * failure under a URL that is otherwise cached for a year, and noindex like every namespace route.
+ */
+function unavailable(message: string): Response {
+  return new Response(message, {
+    status: 503,
+    headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store", "x-robots-tag": "noindex" },
+  });
+}
+
+/**
+ * `bucket` is the CF_WEBMCP_ASSETS binding, undefined when wrangler.toml does not bind it. A
+ * missing binding, a failed R2 read and a missing object all answer 503 (never an uncaught
+ * error, which the platform answers with its own 500 page and no noindex). The first two are
+ * logged; the body names neither.
+ */
 export async function widgetResponse(
   request: Request,
   config: Config,
-  bucket: R2Bucket,
+  bucket: R2Bucket | undefined,
   widgetAsset: string,
 ): Promise<Response> {
   if (request.method !== "GET" && request.method !== "HEAD") {
@@ -33,13 +50,18 @@ export async function widgetResponse(
     });
   }
 
-  const object = await bucket.get(widgetAsset);
-  if (!object) {
-    return new Response("widget asset not found on origin bucket", {
-      status: 503,
-      headers: { "x-robots-tag": "noindex" },
-    });
+  if (!bucket) {
+    console.error("cf-webmcp: widget: the CF_WEBMCP_ASSETS R2 binding is missing; bind the bucket in wrangler.toml");
+    return unavailable("widget storage unavailable");
   }
+  let object: R2ObjectBody | null;
+  try {
+    object = await bucket.get(widgetAsset);
+  } catch (e) {
+    console.error(`cf-webmcp: widget: R2 read failed: ${JSON.stringify({ key: widgetAsset, error: (e as Error | null)?.message ?? String(e) })}`);
+    return unavailable("widget storage unavailable");
+  }
+  if (!object) return unavailable("widget asset not found on origin bucket");
 
   const cc = `${buildCacheControl({ max_age: config.cache.widget_max_age })}, immutable`;
   const headers = new Headers();

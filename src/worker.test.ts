@@ -377,6 +377,79 @@ describe("worker fails open", () => {
   });
 });
 
+describe("a proxied request whose origin fetch throws answers 502, never an uncaught error", () => {
+  const RUNTIME = "Network connection lost. (origin.internal.example.com 10.0.0.7)";
+  const throwing = () =>
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new TypeError(RUNTIME);
+      }),
+    );
+
+  it.each([
+    ["a page", "https://example.com/page", {}],
+    ["an HTML page load", "https://example.com/page", { headers: { accept: "text/html" } }],
+    ["a POST", "https://example.com/form", { method: "POST", body: "a=1" }],
+  ])("%s: 502 with a fixed body and no X-Robots-Tag (the path is the site's); the detail goes to the log", async (_label, url, init) => {
+    throwing();
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    const res = await call(createHandler(makeDeps()), url, init as RequestInit);
+
+    expect(res.status).toBe(502);
+    expect(await res.text()).toBe("origin request failed");
+    expect(res.headers.get("content-type")).toContain("text/plain");
+    expect(res.headers.get("cache-control")).toBe("no-store");
+    expect(res.headers.has("x-robots-tag")).toBe(false);
+    const logged = errors.mock.calls.map((c) => String(c[0])).join("\n");
+    expect(logged).toContain("cf-webmcp: proxy fetch failed");
+    expect(logged).toContain(RUNTIME);
+    expect(logged).toContain(new URL(url).pathname);
+    expect(logged).not.toContain("example.com/");
+    expect(errors).toHaveBeenCalledTimes(1);
+  });
+
+  it("an apex llms.txt left to origin (passthrough) gets no X-Robots-Tag either", async () => {
+    throwing();
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const res = await call(createHandler(makeDeps({ llms_txt: { mode: "passthrough" } })), "https://example.com/llms.txt");
+    expect(res.status).toBe(502);
+    expect(res.headers.has("x-robots-tag")).toBe(false);
+  });
+
+  it("a proxied path under /.well-known/ carries noindex", async () => {
+    throwing();
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const res = await call(createHandler(makeDeps()), "https://example.com/.well-known/security.txt");
+    expect(res.status).toBe(502);
+    expect(res.headers.get("x-robots-tag")).toBe("noindex");
+  });
+
+  it("the query string stays out of the log", async () => {
+    throwing();
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    await call(createHandler(makeDeps()), "https://example.com/page?token=abc123");
+    expect(errors.mock.calls.map((c) => String(c[0])).join("\n")).not.toContain("abc123");
+  });
+});
+
+describe("the widget route answers 503 when R2 cannot answer", () => {
+  const WIDGET_ASSET = "widget.fedcba9876543210.js";
+  const deps = () => makeDeps({ features: { fallback_widget: true } }, { meta: { WIDGET_ASSET } });
+
+  it.each([
+    ["the R2 binding is missing", {} as Env],
+    ["bucket.get rejects", { CF_WEBMCP_ASSETS: { get: vi.fn(async () => Promise.reject(new Error("R2 down"))) } as unknown as R2Bucket } as Env],
+  ])("%s: 503, no-store and noindex, never an uncaught error", async (_label, e) => {
+    stubOrigin({});
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const res = await call(createHandler(deps()), `https://example.com/_webmcp/${WIDGET_ASSET}`, undefined, e);
+    expect(res.status).toBe(503);
+    expect(res.headers.get("cache-control")).toBe("no-store");
+    expect(res.headers.get("x-robots-tag")).toBe("noindex");
+  });
+});
+
 describe("unknown paths under the namespace", () => {
   const unknown = [
     "/_webmcp/does-not-exist",
