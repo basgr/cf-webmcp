@@ -65,9 +65,10 @@ interface FetchCall {
 
 /**
  * Stub global fetch: every GET is a 404 (nothing to collide with), and a POST is answered from `post`,
- * keyed by URL. An answer that is an Error is thrown (a network failure); a URL not listed answers 404.
+ * keyed by URL. An answer that is an Error is thrown (a network failure); a function is called with
+ * the request's init (and may throw); a URL not listed answers 404.
  */
-function stubOrigin(post: Record<string, Response | Error | (() => Response)> = {}) {
+function stubOrigin(post: Record<string, Response | Error | ((init: RequestInit) => Response)> = {}) {
   const calls: FetchCall[] = [];
   vi.stubGlobal(
     "fetch",
@@ -77,7 +78,7 @@ function stubOrigin(post: Record<string, Response | Error | (() => Response)> = 
       if (init.method === "POST") {
         const answer = post[url];
         if (answer instanceof Error) throw answer;
-        if (typeof answer === "function") return answer();
+        if (typeof answer === "function") return answer(init);
         if (answer) return answer;
       }
       return new Response("not found", { status: 404 });
@@ -88,6 +89,20 @@ function stubOrigin(post: Record<string, Response | Error | (() => Response)> = 
 
 const json = (body = '{"jsonrpc":"2.0","id":1,"result":{}}') =>
   new Response(body, { status: 200, headers: { "content-type": "application/json" } });
+
+/** The JSON-RPC method of a probe POST. */
+const rpcMethod = (init: RequestInit) => (JSON.parse(init.body as string) as { method: string }).method;
+
+/** A JSON-RPC error answer with the given HTTP status and error code. */
+const rpcError = (status: number, code: number) =>
+  new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, error: { code, message: "x" } }), {
+    status,
+    headers: { "content-type": "application/json" },
+  });
+
+/** Answers a probe POST by its JSON-RPC method; a method not listed gets a 404. */
+const byMethod = (answers: Record<string, () => Response>) => (init: RequestInit) =>
+  (answers[rpcMethod(init)] ?? (() => new Response("not found", { status: 404 })))();
 
 interface Result {
   ran_at: string | null;
@@ -171,7 +186,7 @@ describe("preflight: an origin MCP server at the landing path", () => {
 
   it.each([404, 405, 401, 400, 500])("adds nothing when origin answers %i, even with a JSON body", async (status) => {
     stubOrigin({
-      "https://example.com/mcp": new Response('{"error":"x"}', { status, headers: { "content-type": "application/json" } }),
+      "https://example.com/mcp": () => new Response('{"error":"x"}', { status, headers: { "content-type": "application/json" } }),
     });
 
     const { code, result } = await run(MINIMAL);
@@ -182,7 +197,7 @@ describe("preflight: an origin MCP server at the landing path", () => {
 
   it("adds nothing for a 3xx (the probe does not follow redirects)", async () => {
     const { calls } = stubOrigin({
-      "https://example.com/mcp": new Response(null, { status: 307, headers: { location: "https://www.example.com/mcp" } }),
+      "https://example.com/mcp": () => new Response(null, { status: 307, headers: { location: "https://www.example.com/mcp" } }),
     });
 
     const { result } = await run(MINIMAL);
@@ -201,18 +216,47 @@ describe("preflight: an origin MCP server at the landing path", () => {
     expect(mcpWarnings(result)).toEqual([]);
   });
 
-  it("sends a minimal JSON-RPC 2.0 initialize with JSON and event-stream accepted, and does not follow redirects", async () => {
+  it("sends server/discover with the MCP 2026-07-28 request headers and _meta first, and does not follow redirects", async () => {
     const { posts } = stubOrigin();
 
     await run(MINIMAL);
 
-    expect(posts()).toHaveLength(1);
+    expect(posts()).toHaveLength(2);
     const { url, init } = posts()[0]!;
     expect(url).toBe("https://example.com/mcp");
     expect(init.redirect).toBe("manual");
     const headers = init.headers as Record<string, string>;
     expect(headers["content-type"]).toBe("application/json");
     expect(headers["accept"]).toBe("application/json, text/event-stream");
+    expect(headers["mcp-protocol-version"]).toBe("2026-07-28");
+    expect(headers["mcp-method"]).toBe("server/discover");
+    expect(JSON.parse(init.body as string)).toEqual({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "server/discover",
+      params: {
+        _meta: {
+          "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+          "io.modelcontextprotocol/clientInfo": { name: "cf-webmcp-preflight", version: PKG_VERSION },
+          "io.modelcontextprotocol/clientCapabilities": {},
+        },
+      },
+    });
+  });
+
+  it("then sends a minimal JSON-RPC 2.0 initialize, without the 2026-07-28 headers, and does not follow redirects", async () => {
+    const { posts } = stubOrigin();
+
+    await run(MINIMAL);
+
+    const { url, init } = posts()[1]!;
+    expect(url).toBe("https://example.com/mcp");
+    expect(init.redirect).toBe("manual");
+    const headers = init.headers as Record<string, string>;
+    expect(headers["content-type"]).toBe("application/json");
+    expect(headers["accept"]).toBe("application/json, text/event-stream");
+    expect(headers["mcp-protocol-version"]).toBeUndefined();
+    expect(headers["mcp-method"]).toBeUndefined();
     expect(JSON.parse(init.body as string)).toEqual({
       jsonrpc: "2.0",
       id: 1,
@@ -225,18 +269,110 @@ describe("preflight: an origin MCP server at the landing path", () => {
     });
   });
 
-  it("sends the deploy-token headers on the probe when a token is set, and none when it is not", async () => {
+  it("sends the deploy-token headers on both probes when a token is set, and none when it is not", async () => {
     const withToken = stubOrigin();
     await run(MINIMAL, { deployToken: "tok-123" });
-    const sent = withToken.posts()[0]!.init.headers as Record<string, string>;
-    expect(sent["cf-webmcp-bypass"]).toBe("1");
-    expect(sent["cf-webmcp-deploy-token"]).toBe("tok-123");
+    expect(withToken.posts()).toHaveLength(2);
+    for (const post of withToken.posts()) {
+      const sent = post.init.headers as Record<string, string>;
+      expect(sent["cf-webmcp-bypass"]).toBe("1");
+      expect(sent["cf-webmcp-deploy-token"]).toBe("tok-123");
+    }
 
     vi.unstubAllGlobals();
     const without = stubOrigin();
     await run(MINIMAL);
-    const bare = without.posts()[0]!.init.headers as Record<string, string>;
-    expect(Object.keys(bare).filter((k) => k.startsWith("cf-webmcp"))).toEqual([]);
+    for (const post of without.posts()) {
+      const bare = post.init.headers as Record<string, string>;
+      expect(Object.keys(bare).filter((k) => k.startsWith("cf-webmcp"))).toEqual([]);
+    }
+  });
+
+  it("finds a server that speaks only MCP 2026-07-28 and rejects initialize for its missing headers", async () => {
+    // What the spec's compatibility matrix says such a server does with a legacy client:
+    // 400 with HeaderMismatch (-32020) when Mcp-Method is missing.
+    const { posts } = stubOrigin({
+      "https://example.com/mcp": (init) =>
+        (init.headers as Record<string, string>)["mcp-method"] === rpcMethod(init) ? json() : rpcError(400, -32020),
+    });
+
+    const { result, lines } = await run(MINIMAL);
+
+    expect(posts().map((c) => rpcMethod(c.init))).toEqual(["server/discover"]);
+    const warnings = mcpWarnings(result);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("(POST server/discover returned 200 application/json)");
+    expect(lines.some((l) => l.includes("/mcp (POST server/discover)") && l.includes("WARNING"))).toBe(true);
+  });
+
+  it("finds a server that speaks only MCP before 2026-07-28 with the initialize probe", async () => {
+    const { posts } = stubOrigin({
+      "https://example.com/mcp": byMethod({ initialize: () => json() }),
+    });
+
+    const { result, lines } = await run(MINIMAL);
+
+    expect(posts().map((c) => rpcMethod(c.init))).toEqual(["server/discover", "initialize"]);
+    const warnings = mcpWarnings(result);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("(POST initialize returned 200 application/json)");
+    expect(lines.some((l) => l.includes("/mcp (POST server/discover)") && l.includes("no MCP server"))).toBe(true);
+    expect(lines.some((l) => l.includes("/mcp (POST initialize)") && l.includes("WARNING"))).toBe(true);
+  });
+
+  it.each([-32020, -32021, -32022])(
+    "counts a 400 with the MCP error %i on server/discover as an MCP server, and sends no initialize",
+    async (code) => {
+      const { posts } = stubOrigin({ "https://example.com/mcp": () => rpcError(400, code) });
+
+      const { result } = await run(MINIMAL);
+
+      expect(posts().map((c) => rpcMethod(c.init))).toEqual(["server/discover"]);
+      const warnings = mcpWarnings(result);
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).toContain(`(POST server/discover returned 400 with MCP error ${code})`);
+    },
+  );
+
+  it.each([
+    ["a JSON-RPC error that is not MCP's", 400, -32600],
+    ["Method not found", 404, -32601],
+    ["an MCP error code with a status other than 400", 500, -32020],
+  ])("does not count %s as an MCP server", async (_name, status, code) => {
+    const { posts } = stubOrigin({ "https://example.com/mcp": () => rpcError(status, code) });
+
+    const { result } = await run(MINIMAL);
+
+    expect(posts().map((c) => rpcMethod(c.init))).toEqual(["server/discover", "initialize"]);
+    expect(mcpWarnings(result)).toEqual([]);
+  });
+
+  it("does not read more than 64 KiB of a 400 answer to server/discover", async () => {
+    const body = JSON.stringify({ jsonrpc: "2.0", id: 1, error: { code: -32020, message: "x".repeat(70 * 1024) } });
+    const { posts } = stubOrigin({
+      "https://example.com/mcp": () => new Response(body, { status: 400, headers: { "content-type": "application/json" } }),
+    });
+
+    const { result } = await run(MINIMAL);
+
+    expect(posts()).toHaveLength(2);
+    expect(mcpWarnings(result)).toEqual([]);
+  });
+
+  it("still sends initialize when server/discover fails, and warns when that finds a server", async () => {
+    stubOrigin({
+      "https://example.com/mcp": byMethod({
+        "server/discover": () => {
+          throw new TypeError("fetch failed");
+        },
+        initialize: () => json(),
+      }),
+    });
+
+    const { result, lines } = await run(MINIMAL);
+
+    expect(mcpWarnings(result)).toHaveLength(1);
+    expect(lines.some((l) => l.includes("/mcp (POST server/discover)") && l.includes("not checked (fetch failed)"))).toBe(true);
   });
 
   it("probes the claimed /mcp/ and the slash-less /mcp for a directory-form landing path", async () => {
@@ -244,7 +380,7 @@ describe("preflight: an origin MCP server at the landing path", () => {
 
     const { result } = await run(`${MINIMAL}\n[webmcp_landing]\npath = "/mcp/"\n`);
 
-    expect(posts().map((c) => c.url)).toEqual(["https://example.com/mcp/", "https://example.com/mcp"]);
+    expect(posts().map((c) => c.url)).toEqual(["https://example.com/mcp/", "https://example.com/mcp/", "https://example.com/mcp"]);
     const warnings = mcpWarnings(result);
     expect(warnings).toHaveLength(1);
     expect(warnings[0]!.startsWith("/mcp:")).toBe(true);

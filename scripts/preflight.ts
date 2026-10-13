@@ -3,8 +3,9 @@
  *
  * Given a target webmcp.toml, fetches every Worker-claimed path from
  * [origin].base_url and reports OK / merge / COLLISION per path. It also POSTs a
- * JSON-RPC `initialize` to the landing path and warns when an origin MCP server
- * answers there.
+ * JSON-RPC `server/discover` (MCP 2026-07-28) and, unless that found one, an
+ * `initialize` (earlier revisions) to the landing path, and warns when an origin MCP
+ * server answers there.
  *
  * Usage:
  *   npm run preflight -- --config=templates/example-site/webmcp.toml
@@ -470,17 +471,38 @@ function notMerged(outcome: Outcome, ard: { canonical: string; redirected: boole
   return { kind: "not_merged", status: outcome.status, contentType: outcome.contentType, canonical: ard.canonical, redirected: ard.redirected };
 }
 
-/** One MCP probe: the path it POSTs to, what came back. */
+/**
+ * The two MCP probes, in the order they are sent. MCP 2026-07-28 dropped the initialize
+ * handshake: a server that speaks only that revision rejects an initialize without the
+ * Mcp-Method header with 400. So the probe asks the way a dual-era client does: the
+ * modern server/discover first, then the legacy initialize.
+ */
+type McpProbe = "server/discover" | "initialize";
+
+/** One MCP probe: which one, what came back. `errorCode` is the MCP error that identified a server. */
 type McpOutcome =
-  | { kind: "mcp"; status: number; contentType: string }
-  | { kind: "none"; status: number; contentType: string }
-  | { kind: "skipped"; reason: string };
+  | { kind: "mcp"; probe: McpProbe; status: number; contentType: string; errorCode?: number }
+  | { kind: "none"; probe: McpProbe; status: number; contentType: string }
+  | { kind: "skipped"; probe: McpProbe; reason: string };
 
 /** The probe must not hang preflight on an origin that never answers a POST. */
 const MCP_PROBE_TIMEOUT_MS = 10_000;
 
-/** An MCP server answers an initialize with a JSON body or an event stream. */
+/** An MCP server answers a request with a JSON body or an event stream. */
 const MCP_CONTENT_TYPE = /^(?:application\/json|text\/event-stream)\s*(?:;|$)/i;
+
+/** The revision the server/discover probe speaks. */
+const MCP_MODERN_VERSION = "2026-07-28";
+
+/**
+ * JSON-RPC error codes from the range MCP 2026-07-28 reserves for itself: HeaderMismatch,
+ * MissingRequiredClientCapability, UnsupportedProtocolVersion. A modern server answers them
+ * with 400, and the spec tells clients to read such an error as "a modern server speaks here".
+ */
+const MCP_MODERN_ERROR_CODES = new Set([-32020, -32021, -32022]);
+
+/** How much of a 400 answer to server/discover is read to look for one of those codes. */
+const MCP_ERROR_BODY_MAX_BYTES = 64 * 1024;
 
 /**
  * The landing paths an origin MCP server could be shadowed at: the configured path and,
@@ -503,27 +525,62 @@ async function packageVersion(): Promise<string> {
 }
 
 /**
- * POST a minimal JSON-RPC 2.0 `initialize` to `url`. A 200 with a JSON or event-stream
- * content type means an MCP server answers at that path on origin. Anything else, and
- * any network error, is "no MCP server": this probe never fails preflight. The body is
- * cancelled unread, so an event stream that stays open cannot hold the process.
+ * Probe `url` for an MCP server the way a dual-era client does: POST `server/discover`
+ * with the MCP 2026-07-28 request headers and `_meta`, and, unless that identified a
+ * server, a minimal legacy `initialize`. Returns one outcome per probe sent. Neither
+ * probe ever fails preflight; a network error or timeout on server/discover still lets
+ * initialize run, because a legacy server may not answer an unknown method at all.
  */
-async function probeMcpServer(url: URL, deployToken: string | undefined, version: string): Promise<McpOutcome> {
+async function probeMcpServer(url: URL, deployToken: string | undefined, version: string): Promise<McpOutcome[]> {
+  const clientInfo = { name: "cf-webmcp-preflight", version };
+  const discover = await postMcpProbe(
+    url,
+    "server/discover",
+    {
+      _meta: {
+        "io.modelcontextprotocol/protocolVersion": MCP_MODERN_VERSION,
+        "io.modelcontextprotocol/clientInfo": clientInfo,
+        "io.modelcontextprotocol/clientCapabilities": {},
+      },
+    },
+    { "mcp-protocol-version": MCP_MODERN_VERSION, "mcp-method": "server/discover" },
+    deployToken,
+    version,
+  );
+  if (discover.kind === "mcp") return [discover];
+  const initialize = await postMcpProbe(
+    url,
+    "initialize",
+    { protocolVersion: "2025-06-18", capabilities: {}, clientInfo },
+    {},
+    deployToken,
+    version,
+  );
+  return [discover, initialize];
+}
+
+/**
+ * POST one JSON-RPC 2.0 probe request to `url`. A 200 with a JSON or event-stream content
+ * type means an MCP server answers at that path on origin; so does, for server/discover
+ * only, a 400 JSON answer whose error code is one of MCP_MODERN_ERROR_CODES. That body is
+ * read up to MCP_ERROR_BODY_MAX_BYTES; every other body is cancelled unread, so an event
+ * stream that stays open cannot hold the process.
+ */
+async function postMcpProbe(
+  url: URL,
+  probe: McpProbe,
+  params: Record<string, unknown>,
+  extraHeaders: Record<string, string>,
+  deployToken: string | undefined,
+  version: string,
+): Promise<McpOutcome> {
   const headers = {
     ...originHeaders(deployToken, version),
     "content-type": "application/json",
     accept: "application/json, text/event-stream",
+    ...extraHeaders,
   };
-  const body = JSON.stringify({
-    jsonrpc: "2.0",
-    id: 1,
-    method: "initialize",
-    params: {
-      protocolVersion: "2025-06-18",
-      capabilities: {},
-      clientInfo: { name: "cf-webmcp-preflight", version },
-    },
-  });
+  const body = JSON.stringify({ jsonrpc: "2.0", id: 1, method: probe, params });
   try {
     const res = await fetch(url.toString(), {
       method: "POST",
@@ -533,18 +590,42 @@ async function probeMcpServer(url: URL, deployToken: string | undefined, version
       signal: AbortSignal.timeout(MCP_PROBE_TIMEOUT_MS),
     });
     const contentType = res.headers.get("content-type") ?? "";
+    if (probe === "server/discover" && res.status === 400 && /^application\/json\s*(?:;|$)/i.test(contentType)) {
+      const errorCode = await modernMcpErrorCode(res);
+      if (errorCode !== undefined) return { kind: "mcp", probe, status: res.status, contentType, errorCode };
+      return { kind: "none", probe, status: res.status, contentType };
+    }
     await res.body?.cancel().catch(() => {});
     if (res.status === 200 && MCP_CONTENT_TYPE.test(contentType)) {
-      return { kind: "mcp", status: res.status, contentType };
+      return { kind: "mcp", probe, status: res.status, contentType };
     }
-    return { kind: "none", status: res.status, contentType };
+    return { kind: "none", probe, status: res.status, contentType };
   } catch (e) {
-    return { kind: "skipped", reason: (e as Error).message };
+    return { kind: "skipped", probe, reason: (e as Error).message };
+  }
+}
+
+/** The MCP error code of a JSON-RPC error body, when it is one of MCP_MODERN_ERROR_CODES. */
+async function modernMcpErrorCode(res: Response): Promise<number | undefined> {
+  if (declaredLength(res) > MCP_ERROR_BODY_MAX_BYTES) {
+    await res.body?.cancel().catch(() => {});
+    return undefined;
+  }
+  const read = await readCapped(res.body, MCP_ERROR_BODY_MAX_BYTES);
+  if (read.kind === "too_large") {
+    await read.rest.cancel().catch(() => {});
+    return undefined;
+  }
+  try {
+    const code = (JSON.parse(new TextDecoder().decode(read.bytes)) as { error?: { code?: unknown } } | null)?.error?.code;
+    return typeof code === "number" && MCP_MODERN_ERROR_CODES.has(code) ? code : undefined;
+  } catch {
+    return undefined;
   }
 }
 
 function formatMcpRow(label: string, outcome: McpOutcome): string {
-  const row = `${label} (POST initialize)`.padEnd(34);
+  const row = `${label} (POST ${outcome.probe})`.padEnd(34);
   switch (outcome.kind) {
     case "mcp":
       return `  ${row} ${String(outcome.status).padEnd(3)} ${outcome.contentType.padEnd(28)} → WARNING (an MCP server answers at origin)`;
@@ -553,6 +634,13 @@ function formatMcpRow(label: string, outcome: McpOutcome): string {
     case "skipped":
       return `  ${row} ERR                              → not checked (${outcome.reason})`;
   }
+}
+
+/** What identified the MCP server, for the warning: the probe and its answer. */
+function mcpEvidence(outcome: Extract<McpOutcome, { kind: "mcp" }>): string {
+  return outcome.errorCode !== undefined
+    ? `POST ${outcome.probe} returned ${outcome.status} with MCP error ${outcome.errorCode}`
+    : `POST ${outcome.probe} returned ${outcome.status} ${outcome.contentType}`;
 }
 
 function formatRow(check: PathCheck, outcome: Outcome): string {
@@ -712,11 +800,12 @@ export async function runPreflight(configPath: string, force: boolean, opts: Pre
   // It is worth a warning, because that is a change from the days the landing answered
   // every method.
   for (const landingPath of mcpProbePaths(config)) {
-    const outcome = await probeMcpServer(probeUrl(base, landingPath), deployToken, version);
-    log(formatMcpRow(landingPath, outcome));
-    if (outcome.kind === "mcp") {
+    const outcomes = await probeMcpServer(probeUrl(base, landingPath), deployToken, version);
+    for (const outcome of outcomes) log(formatMcpRow(landingPath, outcome));
+    const found = outcomes.find((o) => o.kind === "mcp");
+    if (found?.kind === "mcp") {
       warnings.push(
-        `${landingPath}: an MCP server answers here at origin (POST initialize returned 200 ${outcome.contentType}). ` +
+        `${landingPath}: an MCP server answers here at origin (${mcpEvidence(found)}). ` +
           `On the Worker, GET and HEAD requests get the landing page unless their Accept header asks for text/event-stream; ` +
           `every other method goes to origin, so MCP clients keep reaching that server.`,
       );
