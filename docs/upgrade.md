@@ -1,5 +1,11 @@
 # Upgrades and versioning
 
+## v0.6.2
+
+Patch release. No config changes. The Worker's code is unchanged, only preflight's is, so a deployed Worker needs no redeploy. A Worker built from v0.6.2 differs from one built from v0.6.1 as at every version change: its origin requests name `cf-webmcp/0.6.2` in the User-Agent, and tool-call results cached under v0.6.1 are not reused.
+
+- **Preflight finds MCP servers that speak MCP 2026-07-28.** That revision dropped the `initialize` handshake, and a server that speaks only it rejects a legacy `initialize` with `400`, because the request carries no `Mcp-Method` header. v0.6.1 preflight sent only `initialize`, so it reported such a server at the landing path as "no MCP server". Preflight now asks the way a client that speaks every revision does: it POSTs a JSON-RPC `server/discover` with `MCP-Protocol-Version: 2026-07-28` and `Mcp-Method: server/discover` first, and, unless that found a server, the `initialize` it sent before. A server counts as found when either probe gets `200` with JSON or an event stream, or `server/discover` gets `400` with one of the MCP errors `-32020`, `-32021` or `-32022` (preflight reads the first 64 KiB of that answer). Each probe gets its own row, `/mcp (POST server/discover)` and `/mcp (POST initialize)`, and the warning names the probe that found the server. A failed `server/discover` still lets `initialize` run. A server that answers `server/discover` gets no `initialize`, so preflight no longer opens a session there. See [Preflight](deployment.md#preflight).
+
 ## v0.6.1
 
 Patch release. No config changes, unless a selector has a combinator inside `:not()`.
